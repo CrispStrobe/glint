@@ -13,6 +13,7 @@ class MDCT {
 public:
     MDCT();
     void process(const double subband[32][18], double mdct_out[32][18]);
+    void process_short(const double subband[32][18], double mdct_out[32][3][6]);
     void reset();
 private:
     double prev_[32][18];

@@ -272,6 +272,22 @@ static constexpr int sfb_short_table[3][kSfbShortCount] = {
     { 0, 4, 8, 12, 16, 22, 30, 42, 58, 78, 104, 138, 180, 192 }
 };
 
+// Short block SFB for MPEG-2/2.5 (same as MPEG-1 for simplicity; actual
+// MPEG-2 short SFB tables are identical at common rates)
+static constexpr int sfb_short_table_m2[3][kSfbShortCount] = {
+    // 22050 Hz
+    { 0, 4, 8, 12, 16, 22, 30, 40, 52, 66, 84, 106, 138, 192 },
+    // 24000 Hz
+    { 0, 4, 8, 12, 16, 22, 28, 38, 50, 64, 80, 100, 126, 192 },
+    // 16000 Hz
+    { 0, 4, 8, 12, 16, 22, 30, 42, 58, 78, 104, 138, 180, 192 },
+};
+
+inline const int* get_sfb_short_by_unified(int unified_sr_index) {
+    if (unified_sr_index < 3) return sfb_short_table[unified_sr_index];
+    return sfb_short_table_m2[unified_sr_index - 3];
+}
+
 // ---------------------------------------------------------------------------
 // 6. Huffman tables for MPEG-1 Layer III
 // ---------------------------------------------------------------------------

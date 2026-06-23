@@ -130,6 +130,68 @@ void MDCT::process(const double subband[32][18], double mdct_out[32][18]) {
     }
 }
 
+// Short-block MDCT: 12-point transform, 3 windows per subband
+// ISO 11172-3: X[win][k] = sum_{n=0}^{11} z[n] * cos(pi/24 * (2n+7) * (2k+1))
+// Window: sin(pi/12 * (n + 0.5))
+
+static double short_win_d[12];
+static double short_cos_d[12][6];
+static bool short_mdct_init = false;
+
+static void init_short_mdct_d() {
+    if (short_mdct_init) return;
+    constexpr double PI = 3.14159265358979323846;
+    for (int n = 0; n < 12; n++) {
+        short_win_d[n] = std::sin(PI / 12.0 * (n + 0.5));
+        for (int k = 0; k < 6; k++)
+            short_cos_d[n][k] = std::cos(PI / 24.0 * (2.0*n + 7.0) * (2.0*k + 1.0));
+    }
+    short_mdct_init = true;
+}
+
+void MDCT::process_short(const double subband[32][18], double mdct_out[32][3][6]) {
+    init_short_mdct_d();
+
+    for (int sb = 0; sb < 32; sb++) {
+        // For short blocks, we have 18 samples from prev + 18 from current = 36
+        // These are divided into 3 overlapping windows of 12 samples each:
+        //   Window 0: samples [0..11]  (6 from prev, 6 from current)
+        //   Window 1: samples [6..17]  (from current, offset by 6)
+        //   Window 2: samples [12..23] (from current, offset by 12)
+        // But we only have prev[0..17] and current subband[0..17].
+        // Mapping: prev_[sb][0..17] are previous granule's 18 samples
+        //          subband[sb][0..17] are current granule's 18 samples
+        // Full 36-sample buffer: x[0..17] = prev, x[18..35] = current
+        // Short windows are centered in the long block window:
+        //   Window 0: x[6..17]   (samples from prev)
+        //   Window 1: x[12..23]  (6 from prev + 6 from current)
+        //   Window 2: x[18..29]  (samples from current)
+
+        double x[36];
+        for (int n = 0; n < 18; n++) x[n] = prev_[sb][n];
+        for (int n = 0; n < 18; n++) x[n + 18] = subband[sb][n];
+
+        for (int win = 0; win < 3; win++) {
+            int offset = 6 + win * 6;  // start of 12-sample window within 36-sample block
+
+            // Apply window and compute MDCT
+            double z[12];
+            for (int n = 0; n < 12; n++)
+                z[n] = x[offset + n] * short_win_d[n];
+
+            for (int k = 0; k < 6; k++) {
+                double sum = 0.0;
+                for (int n = 0; n < 12; n++)
+                    sum += z[n] * short_cos_d[n][k];
+                mdct_out[sb][win][k] = sum / 96.0;  // normalization for 12-point
+            }
+        }
+
+        // Save current samples for next call's overlap
+        for (int n = 0; n < 18; n++) prev_[sb][n] = subband[sb][n];
+    }
+}
+
 void alias_reduce_d(double mdct_out[32][18]) {
     for (int sb = 0; sb < 31; sb++) {
 

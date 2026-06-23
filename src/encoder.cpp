@@ -13,6 +13,111 @@
 
 using namespace glint;
 
+// Reorder short-block MDCT coefficients from [subband][window][freq] to
+// the order expected by the decoder: grouped by scalefactor band, then
+// window interleaved.  ISO 11172-3 B.8 short block reorder.
+// Input:  mdct_short[32][3][6] = 576 coefficients
+// Output: flat[576] reordered for Huffman encoding
+static void reorder_short_blocks(const double mdct_short[32][3][6],
+                                 double flat[576], int sr_index) {
+    const int* sfb = tables::get_sfb_short_by_unified(sr_index);
+    // Zero the output
+    std::memset(flat, 0, 576 * sizeof(double));
+
+    // Short block SFB boundaries are per-window (max 192 lines per window).
+    // Total output is 3 * 192 = 576.
+    // The reorder maps: for each SFB band, for each window, for each freq line
+    // in that band, write sequentially.
+    int out_idx = 0;
+    for (int sfbi = 0; sfbi < 13; sfbi++) {
+        int width = sfb[sfbi + 1] - sfb[sfbi];
+        for (int win = 0; win < 3; win++) {
+            for (int j = 0; j < width; j++) {
+                int freq = sfb[sfbi] + j;
+                // freq is the index within a single window's 192 lines
+                // Map to [subband][freq_within_subband]:
+                // Each subband contributes 6 freq lines, so:
+                int sb = freq / 6;
+                int k = freq % 6;
+                if (sb < 32) {
+                    flat[out_idx] = mdct_short[sb][win][k];
+                }
+                out_idx++;
+            }
+        }
+    }
+}
+
+// Determine Huffman regions for short blocks.
+// Short blocks use only 2 regions (region0 + region1) with fixed boundaries:
+// region0_count = 8, region1_count = 0 (only 1 region effectively).
+// The big_values region covers up to the last non-zero pair.
+static HuffRegions determine_regions_short(const int* ix, int sr_index) {
+    HuffRegions r{};
+
+    // Find rzero: last nonzero value
+    int rzero = 576;
+    while (rzero > 0 && ix[rzero - 1] == 0) rzero--;
+
+    // Find count1 boundary
+    int count1_start = rzero;
+    count1_start = (count1_start + 3) & ~3;
+    if (count1_start > rzero) count1_start = rzero;
+
+    while (count1_start >= 4) {
+        bool all_small = true;
+        for (int i = count1_start - 4; i < count1_start; i++) {
+            if (i < 576 && std::abs(ix[i]) > 1) {
+                all_small = false;
+                break;
+            }
+        }
+        if (!all_small) break;
+        count1_start -= 4;
+    }
+
+    if (count1_start & 1) count1_start++;
+
+    r.big_values = count1_start / 2;
+    r.count1 = (rzero - count1_start) / 4;
+    if (r.count1 < 0) r.count1 = 0;
+    r.rzero = rzero;
+
+    // For short blocks with window_switching_flag=1, the decoder computes
+    // region boundaries as: region0_end = 36, region1_end = big_values*2.
+    // We set region0_count so that sfb_long[region0_count+1] == 36, which
+    // makes huffman_count_bits/huffman_encode compute the right boundaries.
+    // For all MPEG-1 rates: sfb_long[8] = 36, so region0_count = 7.
+    // For MPEG-2 rates: sfb_long_m2[6] = 36, so region0_count = 5.
+    const int* sfb_long = tables::get_sfb_long_by_unified(sr_index);
+    int r0c = 7;  // default for MPEG-1
+    for (int b = 0; b < 21; b++) {
+        if (sfb_long[b + 1] >= 36) {
+            r0c = b;
+            break;
+        }
+    }
+    r.region0_count = r0c;
+    r.region1_count = 0;
+
+    int region0_end = 36;
+    if (region0_end > count1_start) region0_end = count1_start;
+
+    r.table_select[0] = select_best_table(ix, 0, region0_end);
+    r.table_select[1] = select_best_table(ix, region0_end, count1_start);
+    r.table_select[2] = 0;  // not used for short blocks
+
+    // Choose count1 table
+    int bits_a = 0, bits_b = 0;
+    for (int i = count1_start; i + 3 < rzero; i += 4) {
+        bits_a += tables::count1_code_length(32, ix[i], ix[i+1], ix[i+2], ix[i+3]);
+        bits_b += tables::count1_code_length(33, ix[i], ix[i+1], ix[i+2], ix[i+3]);
+    }
+    r.count1table = (bits_b < bits_a) ? 1 : 0;
+
+    return r;
+}
+
 // Transient detection: compares energy between consecutive granules.
 // Returns true if a transient (>9 dB energy jump) is detected.
 static bool detect_transient(const double subband_out[32][36], int gr,
@@ -139,12 +244,21 @@ static void write_granule_side_info(BitstreamWriter& bs, const GranuleInfo& gi,
         // MPEG-2/2.5: scalefac_compress is 9 bits
         bs.write_bits(gi.scalefac_compress, 9);
     }
-    bs.write_bits(0, 1);  // window_switching_flag = 0 (long blocks)
-    bs.write_bits(gi.regions.table_select[0], 5);
-    bs.write_bits(gi.regions.table_select[1], 5);
-    bs.write_bits(gi.regions.table_select[2], 5);
-    bs.write_bits(gi.regions.region0_count, 4);
-    bs.write_bits(gi.regions.region1_count, 3);
+    bs.write_bits(gi.block_type != 0 ? 1 : 0, 1);  // window_switching_flag
+    if (gi.block_type != 0) {
+        bs.write_bits(gi.block_type, 2);     // block_type (2 = short)
+        bs.write_bits(0, 1);                 // mixed_block_flag
+        bs.write_bits(gi.regions.table_select[0], 5);
+        bs.write_bits(gi.regions.table_select[1], 5);
+        // subblock_gain[0..2] (3 x 3 bits)
+        bs.write_bits(0, 3); bs.write_bits(0, 3); bs.write_bits(0, 3);
+    } else {
+        bs.write_bits(gi.regions.table_select[0], 5);
+        bs.write_bits(gi.regions.table_select[1], 5);
+        bs.write_bits(gi.regions.table_select[2], 5);
+        bs.write_bits(gi.regions.region0_count, 4);
+        bs.write_bits(gi.regions.region1_count, 3);
+    }
     if (mpeg_version == 1) {
         bs.write_bits(gi.preflag, 1);
     }
@@ -239,24 +353,42 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                         sub_gr[sb][ts] = ((sb & 1) && (ts & 1)) ? -v : v;
                     }
 
-                double mdct_out[32][18];
-                enc->mdct[ch].process(sub_gr, mdct_out);
-                alias_reduce_d(mdct_out);
+                bool use_short = transient_detected && enc->quality_mode >= 1;
 
-                double mdct_flat[576];
-                for (int sb = 0; sb < 32; sb++)
-                    for (int k = 0; k < 18; k++)
-                        mdct_flat[sb * 18 + k] = mdct_out[sb][k];
+                if (use_short) {
+                    // Short-block path
+                    double mdct_out_short[32][3][6];
+                    enc->mdct[ch].process_short(sub_gr, mdct_out_short);
+                    // No alias reduction for short blocks (ISO spec)
 
-                granule_info[gr][ch] = quantize_granule(mdct_flat, bits_per_granule,
-                                                         enc->sr_index, enc->quality_mode);
+                    // Reorder to flat 576 array
+                    double mdct_flat[576];
+                    reorder_short_blocks(mdct_out_short, mdct_flat, enc->sr_index);
 
-                // On transient, boost low-band scalefactors to spread noise to
-                // higher frequencies, reducing pre-echo perception
-                if (transient_detected && enc->quality_mode >= 1) {
-                    GranuleInfo& info = granule_info[gr][ch];
-                    for (int b = 0; b < 5; b++)
-                        info.scalefac[b] = std::min(info.scalefac[b] + 2, 7);
+                    granule_info[gr][ch] = quantize_granule(mdct_flat, bits_per_granule,
+                                                             enc->sr_index, enc->quality_mode);
+                    granule_info[gr][ch].block_type = 2;
+
+                    // Re-determine regions for short blocks
+                    granule_info[gr][ch].regions = determine_regions_short(
+                        granule_info[gr][ch].ix, enc->sr_index);
+                    granule_info[gr][ch].part2_3_length = granule_info[gr][ch].part2_length +
+                        huffman_count_bits(granule_info[gr][ch].ix,
+                                           granule_info[gr][ch].regions, enc->sr_index);
+                } else {
+                    // Long-block path
+                    double mdct_out[32][18];
+                    enc->mdct[ch].process(sub_gr, mdct_out);
+                    alias_reduce_d(mdct_out);
+
+                    double mdct_flat[576];
+                    for (int sb = 0; sb < 32; sb++)
+                        for (int k = 0; k < 18; k++)
+                            mdct_flat[sb * 18 + k] = mdct_out[sb][k];
+
+                    granule_info[gr][ch] = quantize_granule(mdct_flat, bits_per_granule,
+                                                             enc->sr_index, enc->quality_mode);
+                    granule_info[gr][ch].block_type = 0;
                 }
 
                 total_main_bits += granule_info[gr][ch].part2_3_length;
@@ -333,12 +465,17 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
     int scfsi[2][4] = {};
     if (num_gr == 2) {
         for (int ch = 0; ch < nch; ch++) {
+            // SCFSI not allowed when either granule uses short blocks
+            bool has_short = (granule_info[0][ch].block_type != 0) ||
+                             (granule_info[1][ch].block_type != 0);
             for (int group = 0; group < 4; group++) {
-                bool match = true;
-                for (int b = scfsi_band[group]; b < scfsi_band[group+1] && b < 21; b++) {
-                    if (granule_info[0][ch].scalefac[b] != granule_info[1][ch].scalefac[b]) {
-                        match = false;
-                        break;
+                bool match = !has_short;
+                if (match) {
+                    for (int b = scfsi_band[group]; b < scfsi_band[group+1] && b < 21; b++) {
+                        if (granule_info[0][ch].scalefac[b] != granule_info[1][ch].scalefac[b]) {
+                            match = false;
+                            break;
+                        }
                     }
                 }
                 scfsi[ch][group] = match ? 1 : 0;
@@ -585,24 +722,37 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
                     sub_gr[sb][ts] = ((sb & 1) && (ts & 1)) ? -v : v;
                 }
 
-            double mdct_out[32][18];
-            enc->mdct[ch].process(sub_gr, mdct_out);
-            alias_reduce_d(mdct_out);
+            bool use_short = transient_detected && enc->quality_mode >= 1;
 
-            double mdct_flat[576];
-            for (int sb = 0; sb < 32; sb++)
-                for (int k = 0; k < 18; k++)
-                    mdct_flat[sb * 18 + k] = mdct_out[sb][k];
+            if (use_short) {
+                double mdct_out_short[32][3][6];
+                enc->mdct[ch].process_short(sub_gr, mdct_out_short);
 
-            granule_info[gr][ch] = quantize_granule(mdct_flat, bits_per_granule,
-                                                     enc->sr_index, enc->quality_mode);
+                double mdct_flat[576];
+                reorder_short_blocks(mdct_out_short, mdct_flat, enc->sr_index);
 
-            // On transient, boost low-band scalefactors to spread noise to
-            // higher frequencies, reducing pre-echo perception
-            if (transient_detected && enc->quality_mode >= 1) {
-                GranuleInfo& info = granule_info[gr][ch];
-                for (int b = 0; b < 5; b++)
-                    info.scalefac[b] = std::min(info.scalefac[b] + 2, 7);
+                granule_info[gr][ch] = quantize_granule(mdct_flat, bits_per_granule,
+                                                         enc->sr_index, enc->quality_mode);
+                granule_info[gr][ch].block_type = 2;
+
+                granule_info[gr][ch].regions = determine_regions_short(
+                    granule_info[gr][ch].ix, enc->sr_index);
+                granule_info[gr][ch].part2_3_length = granule_info[gr][ch].part2_length +
+                    huffman_count_bits(granule_info[gr][ch].ix,
+                                       granule_info[gr][ch].regions, enc->sr_index);
+            } else {
+                double mdct_out[32][18];
+                enc->mdct[ch].process(sub_gr, mdct_out);
+                alias_reduce_d(mdct_out);
+
+                double mdct_flat[576];
+                for (int sb = 0; sb < 32; sb++)
+                    for (int k = 0; k < 18; k++)
+                        mdct_flat[sb * 18 + k] = mdct_out[sb][k];
+
+                granule_info[gr][ch] = quantize_granule(mdct_flat, bits_per_granule,
+                                                         enc->sr_index, enc->quality_mode);
+                granule_info[gr][ch].block_type = 0;
             }
 
             total_main_bits += granule_info[gr][ch].part2_3_length;
@@ -618,12 +768,16 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
     int scfsi[2][4] = {};
     if (num_gr == 2) {
         for (int ch = 0; ch < nch; ch++) {
+            bool has_short = (granule_info[0][ch].block_type != 0) ||
+                             (granule_info[1][ch].block_type != 0);
             for (int group = 0; group < 4; group++) {
-                bool match = true;
-                for (int b = scfsi_band[group]; b < scfsi_band[group+1] && b < 21; b++) {
-                    if (granule_info[0][ch].scalefac[b] != granule_info[1][ch].scalefac[b]) {
-                        match = false;
-                        break;
+                bool match = !has_short;
+                if (match) {
+                    for (int b = scfsi_band[group]; b < scfsi_band[group+1] && b < 21; b++) {
+                        if (granule_info[0][ch].scalefac[b] != granule_info[1][ch].scalefac[b]) {
+                            match = false;
+                            break;
+                        }
                     }
                 }
                 scfsi[ch][group] = match ? 1 : 0;

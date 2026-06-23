@@ -19,6 +19,7 @@ struct GranuleInfo {
     HuffRegions regions;
     int preflag;
     int scalefac_scale;
+    int block_type;  // 0 = long (normal), 2 = short
 };
 
 GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
