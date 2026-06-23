@@ -43,3 +43,10 @@ endif()
 add_executable(glint_cli cli/main.cpp)
 target_link_libraries(glint_cli PRIVATE glint_static)
 target_include_directories(glint_cli PRIVATE src)
+
+# Unit tests
+enable_testing()
+add_executable(glint_test tests/test_unit.cpp)
+target_link_libraries(glint_test PRIVATE glint_static)
+target_include_directories(glint_test PRIVATE src)
+add_test(NAME unit_tests COMMAND glint_test)

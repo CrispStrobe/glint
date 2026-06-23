@@ -33,6 +33,21 @@ jobs:
       - name: Build
         run: cmake --build build --config Release -j
 
+      - name: Unit tests
+        shell: bash
+        run: |
+          if [ -f build/Release/glint_test.exe ]; then
+            build/Release/glint_test.exe
+          elif [ -f build/glint_test ]; then
+            build/glint_test
+          else
+            echo "Test binary not found, skipping"
+          fi
+
+      - name: Quality tests
+        if: runner.os == 'Linux' && matrix.os == 'ubuntu-latest'
+        run: python3 tests/test_quality.py build/glint_cli
+
       - name: Smoke test (encode sine wave)
         shell: bash
         run: |
