@@ -904,11 +904,12 @@ inline void init_tables() {
         for (int k = 0; k < 18; ++k) {
             double angle = PI / 72.0 * (2.0 * n + 19.0) * (2.0 * k + 1.0);
             double val = std::cos(angle);
-            // Convert to Q31
+            // Convert to Q31 with clamping
             double scaled = val * 2147483648.0;
-            mdct_cos[n][k] = static_cast<int32_t>(
-                scaled + (scaled >= 0 ? 0.5 : -0.5)
-            );
+            double rounded = scaled + (scaled >= 0 ? 0.5 : -0.5);
+            if (rounded > 2147483647.0) rounded = 2147483647.0;
+            if (rounded < -2147483648.0) rounded = -2147483648.0;
+            mdct_cos[n][k] = static_cast<int32_t>(rounded);
         }
     }
 
@@ -954,9 +955,12 @@ inline void init_tables() {
             double angle = (2.0 * i + 1.0) * (k - 16.0) * PI / 64.0;
             double val = std::cos(angle);
             double scaled = val * 2147483648.0;
-            subband_matrix[i][k] = static_cast<int32_t>(
-                scaled + (scaled >= 0 ? 0.5 : -0.5)
-            );
+            // Clamp to Q31 range: cos(0) = 1.0 overflows Q31 (max representable
+            // value is (2^31-1)/2^31 ≈ 0.9999999995). Clamp to INT32_MAX.
+            double rounded = scaled + (scaled >= 0 ? 0.5 : -0.5);
+            if (rounded > 2147483647.0) rounded = 2147483647.0;
+            if (rounded < -2147483648.0) rounded = -2147483648.0;
+            subband_matrix[i][k] = static_cast<int32_t>(rounded);
         }
     }
 

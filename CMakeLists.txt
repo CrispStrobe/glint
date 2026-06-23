@@ -4,6 +4,13 @@ project(glint VERSION 1.0.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Signal path mode:
+#   double (default) — double-precision only
+#   fixed            — Q31 fixed-point only
+#   both             — both compiled in, selectable at runtime via CLI -p flag
+set(GLINT_MODE "double" CACHE STRING "Signal path: double, fixed, or both")
+set_property(CACHE GLINT_MODE PROPERTY STRINGS double fixed both)
+
 set(GLINT_SOURCES
     src/subband.cpp
     src/mdct.cpp
@@ -23,6 +30,14 @@ set_target_properties(glint_static PROPERTIES OUTPUT_NAME glint)
 add_library(glint_shared SHARED ${GLINT_SOURCES})
 target_include_directories(glint_shared PUBLIC include PRIVATE src)
 set_target_properties(glint_shared PROPERTIES OUTPUT_NAME glint)
+
+if(GLINT_MODE STREQUAL "fixed")
+    target_compile_definitions(glint_static PUBLIC GLINT_FIXED_POINT)
+    target_compile_definitions(glint_shared PUBLIC GLINT_FIXED_POINT)
+elseif(GLINT_MODE STREQUAL "both")
+    target_compile_definitions(glint_static PUBLIC GLINT_FIXED_POINT GLINT_BOTH_PATHS)
+    target_compile_definitions(glint_shared PUBLIC GLINT_FIXED_POINT GLINT_BOTH_PATHS)
+endif()
 
 # CLI
 add_executable(glint_cli cli/main.cpp)

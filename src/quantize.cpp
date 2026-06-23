@@ -79,8 +79,8 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
     info.part2_length = 0;
     int target_bits = available_bits;
 
-    // Compute minimum gain to prevent ix=8191 clipping.
-    // Find peak MDCT coefficient and derive the gain floor.
+    // Compute minimum gain to prevent clipping (ix > 8191).
+    // Find the peak MDCT coefficient and determine the gain floor.
     double max_abs = 0.0;
     for (int i = 0; i < 576; i++) {
         double v = std::fabs(mdct_in[i]);
@@ -90,6 +90,8 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
     if (max_abs > 0.0) {
         double pow34_peak = fast_pow34(max_abs);
         // Need: pow34_peak * 2^(-3*(g-210)/16) + 0.4054 < 8191
+        // pow34_peak * 2^(-3*(g-210)/16) < 8190.6
+        // -3*(g-210)/16 < log2(8190.6 / pow34_peak)
         // g > 210 - (16/3) * log2(8190.6 / pow34_peak)
         if (pow34_peak > 0.0) {
             double ratio = 8190.0 / pow34_peak;

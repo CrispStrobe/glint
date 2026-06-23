@@ -1,0 +1,1 @@
+/usr/bin/c++ -O3 -DNDEBUG CMakeFiles/glint_cli.dir/cli/main.cpp.o -o glint_cli  libglint.a 

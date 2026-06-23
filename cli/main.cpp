@@ -90,11 +90,15 @@ static void print_usage(const char* prog) {
     fprintf(stderr, "Options:\n");
     fprintf(stderr, "  -b BITRATE   Bitrate in kbps (default: 128)\n");
     fprintf(stderr, "  -m MODE      mono|stereo|joint (default: auto)\n");
+#ifdef GLINT_BOTH_PATHS
+    fprintf(stderr, "  -p PATH      double|fixed (default: fixed)\n");
+#endif
 }
 
 int main(int argc, char** argv) {
     int bitrate = 128;
     const char* mode_str = nullptr;
+    const char* path_str = nullptr;
     const char* input_path = nullptr;
     const char* output_path = nullptr;
 
@@ -104,6 +108,8 @@ int main(int argc, char** argv) {
             bitrate = atoi(argv[++i]);
         } else if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) {
             mode_str = argv[++i];
+        } else if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) {
+            path_str = argv[++i];
         } else if (!input_path) {
             input_path = argv[i];
         } else if (!output_path) {
@@ -174,6 +180,18 @@ int main(int argc, char** argv) {
     cfg.num_channels = enc_channels;
     cfg.mode = mode;
     cfg.bitrate = bitrate;
+    cfg.path = GLINT_PATH_DEFAULT;
+    if (path_str) {
+        if (strcmp(path_str, "double") == 0 || strcmp(path_str, "d") == 0)
+            cfg.path = GLINT_PATH_DOUBLE;
+        else if (strcmp(path_str, "fixed") == 0 || strcmp(path_str, "f") == 0)
+            cfg.path = GLINT_PATH_FIXED;
+        else {
+            fprintf(stderr, "Error: invalid path '%s' (use double or fixed)\n", path_str);
+            fclose(wav_file);
+            return 1;
+        }
+    }
 
     glint_t enc = glint_create(&cfg);
     if (!enc) {

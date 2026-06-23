@@ -74,9 +74,22 @@ glint_t glint_create(const glint_config* cfg) {
     ctx->reservoir_buf_write = 0;
     ctx->reservoir_buf_size = 0;
 
+    // Determine signal path
+#ifdef GLINT_BOTH_PATHS
+    ctx->use_fixed_point = (cfg->path != GLINT_PATH_DOUBLE);
+#elif defined(GLINT_FIXED_POINT)
+    ctx->use_fixed_point = true;
+#else
+    ctx->use_fixed_point = false;
+#endif
+
     for (int ch = 0; ch < ctx->num_channels; ch++) {
         ctx->subband[ch].reset();
         ctx->mdct[ch].reset();
+#ifdef GLINT_FIXED_POINT
+        ctx->subband_fp[ch].reset();
+        ctx->mdct_fp[ch].reset();
+#endif
     }
 
     return ctx;
@@ -152,58 +165,152 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
     int bits_per_granule = available_bits / (num_gr * nch);
     if (bits_per_granule < 0) bits_per_granule = 0;
 
-    // Step 1: Subband analysis (double-precision for spectral accuracy)
     int num_slots = num_gr * 18;
-    double subband_out[2][32][36];
-    for (int ch = 0; ch < nch; ch++)
-        enc->subband[ch].analyze(channel_data[ch], subband_out[ch], num_slots);
-
-    // Step 2-3: MDCT + Quantize
     GranuleInfo granule_info[2][2];
     int total_main_bits = 0;
     int mode_ext = 0;
 
-    for (int gr = 0; gr < num_gr; gr++) {
-        double sub_18[2][32][18];
+    // Helper lambda: encode one frame through the double-precision path
+    auto encode_double = [&]() {
+        double subband_out_d[2][32][36];
         for (int ch = 0; ch < nch; ch++)
-            for (int sb = 0; sb < 32; sb++)
-                for (int ts = 0; ts < 18; ts++)
-                    sub_18[ch][sb][ts] = subband_out[ch][sb][gr * 18 + ts];
+            enc->subband[ch].analyze(channel_data[ch], subband_out_d[ch], num_slots);
 
-        if (use_ms) {
-            for (int sb = 0; sb < 32; sb++)
-                for (int ts = 0; ts < 18; ts++) {
-                    double l = sub_18[0][sb][ts], r = sub_18[1][sb][ts];
-                    sub_18[0][sb][ts] = (l + r) * 0.7071067811865476;
-                    sub_18[1][sb][ts] = (l - r) * 0.7071067811865476;
-                }
-            mode_ext = 2;
+        for (int gr = 0; gr < num_gr; gr++) {
+            double sub_18[2][32][18];
+            for (int ch = 0; ch < nch; ch++)
+                for (int sb = 0; sb < 32; sb++)
+                    for (int ts = 0; ts < 18; ts++)
+                        sub_18[ch][sb][ts] = subband_out_d[ch][sb][gr * 18 + ts];
+
+            if (use_ms) {
+                for (int sb = 0; sb < 32; sb++)
+                    for (int ts = 0; ts < 18; ts++) {
+                        double l = sub_18[0][sb][ts], r = sub_18[1][sb][ts];
+                        sub_18[0][sb][ts] = (l + r) * 0.7071067811865476;
+                        sub_18[1][sb][ts] = (l - r) * 0.7071067811865476;
+                    }
+                mode_ext = 2;
+            }
+
+            for (int ch = 0; ch < nch; ch++) {
+                for (int sb = 1; sb < 32; sb += 2)
+                    for (int ts = 1; ts < 18; ts += 2)
+                        sub_18[ch][sb][ts] = -sub_18[ch][sb][ts];
+
+                double mdct_out[32][18];
+                enc->mdct[ch].process(sub_18[ch], mdct_out);
+                alias_reduce_d(mdct_out);
+
+                double mdct_flat[576];
+                for (int sb = 0; sb < 32; sb++)
+                    for (int k = 0; k < 18; k++)
+                        mdct_flat[sb * 18 + k] = mdct_out[sb][k];
+
+                granule_info[gr][ch] = quantize_granule(mdct_flat, bits_per_granule,
+                                                         enc->sr_index);
+                total_main_bits += granule_info[gr][ch].part2_3_length;
+            }
         }
+    };
 
+#ifdef GLINT_FIXED_POINT
+    // Helper lambda: encode one frame through the fixed-point Q24 path
+    auto encode_fixed = [&]() {
+        int32_t subband_out_fp[2][32][36];
+        for (int ch = 0; ch < nch; ch++)
+            enc->subband_fp[ch].analyze(channel_data[ch], subband_out_fp[ch], num_slots);
+
+        for (int gr = 0; gr < num_gr; gr++) {
+            int32_t sub_18[2][32][18];
+            for (int ch = 0; ch < nch; ch++)
+                for (int sb = 0; sb < 32; sb++)
+                    for (int ts = 0; ts < 18; ts++)
+                        sub_18[ch][sb][ts] = subband_out_fp[ch][sb][gr * 18 + ts];
+
+            if (use_ms) {
+                for (int sb = 0; sb < 32; sb++)
+                    for (int ts = 0; ts < 18; ts++) {
+                        int32_t l = sub_18[0][sb][ts], r = sub_18[1][sb][ts];
+                        int64_t sum64 = static_cast<int64_t>(l) + r;
+                        int64_t diff64 = static_cast<int64_t>(l) - r;
+                        sub_18[0][sb][ts] = static_cast<int32_t>((sum64 * kInvSqrt2_Q31) >> 31);
+                        sub_18[1][sb][ts] = static_cast<int32_t>((diff64 * kInvSqrt2_Q31) >> 31);
+                    }
+                mode_ext = 2;
+            }
+
+            for (int ch = 0; ch < nch; ch++) {
+                for (int sb = 1; sb < 32; sb += 2)
+                    for (int ts = 1; ts < 18; ts += 2)
+                        sub_18[ch][sb][ts] = -sub_18[ch][sb][ts];
+
+                int32_t mdct_out[32][18];
+                enc->mdct_fp[ch].process(sub_18[ch], mdct_out);
+                alias_reduce_fp(mdct_out);
+
+                double mdct_flat[576];
+                for (int sb = 0; sb < 32; sb++)
+                    for (int k = 0; k < 18; k++)
+                        mdct_flat[sb * 18 + k] = mdct_out[sb][k] / 16777216.0;
+
+                granule_info[gr][ch] = quantize_granule(mdct_flat, bits_per_granule,
+                                                         enc->sr_index);
+                total_main_bits += granule_info[gr][ch].part2_3_length;
+            }
+        }
+    };
+#endif
+
+    // Dispatch to selected signal path
+#ifdef GLINT_BOTH_PATHS
+    if (enc->use_fixed_point)
+        encode_fixed();
+    else
+        encode_double();
+#elif defined(GLINT_FIXED_POINT)
+    encode_fixed();
+#else
+    encode_double();
+#endif
+
+    // Compute SCFSI: share scalefactors between granules when identical (MPEG-1 only)
+    // Groups: 0=bands 0-5, 1=bands 6-10, 2=bands 11-15, 3=bands 16-20
+    static const int scfsi_band[5] = {0, 6, 11, 16, 21};
+    int scfsi[2][4] = {};
+    if (num_gr == 2) {
         for (int ch = 0; ch < nch; ch++) {
-            // Frequency inversion for odd subbands (ISO 11172-3)
-            for (int sb = 1; sb < 32; sb += 2)
-                for (int ts = 1; ts < 18; ts += 2)
-                    sub_18[ch][sb][ts] = -sub_18[ch][sb][ts];
-
-            double mdct_out[32][18];
-            enc->mdct[ch].process(sub_18[ch], mdct_out);
-            alias_reduce_d(mdct_out);
-
-            double mdct_flat[576];
-            for (int sb = 0; sb < 32; sb++)
-                for (int k = 0; k < 18; k++)
-                    mdct_flat[sb * 18 + k] = mdct_out[sb][k];
-
-            granule_info[gr][ch] = quantize_granule(mdct_flat, bits_per_granule,
-                                                     enc->sr_index);
-            total_main_bits += granule_info[gr][ch].part2_3_length;
+            for (int group = 0; group < 4; group++) {
+                bool match = true;
+                for (int b = scfsi_band[group]; b < scfsi_band[group+1] && b < 21; b++) {
+                    if (granule_info[0][ch].scalefac[b] != granule_info[1][ch].scalefac[b]) {
+                        match = false;
+                        break;
+                    }
+                }
+                scfsi[ch][group] = match ? 1 : 0;
+            }
+            // Adjust granule 1's part2_length: omit shared scalefactor bits
+            if (granule_info[1][ch].part2_length > 0) {
+                static const int slen_table_scfsi[16][2] = {
+                    {0,0},{0,1},{0,2},{0,3},{3,0},{1,1},{1,2},{1,3},
+                    {2,1},{2,2},{2,3},{3,1},{3,2},{3,3},{4,2},{4,3}
+                };
+                int slen1 = slen_table_scfsi[granule_info[1][ch].scalefac_compress][0];
+                int slen2 = slen_table_scfsi[granule_info[1][ch].scalefac_compress][1];
+                int saved = 0;
+                // Group 0 (bands 0-5) and Group 1 (bands 6-10) use slen1
+                if (scfsi[ch][0]) saved += slen1 * 6;
+                if (scfsi[ch][1]) saved += slen1 * 5;
+                // Group 2 (bands 11-15) and Group 3 (bands 16-20) use slen2
+                if (scfsi[ch][2]) saved += slen2 * 5;
+                if (scfsi[ch][3]) saved += slen2 * 5;
+                granule_info[1][ch].part2_length -= saved;
+                granule_info[1][ch].part2_3_length -= saved;
+                total_main_bits -= saved;
+            }
         }
     }
-
-    // SCFSI disabled: always write scalefactors for both granules
-    // SCFSI disabled: always write all scalefactors for both granules
-    int scfsi[2][4] = {};
 
     // Write frame header
     int channel_mode = mode_to_mpeg(enc->config.mode);

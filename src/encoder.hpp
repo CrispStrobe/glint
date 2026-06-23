@@ -27,8 +27,14 @@ struct glint_context {
     int mean_bits_per_frame;
     int side_info_bits;
 
+    bool use_fixed_point;  // runtime path selection
+
     glint::SubbandAnalysis subband[2];
     glint::MDCT mdct[2];
+#ifdef GLINT_FIXED_POINT
+    glint::SubbandAnalysisFP subband_fp[2];
+    glint::MDCT_FP mdct_fp[2];
+#endif
     glint::BitReservoir reservoir;
 
     // Bit reservoir back-buffer (circular): holds main data from previous frames

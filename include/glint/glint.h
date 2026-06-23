@@ -19,11 +19,18 @@ enum glint_mode {
     GLINT_STEREO = 3,
 };
 
+enum glint_path {
+    GLINT_PATH_DEFAULT = 0,  // use compile-time default
+    GLINT_PATH_DOUBLE  = 1,  // force double-precision
+    GLINT_PATH_FIXED   = 2,  // force fixed-point Q31
+};
+
 struct glint_config {
     int sample_rate;
     int num_channels;
     enum glint_mode mode;
     int bitrate;
+    enum glint_path path;  // signal path selection (0 = default)
 };
 
 int            glint_check_config(int sample_rate, int bitrate);
