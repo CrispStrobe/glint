@@ -177,29 +177,30 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
             enc->subband[ch].analyze(channel_data[ch], subband_out_d[ch], num_slots);
 
         for (int gr = 0; gr < num_gr; gr++) {
-            double sub_18[2][32][18];
-            for (int ch = 0; ch < nch; ch++)
-                for (int sb = 0; sb < 32; sb++)
-                    for (int ts = 0; ts < 18; ts++)
-                        sub_18[ch][sb][ts] = subband_out_d[ch][sb][gr * 18 + ts];
+            int t0 = gr * 18;
 
             if (use_ms) {
                 for (int sb = 0; sb < 32; sb++)
                     for (int ts = 0; ts < 18; ts++) {
-                        double l = sub_18[0][sb][ts], r = sub_18[1][sb][ts];
-                        sub_18[0][sb][ts] = (l + r) * 0.7071067811865476;
-                        sub_18[1][sb][ts] = (l - r) * 0.7071067811865476;
+                        double l = subband_out_d[0][sb][t0 + ts];
+                        double r = subband_out_d[1][sb][t0 + ts];
+                        subband_out_d[0][sb][t0 + ts] = (l + r) * 0.7071067811865476;
+                        subband_out_d[1][sb][t0 + ts] = (l - r) * 0.7071067811865476;
                     }
                 mode_ext = 2;
             }
 
             for (int ch = 0; ch < nch; ch++) {
-                for (int sb = 1; sb < 32; sb += 2)
-                    for (int ts = 1; ts < 18; ts += 2)
-                        sub_18[ch][sb][ts] = -sub_18[ch][sb][ts];
+                // Frequency inversion and extract granule slice in one pass
+                double sub_gr[32][18];
+                for (int sb = 0; sb < 32; sb++)
+                    for (int ts = 0; ts < 18; ts++) {
+                        double v = subband_out_d[ch][sb][t0 + ts];
+                        sub_gr[sb][ts] = ((sb & 1) && (ts & 1)) ? -v : v;
+                    }
 
                 double mdct_out[32][18];
-                enc->mdct[ch].process(sub_18[ch], mdct_out);
+                enc->mdct[ch].process(sub_gr, mdct_out);
                 alias_reduce_d(mdct_out);
 
                 double mdct_flat[576];
@@ -222,31 +223,32 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
             enc->subband_fp[ch].analyze(channel_data[ch], subband_out_fp[ch], num_slots);
 
         for (int gr = 0; gr < num_gr; gr++) {
-            int32_t sub_18[2][32][18];
-            for (int ch = 0; ch < nch; ch++)
-                for (int sb = 0; sb < 32; sb++)
-                    for (int ts = 0; ts < 18; ts++)
-                        sub_18[ch][sb][ts] = subband_out_fp[ch][sb][gr * 18 + ts];
+            int t0 = gr * 18;
 
             if (use_ms) {
                 for (int sb = 0; sb < 32; sb++)
                     for (int ts = 0; ts < 18; ts++) {
-                        int32_t l = sub_18[0][sb][ts], r = sub_18[1][sb][ts];
+                        int32_t l = subband_out_fp[0][sb][t0 + ts];
+                        int32_t r = subband_out_fp[1][sb][t0 + ts];
                         int64_t sum64 = static_cast<int64_t>(l) + r;
                         int64_t diff64 = static_cast<int64_t>(l) - r;
-                        sub_18[0][sb][ts] = static_cast<int32_t>((sum64 * kInvSqrt2_Q31) >> 31);
-                        sub_18[1][sb][ts] = static_cast<int32_t>((diff64 * kInvSqrt2_Q31) >> 31);
+                        subband_out_fp[0][sb][t0 + ts] = static_cast<int32_t>((sum64 * kInvSqrt2_Q31) >> 31);
+                        subband_out_fp[1][sb][t0 + ts] = static_cast<int32_t>((diff64 * kInvSqrt2_Q31) >> 31);
                     }
                 mode_ext = 2;
             }
 
             for (int ch = 0; ch < nch; ch++) {
-                for (int sb = 1; sb < 32; sb += 2)
-                    for (int ts = 1; ts < 18; ts += 2)
-                        sub_18[ch][sb][ts] = -sub_18[ch][sb][ts];
+                // Frequency inversion and extract granule slice in one pass
+                int32_t sub_gr[32][18];
+                for (int sb = 0; sb < 32; sb++)
+                    for (int ts = 0; ts < 18; ts++) {
+                        int32_t v = subband_out_fp[ch][sb][t0 + ts];
+                        sub_gr[sb][ts] = ((sb & 1) && (ts & 1)) ? -v : v;
+                    }
 
                 int32_t mdct_out[32][18];
-                enc->mdct_fp[ch].process(sub_18[ch], mdct_out);
+                enc->mdct_fp[ch].process(sub_gr, mdct_out);
                 alias_reduce_fp(mdct_out);
 
                 double mdct_flat[576];

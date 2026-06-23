@@ -4,6 +4,11 @@ project(glint VERSION 1.0.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Enable native architecture optimizations in Release builds
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    add_compile_options(-march=native -ffast-math)
+endif()
+
 # Signal path mode:
 #   double (default) — double-precision only
 #   fixed            — Q31 fixed-point only

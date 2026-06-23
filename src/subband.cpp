@@ -29,6 +29,7 @@ void SubbandAnalysis::process_slot(const double* samples, double subband_out[kNu
     double z[64];
     for (int j = 0; j < 64; j++) {
         double sum = 0.0;
+#pragma GCC unroll 8
         for (int p = 0; p < 8; p++) {
             int buf_idx = (window_offset_ + j + 64 * p) & 0x1FF;
             sum += window_buf_[buf_idx] * tables::analysis_window_d[j + 64 * p];
@@ -38,6 +39,7 @@ void SubbandAnalysis::process_slot(const double* samples, double subband_out[kNu
 
     for (int i = 0; i < 32; i++) {
         double sum = 0.0;
+#pragma GCC unroll 8
         for (int k = 0; k < 64; k++)
             sum += z[k] * tables::subband_matrix_d[i][k];
         subband_out[i] = sum;
@@ -84,6 +86,7 @@ void SubbandAnalysisFP::process_slot(const int16_t* samples, int32_t subband_out
     int64_t z[64];
     for (int j = 0; j < 64; j++) {
         int64_t sum = 0;
+#pragma GCC unroll 8
         for (int p = 0; p < 8; p++) {
             int buf_idx = (window_offset_ + j + 64 * p) & 0x1FF;
             sum += static_cast<int64_t>(window_buf_[buf_idx]) * tables::analysis_window[j + 64 * p];
@@ -96,12 +99,14 @@ void SubbandAnalysisFP::process_slot(const int16_t* samples, int32_t subband_out
 #if defined(__SIZEOF_INT128__)
         // Full precision: Q45 * Q31 = Q76 in __int128. Output: Q76 >> 52 = Q24.
         __int128 sum = 0;
+#pragma GCC unroll 8
         for (int k = 0; k < 64; k++)
             sum += static_cast<__int128>(z[k]) * tables::subband_matrix[i][k];
         subband_out[i] = static_cast<int32_t>(static_cast<int64_t>(sum >> 52));
 #else
         // MSVC fallback: pre-shift z >> 24 to Q21, Q21 * Q31 = Q52 in int64.
         int64_t sum = 0;
+#pragma GCC unroll 8
         for (int k = 0; k < 64; k++)
             sum += (z[k] >> 24) * static_cast<int64_t>(tables::subband_matrix[i][k]);
         subband_out[i] = static_cast<int32_t>(sum >> 28);
