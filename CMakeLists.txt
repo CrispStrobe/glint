@@ -4,12 +4,15 @@ project(glint VERSION 1.0.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Enable native architecture optimizations in Release builds
+# Enable optimizations in Release builds
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
     if(MSVC)
         add_compile_options(/O2 /fp:fast)
-    else()
+    elseif(NOT CMAKE_CROSSCOMPILING)
+        # -march=native only works for native builds, not cross-compilation
         add_compile_options(-march=native -ffast-math)
+    else()
+        add_compile_options(-O2 -ffast-math)
     endif()
 endif()
 

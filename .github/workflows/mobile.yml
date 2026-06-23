@@ -73,8 +73,9 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DGLINT_MODE=fixed \
             -DCMAKE_C_FLAGS="-fembed-bitcode" \
-            -DCMAKE_CXX_FLAGS="-fembed-bitcode"
-          cmake --build build -j$(sysctl -n hw.ncpu) -- -sdk ${{ matrix.sdk }}
+            -DCMAKE_CXX_FLAGS="-fembed-bitcode" \
+            -DCMAKE_XCODE_ATTRIBUTE_ONLY_ACTIVE_ARCH=NO
+          cmake --build build --config Release -j
 
       - name: Verify artifacts
         run: |
