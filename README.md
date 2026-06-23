@@ -251,26 +251,30 @@ glint/
 - **Python bindings** -- ctypes wrapper with Encoder class, NumPy support.
 - **CI/CD** -- GitHub Actions on Linux x86-64/aarch64, macOS, Windows,
   Android (3 ABIs), iOS (device + simulator). Release workflow.
-- **Test suite** -- 19 C++ unit tests, Python quality/ASR tests.
-- **v0.1.0 release** -- pre-built binaries for 4 desktop platforms.
+- **ARM NEON** -- AArch64 SIMD for subband + MDCT, runtime `-s neon`.
+- **Psychoacoustic model** -- masking-based scalefactor allocation,
+  gated via `-q speed|normal`. Speech +2.6% correlation.
+- **Transient detection** -- energy-based pre-echo reduction.
+- **Full-precision float API** -- `glint_encode_float()` bypasses int16.
+- **MPEG-II/2.5** -- validated all sample rates 8-48 kHz. Fixed
+  scalefac_compress, preflag, and SF layout bugs for MPEG-2.
+- **Rust bindings** -- `glint-sys` (FFI) + `glint` (safe wrapper).
+- **Dart bindings** -- FFI for Flutter (Android/iOS/desktop).
+- **Python bindings** -- ctypes with Encoder class, NumPy support.
+- **Test suite** -- 30 unit tests + 16 quality tests + ASR.
+- **CI/CD** -- 9 platforms (desktop + Android + iOS). Release workflow.
+- **Releases** -- v0.1.0, v0.2.0, v0.3.0 with pre-built binaries.
 
 ### Planned
 
-- **ARM NEON** -- SIMD intrinsics for ARM subband + MDCT (like AVX/SSE2
-  on x86, with runtime dispatch)
-- **Psychoacoustic model** -- simplified energy-based masking for
-  smarter per-band bit allocation (currently uses uniform energy ratio)
-- **Short blocks** -- block switching for transient signals (currently
-  long blocks only)
-- **MPEG-II/2.5 validation** -- end-to-end test across all lower
-  sample rates (8-24 kHz)
+- **Short-block MDCT** -- 12-point windows with block switching for
+  transient signals (transient detection done, MDCT switching not yet)
+- **VBR mode** -- variable bitrate encoding
+- **ESP-IDF component** -- ESP32 validation with fixed-point path
+- **Cortex-M / RP2040** -- bare-metal embedded testing
+- **Streaming API** -- callback-based output for real-time use
 - **Mobile packaging** -- Android AAR, iOS xcframework, Flutter plugin
-  with pub.dev / CocoaPods distribution
-- **Embedded validation** -- ESP-IDF component, RP2040 / Cortex-M
-  testing with fixed-point path
 - **Package managers** -- vcpkg, Conan, pip (`glint-mp3`), crates.io
-- **Streaming API** -- callback-based output, non-blocking encode for
-  real-time use (currently frame-at-a-time only)
 
 ## License
 
