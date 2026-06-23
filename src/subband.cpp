@@ -23,7 +23,6 @@ void SubbandAnalysis::reset() {
 
 void SubbandAnalysis::process_slot(const double* samples, double subband_out[kNumSubbands]) {
     window_offset_ = (window_offset_ - 32) & 0x1FF;
-    // ISO 11172-3: X[i] = s[31-i]
     for (int i = 0; i < 32; i++)
         window_buf_[(window_offset_ + 31 - i) & 0x1FF] = samples[i];
 
@@ -62,11 +61,12 @@ void SubbandAnalysis::analyze(const int16_t* pcm, double out[kNumSubbands][kTime
 // === Fixed-point (Q24) path ===
 //
 // Q format chain:
-//   PCM (int16) -> Q31 via << 16
-//   Window buffer: int32_t Q31
-//   Windowed sum z[]: int64_t Q61 (full precision, 8 Q31*Q30 products)
-//   Matrixing: z_Q61 * matrix_Q31 = __int128 Q92 accumulator over 64 terms
-//     Output: (sum >> 68) gives Q24 (range [-128, 128))
+//   PCM int16 -> int32 Q15 (sign-extend, no shift)
+//   Window buffer: int32 Q15
+//   Windowed sum: Q15 * Q30 = Q45 in int64. Sum of 8 products.
+//   Matrixing: pre-shift z >> 24 to Q21, then Q21 * Q31 = Q52 in int64.
+//     Sum of 64 terms fits int64 (worst case ~2.6e18 < 9.2e18).
+//   Output: Q52 >> 28 = Q24.
 
 SubbandAnalysisFP::SubbandAnalysisFP() { reset(); }
 
@@ -78,8 +78,9 @@ void SubbandAnalysisFP::reset() {
 void SubbandAnalysisFP::process_slot(const int16_t* samples, int32_t subband_out[kNumSubbands]) {
     window_offset_ = (window_offset_ - 32) & 0x1FF;
     for (int i = 0; i < 32; i++)
-        window_buf_[(window_offset_ + 31 - i) & 0x1FF] = pcm_to_q31(samples[i]);
+        window_buf_[(window_offset_ + 31 - i) & 0x1FF] = static_cast<int32_t>(samples[i]);
 
+    // Windowed partial sums: Q15 * Q30 = Q45 in int64
     int64_t z[64];
     for (int j = 0; j < 64; j++) {
         int64_t sum = 0;
@@ -90,11 +91,21 @@ void SubbandAnalysisFP::process_slot(const int16_t* samples, int32_t subband_out
         z[j] = sum;
     }
 
+    // Matrixing: z[] is Q45, subband_matrix[] is Q31.
     for (int i = 0; i < 32; i++) {
+#if defined(__SIZEOF_INT128__)
+        // Full precision: Q45 * Q31 = Q76 in __int128. Output: Q76 >> 52 = Q24.
         __int128 sum = 0;
         for (int k = 0; k < 64; k++)
             sum += static_cast<__int128>(z[k]) * tables::subband_matrix[i][k];
-        subband_out[i] = static_cast<int32_t>(static_cast<int64_t>(sum >> 68));
+        subband_out[i] = static_cast<int32_t>(static_cast<int64_t>(sum >> 52));
+#else
+        // MSVC fallback: pre-shift z >> 24 to Q21, Q21 * Q31 = Q52 in int64.
+        int64_t sum = 0;
+        for (int k = 0; k < 64; k++)
+            sum += (z[k] >> 24) * static_cast<int64_t>(tables::subband_matrix[i][k]);
+        subband_out[i] = static_cast<int32_t>(sum >> 28);
+#endif
     }
 }
 
