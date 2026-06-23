@@ -43,14 +43,40 @@ bit lending.
 Requires CMake >= 3.16 and a C++17 compiler.
 
 ```bash
-mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-make -j$(nproc)
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(nproc)
+```
+
+Build modes (`-DGLINT_MODE=`):
+
+| Mode | Flag | Description |
+|---|---|---|
+| `double` | (default) | Double-precision signal path |
+| `fixed` | `-DGLINT_MODE=fixed` | Q31 fixed-point (no FPU needed) |
+| `both` | `-DGLINT_MODE=both` | Both paths, runtime `-p` flag |
+
+### Cross-compilation
+
+```bash
+# Android (NDK)
+cmake -B build -DCMAKE_TOOLCHAIN_FILE=$NDK/build/cmake/android.toolchain.cmake \
+  -DANDROID_ABI=arm64-v8a -DGLINT_MODE=fixed
+
+# iOS
+cmake -B build -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=arm64 \
+  -DCMAKE_OSX_SYSROOT=$(xcrun --sdk iphoneos --show-sdk-path) -DGLINT_MODE=fixed
+
+# Raspberry Pi (cross-compile from x86)
+cmake -B build -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
+  -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ -DGLINT_MODE=fixed
+
+# ESP32 (ESP-IDF component — add to your project's components/)
+# Uses fixed-point path, no FPU required
 ```
 
 Produces:
 - `libglint.a` / `libglint.so` -- static and shared libraries
-- `glint_cli` -- command-line encoder
+- `glint_cli` -- command-line encoder (desktop only)
 
 ## Usage
 
@@ -217,14 +243,15 @@ glint/
 
 ### Planned
 
-- **SIMD** -- x86 SSE/AVX for subband matrixing and MDCT dot products,
-  ARM NEON intrinsics
-- **Quality** -- simplified psychoacoustic energy model, MPEG-II/2.5
-  validation, short block support for transients
-- **Distribution** -- package managers (vcpkg, Conan), pre-built
-  release binaries
+- **ARM NEON** -- SIMD intrinsics for ARM (subband + MDCT)
+- **Quality** -- psychoacoustic energy model, MPEG-II/2.5 validation,
+  short block support for transients
+- **Mobile** -- Android AAR / iOS framework packaging, Flutter plugin
+- **Embedded** -- ESP-IDF component, Raspberry Pi Pico (RP2040)
+  validation with fixed-point path
+- **Distribution** -- vcpkg, Conan, pip (`glint-mp3`), crates.io
 - **Language bindings** -- Rust (`glint-sys` + safe crate), Dart (FFI
-  for Flutter), Python (`ctypes` or `pybind11`)
+  for Flutter), Python (ctypes)
 
 ## License
 
