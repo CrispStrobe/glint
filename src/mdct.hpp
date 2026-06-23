@@ -8,7 +8,8 @@
 
 namespace glint {
 
-// Double-precision MDCT (always available)
+#if !defined(GLINT_FIXED_POINT) || defined(GLINT_BOTH_PATHS)
+// Double-precision MDCT
 class MDCT {
 public:
     MDCT();
@@ -20,6 +21,7 @@ private:
 };
 
 void alias_reduce_d(double mdct_out[32][18]);
+#endif
 
 #ifdef GLINT_FIXED_POINT
 // Fixed-point (Q24) MDCT

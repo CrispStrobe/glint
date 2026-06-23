@@ -11,7 +11,8 @@ namespace glint {
 static constexpr int kNumSubbands = 32;
 static constexpr int kTimeSlots = 36;
 
-// Double-precision subband analysis (always available)
+#if !defined(GLINT_FIXED_POINT) || defined(GLINT_BOTH_PATHS)
+// Double-precision subband analysis
 class SubbandAnalysis {
 public:
     SubbandAnalysis();
@@ -24,6 +25,7 @@ private:
     int window_offset_;
     void process_slot(const double* samples, double subband_out[kNumSubbands]);
 };
+#endif
 
 #ifdef GLINT_FIXED_POINT
 // Fixed-point (Q24) subband analysis

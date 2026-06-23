@@ -20,7 +20,8 @@
 
 namespace glint {
 
-// === Double-precision path (always compiled) ===
+#if !defined(GLINT_FIXED_POINT) || defined(GLINT_BOTH_PATHS)
+// === Double-precision path ===
 
 SubbandAnalysis::SubbandAnalysis() { reset(); }
 
@@ -127,6 +128,7 @@ void SubbandAnalysis::analyze_float(const float* pcm, double out[kNumSubbands][k
             out[sb][ts] = slot_out[sb];
     }
 }
+#endif // double-precision path
 
 #ifdef GLINT_FIXED_POINT
 

@@ -112,6 +112,7 @@ static void test_quantize_roundtrip() {
     CHECK(info.ix[18] != 0, "dominant coeff preserved");
 }
 
+#if !defined(GLINT_FIXED_POINT) || defined(GLINT_BOTH_PATHS)
 // --- MDCT overlap-add (TDAC property) ---
 static void test_mdct_tdac() {
     std::printf("MDCT TDAC property...\n");
@@ -141,6 +142,7 @@ static void test_mdct_tdac() {
     CHECK(std::isfinite(out2[0][0]), "MDCT output is finite");
     CHECK(std::fabs(out2[0][0]) < 100.0, "MDCT output in reasonable range");
 }
+#endif
 
 // --- Full encode/decode API ---
 static void test_api() {
@@ -179,7 +181,7 @@ static void test_api() {
     glint_destroy(enc);
 }
 
-#ifdef GLINT_FIXED_POINT
+#if defined(GLINT_FIXED_POINT) && defined(GLINT_BOTH_PATHS)
 // --- Fixed-point subband vs double comparison ---
 static void test_fixed_vs_double() {
     std::printf("Fixed-point vs double subband...\n");
@@ -212,8 +214,9 @@ static void test_fixed_vs_double() {
         }
     CHECK(max_err < 0.01, "fixed vs double subband error < 1%");
 }
-#endif
+#endif // GLINT_BOTH_PATHS
 
+#if !defined(GLINT_FIXED_POINT) || defined(GLINT_BOTH_PATHS)
 // --- Float subband analysis preserves more precision than int16 path ---
 static void test_float_subband() {
     std::printf("Float subband analysis precision...\n");
@@ -260,7 +263,9 @@ static void test_float_subband() {
     CHECK(float_energy >= int16_energy * 0.99,
           "float path preserves at least as much energy as int16 path");
 }
+#endif // double-precision path
 
+#if !defined(GLINT_FIXED_POINT) || defined(GLINT_BOTH_PATHS)
 // --- Float encode API smoke test ---
 static void test_float_encode_api() {
     std::printf("Float encode API...\n");
@@ -346,6 +351,7 @@ static void test_float_vs_int16_encode() {
     glint_destroy(enc_f);
     glint_destroy(enc_i);
 }
+#endif // double-precision path
 
 int main() {
     std::printf("=== glint unit tests ===\n\n");
@@ -354,13 +360,17 @@ int main() {
     test_huffman_consistency();
     test_pow34_table();
     test_quantize_roundtrip();
+#if !defined(GLINT_FIXED_POINT) || defined(GLINT_BOTH_PATHS)
     test_mdct_tdac();
+#endif
     test_api();
+#if !defined(GLINT_FIXED_POINT) || defined(GLINT_BOTH_PATHS)
     test_float_subband();
     test_float_encode_api();
     test_float_vs_int16_encode();
+#endif
 
-#ifdef GLINT_FIXED_POINT
+#if defined(GLINT_FIXED_POINT) && defined(GLINT_BOTH_PATHS)
     test_fixed_vs_double();
 #endif
 

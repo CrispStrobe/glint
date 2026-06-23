@@ -13,6 +13,7 @@
 
 using namespace glint;
 
+#if !defined(GLINT_FIXED_POINT) || defined(GLINT_BOTH_PATHS)
 // Reorder short-block MDCT coefficients from [subband][window][freq] to
 // the order expected by the decoder: grouped by scalefactor band, then
 // window interleaved.  ISO 11172-3 B.8 short block reorder.
@@ -136,6 +137,7 @@ static bool detect_transient(const double subband_out[32][36], int gr,
     *prev_energy = energy;
     return transient;
 }
+#endif // double-precision path helpers
 
 int glint_check_config(int sample_rate, int bitrate) {
     if (tables::samplerate_to_index(sample_rate) < 0) return -1;
@@ -214,9 +216,14 @@ glint_t glint_create(const glint_config* cfg) {
     ctx->prev_granule_energy[1] = 0;
     ctx->prev_energy_valid = false;
 
+    ctx->write_cb = nullptr;
+    ctx->write_cb_data = nullptr;
+
     for (int ch = 0; ch < ctx->num_channels; ch++) {
+#if !defined(GLINT_FIXED_POINT) || defined(GLINT_BOTH_PATHS)
         ctx->subband[ch].reset();
         ctx->mdct[ch].reset();
+#endif
 #ifdef GLINT_FIXED_POINT
         ctx->subband_fp[ch].reset();
         ctx->mdct_fp[ch].reset();
@@ -224,6 +231,15 @@ glint_t glint_create(const glint_config* cfg) {
     }
 
     return ctx;
+}
+
+glint_t glint_create_streaming(const glint_config* cfg, glint_write_cb cb, void* ud) {
+    glint_t enc = glint_create(cfg);
+    if (enc) {
+        enc->write_cb = cb;
+        enc->write_cb_data = ud;
+    }
+    return enc;
 }
 
 int glint_samples_per_frame(glint_t enc) {
@@ -319,6 +335,7 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
     int total_main_bits = 0;
     int mode_ext = 0;
 
+#if !defined(GLINT_FIXED_POINT) || defined(GLINT_BOTH_PATHS)
     // Helper lambda: encode one frame through the double-precision path
     auto encode_double = [&]() {
         double subband_out_d[2][32][36];
@@ -397,6 +414,7 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
         // Mark energy as valid after first frame
         enc->prev_energy_valid = true;
     };
+#endif // double-precision path
 
 #ifdef GLINT_FIXED_POINT
     // Helper lambda: encode one frame through the fixed-point Q24 path
@@ -627,6 +645,12 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
     enc->reservoir_buf_size = std::min(enc->reservoir_buf_size + md_bytes, 8192);
 
     enc->frame_count++;
+
+    // Invoke streaming callback if set
+    if (enc->write_cb && *out_size > 0) {
+        enc->write_cb(enc->output_buf, *out_size, enc->write_cb_data);
+    }
+
     return enc->output_buf;
 }
 
@@ -662,6 +686,7 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
         return result;
     }
 
+#if !defined(GLINT_FIXED_POINT) || defined(GLINT_BOTH_PATHS)
     // --- Double-precision float path: feed float directly into subband analysis ---
 
     // Padding
@@ -910,7 +935,18 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
     enc->reservoir_buf_size = std::min(enc->reservoir_buf_size + md_bytes, 8192);
 
     enc->frame_count++;
+
+    // Invoke streaming callback if set
+    if (enc->write_cb && *out_size > 0) {
+        enc->write_cb(enc->output_buf, *out_size, enc->write_cb_data);
+    }
+
     return enc->output_buf;
+#else
+    // Pure fixed-point build: should never reach here (handled above)
+    *out_size = 0;
+    return nullptr;
+#endif // double-precision float path
 }
 
 const uint8_t* glint_encode_int32(glint_t enc, const int32_t** channel_data,

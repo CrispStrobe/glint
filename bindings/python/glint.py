@@ -120,7 +120,12 @@ class _GlintConfig(ctypes.Structure):
         ("bitrate", ctypes.c_int),
         ("path", ctypes.c_int),
         ("simd", ctypes.c_int),
+        ("quality", ctypes.c_int),
     ]
+
+# Callback type: void (*glint_write_cb)(const uint8_t* data, int size, void* user_data)
+_glint_write_cb = ctypes.CFUNCTYPE(None, ctypes.POINTER(ctypes.c_uint8),
+                                   ctypes.c_int, ctypes.c_void_p)
 
 
 def _setup_signatures(lib):
@@ -130,6 +135,11 @@ def _setup_signatures(lib):
 
     lib.glint_create.argtypes = [ctypes.POINTER(_GlintConfig)]
     lib.glint_create.restype = _glint_t
+
+    lib.glint_create_streaming.argtypes = [
+        ctypes.POINTER(_GlintConfig), _glint_write_cb, ctypes.c_void_p,
+    ]
+    lib.glint_create_streaming.restype = _glint_t
 
     lib.glint_samples_per_frame.argtypes = [_glint_t]
     lib.glint_samples_per_frame.restype = ctypes.c_int
@@ -227,9 +237,11 @@ class Encoder:
         path: int = PATH_DEFAULT,
         simd: int = SIMD_AUTO,
         lib_path: Optional[str] = None,
+        write_callback=None,
     ):
         self._lib = load_library(lib_path)
         self._handle = None  # ensure attribute exists for __del__
+        self._write_cb_ref = None  # prevent GC of ctypes callback
 
         if mode is None:
             mode = MODE_MONO if channels == 1 else MODE_JOINT
@@ -243,7 +255,19 @@ class Encoder:
             simd=simd,
         )
 
-        handle = self._lib.glint_create(ctypes.byref(cfg))
+        if write_callback is not None:
+            # Wrap the Python callback into a ctypes callback.
+            # The Python callable receives (bytes, size).
+            def _c_callback(data_ptr, size, _user_data):
+                if size > 0:
+                    write_callback(ctypes.string_at(data_ptr, size), size)
+            self._write_cb_ref = _glint_write_cb(_c_callback)
+            handle = self._lib.glint_create_streaming(
+                ctypes.byref(cfg), self._write_cb_ref, None,
+            )
+        else:
+            handle = self._lib.glint_create(ctypes.byref(cfg))
+
         if not handle:
             raise ConfigError(
                 f"glint_create failed (sr={sample_rate}, ch={channels}, "

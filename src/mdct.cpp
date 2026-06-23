@@ -20,7 +20,8 @@
 
 namespace glint {
 
-// === Double-precision path (always compiled) ===
+#if !defined(GLINT_FIXED_POINT) || defined(GLINT_BOTH_PATHS)
+// === Double-precision path ===
 
 static double mdct_cos_d[36][18];
 #if defined(__AVX2__) || defined(__AVX__) || defined(__SSE2__) || (defined(__ARM_NEON) && defined(__aarch64__))
@@ -206,6 +207,7 @@ void alias_reduce_d(double mdct_out[32][18]) {
         }
     }
 }
+#endif // double-precision path
 
 #ifdef GLINT_FIXED_POINT
 

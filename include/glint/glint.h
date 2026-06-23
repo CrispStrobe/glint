@@ -48,8 +48,13 @@ struct glint_config {
     enum glint_quality quality;  // quality mode (0 = speed, 1 = normal)
 };
 
+// Callback: called with each encoded MP3 frame
+typedef void (*glint_write_cb)(const uint8_t* data, int size, void* user_data);
+
 int            glint_check_config(int sample_rate, int bitrate);
 glint_t        glint_create(const struct glint_config* cfg);
+glint_t        glint_create_streaming(const struct glint_config* cfg,
+                                      glint_write_cb callback, void* user_data);
 int            glint_samples_per_frame(glint_t enc);
 
 // Encode one frame. channel_data[ch] points to samples_per_frame samples.

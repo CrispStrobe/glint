@@ -208,11 +208,13 @@ inline int32_t alias_ca[8];
 
 inline int32_t subband_matrix[32][64];
 
+#if !defined(GLINT_FIXED_POINT) || defined(GLINT_BOTH_PATHS)
 // 4c. Subband analysis matrixing table in Q15 (int16) for overflow-safe accumulation.
 inline int16_t subband_matrix_q15[32][64];
 
 // 4d. Double-precision subband matrixing table (for float analysis path).
 inline double subband_matrix_d[32][64];
+#endif
 
 // ---------------------------------------------------------------------------
 // 5. Scalefactor band boundaries for long blocks
@@ -858,7 +860,11 @@ inline uint32_t get_huff_code(int table_id, int idx) {
 //    Computed at runtime in init_tables().
 // ---------------------------------------------------------------------------
 
+#ifdef GLINT_SMALL_POW34
+static constexpr int kPow34TableSize = 1000;
+#else
 static constexpr int kPow34TableSize = 10000;
+#endif
 inline uint32_t pow34_table[kPow34TableSize];
 
 // ---------------------------------------------------------------------------
@@ -890,7 +896,9 @@ static constexpr int preemphasis[22] = {
 // 2^(-0.25 * n) for n = 0..63, stored as double
 // ---------------------------------------------------------------------------
 
+#if !defined(GLINT_FIXED_POINT) || defined(GLINT_BOTH_PATHS)
 inline double pow2_neg_quarter[64];
+#endif
 
 // ---------------------------------------------------------------------------
 // Runtime initialization
@@ -980,6 +988,7 @@ inline void init_tables() {
         }
     }
 
+#if !defined(GLINT_FIXED_POINT) || defined(GLINT_BOTH_PATHS)
     // ----- Subband matrixing table Q15 -----
     for (int i = 0; i < 32; ++i) {
         for (int k = 0; k < 64; ++k) {
@@ -1002,6 +1011,7 @@ inline void init_tables() {
     for (int n = 0; n < 64; ++n) {
         pow2_neg_quarter[n] = std::pow(2.0, -0.25 * n);
     }
+#endif
 
     tables_initialized = true;
 }

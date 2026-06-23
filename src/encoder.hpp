@@ -30,8 +30,10 @@ struct glint_context {
     bool use_fixed_point;  // runtime path selection
     int quality_mode;      // 0=speed, 1=normal (psychoacoustic masking)
 
+#if !defined(GLINT_FIXED_POINT) || defined(GLINT_BOTH_PATHS)
     glint::SubbandAnalysis subband[2];
     glint::MDCT mdct[2];
+#endif
 #ifdef GLINT_FIXED_POINT
     glint::SubbandAnalysisFP subband_fp[2];
     glint::MDCT_FP mdct_fp[2];
@@ -55,6 +57,10 @@ struct glint_context {
     // Transient detection state (per channel)
     double prev_granule_energy[2];  // per channel
     bool prev_energy_valid;
+
+    // Streaming callback (optional)
+    glint_write_cb write_cb;
+    void* write_cb_data;
 };
 
 #endif // GLINT_ENCODER_HPP
