@@ -267,19 +267,10 @@ glint/
 
 ### Planned
 
-- **Short-block MDCT** -- 12-point windows with block switching for
-  transient signals (transient detection done, MDCT switching not yet)
-- **VBR mode** -- variable bitrate encoding
-- **Embedded memory optimization** -- current footprint: 113 KB
-  (75 KB tables + 38 KB state). Reduce by: `#ifdef` out double tables
-  in fixed-only builds (-20 KB), move pow34_table to flash/ROM
-  (-39 KB), shrink BitstreamWriter buffers (-18 KB). Target: <50 KB
-  RAM for fixed-point-only embedded builds.
 - **ESP-IDF component** -- ESP32 validation with fixed-point path
 - **Cortex-M / RP2040** -- bare-metal embedded testing
-- **Streaming API** -- callback-based output for real-time use
 - **Mobile packaging** -- Android AAR, iOS xcframework, Flutter plugin
-- **Package managers** -- vcpkg, Conan, pip (`glint-mp3`), crates.io
+- **Publish packages** -- pip upload, crates.io publish, vcpkg port
 
 ## License
 
