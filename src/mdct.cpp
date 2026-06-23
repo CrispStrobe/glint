@@ -10,6 +10,9 @@
 #if defined(__AVX2__) || defined(__AVX__) || defined(__SSE2__) || defined(_M_X64)
 #include <immintrin.h>
 #endif
+#if defined(__ARM_NEON) && defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 
 #ifdef GLINT_FIXED_POINT
 #include "fixedpoint.hpp"
@@ -20,7 +23,7 @@ namespace glint {
 // === Double-precision path (always compiled) ===
 
 static double mdct_cos_d[36][18];
-#if defined(__AVX2__) || defined(__AVX__) || defined(__SSE2__)
+#if defined(__AVX2__) || defined(__AVX__) || defined(__SSE2__) || (defined(__ARM_NEON) && defined(__aarch64__))
 static double mdct_cos_d_t[18][36];  // transposed for SIMD contiguous access
 #endif
 static double mdct_win_d[36];
@@ -35,7 +38,7 @@ static void init_mdct_d() {
         for (int k = 0; k < 18; k++)
             mdct_cos_d[n][k] = std::cos(PI / 72.0 * (2.0*n + 19.0) * (2.0*k + 1.0));
     }
-#if defined(__AVX2__) || defined(__AVX__) || defined(__SSE2__)
+#if defined(__AVX2__) || defined(__AVX__) || defined(__SSE2__) || (defined(__ARM_NEON) && defined(__aarch64__))
     for (int n = 0; n < 36; n++)
         for (int k = 0; k < 18; k++)
             mdct_cos_d_t[k][n] = mdct_cos_d[n][k];
@@ -97,14 +100,29 @@ void MDCT::process(const double subband[32][18], double mdct_out[32][18]) {
             double tmp[2]; _mm_storeu_pd(tmp, vsum0);
             mdct_out[sb][k] = (tmp[0] + tmp[1]) / 288.0;
 #else
-            double sum = 0.0;
+#if defined(__ARM_NEON) && defined(__aarch64__)
+            if (g_simd_level == GLINT_SIMD_NEON) {
+                float64x2_t vsum0 = vdupq_n_f64(0.0);
+                float64x2_t vsum1 = vdupq_n_f64(0.0);
+                for (int n = 0; n < 36; n += 4) {
+                    vsum0 = vfmaq_f64(vsum0, vld1q_f64(&x[n]), vld1q_f64(&mdct_cos_d_t[k][n]));
+                    vsum1 = vfmaq_f64(vsum1, vld1q_f64(&x[n+2]), vld1q_f64(&mdct_cos_d_t[k][n+2]));
+                }
+                vsum0 = vaddq_f64(vsum0, vsum1);
+                double hsum = vgetq_lane_f64(vsum0, 0) + vgetq_lane_f64(vsum0, 1);
+                mdct_out[sb][k] = hsum / 288.0;
+            } else
+#endif
+            {
+                double sum = 0.0;
 
 #ifndef _MSC_VER
 #pragma GCC unroll 6
 #endif
-            for (int n = 0; n < 36; n++)
-                sum += x[n] * mdct_cos_d[n][k];
-            mdct_out[sb][k] = sum / 288.0;
+                for (int n = 0; n < 36; n++)
+                    sum += x[n] * mdct_cos_d[n][k];
+                mdct_out[sb][k] = sum / 288.0;
+            }
 #endif
         }
 

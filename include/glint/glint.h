@@ -30,6 +30,7 @@ enum glint_simd {
     GLINT_SIMD_AVX    = 1,  // force AVX (crashes if unsupported!)
     GLINT_SIMD_SSE2   = 2,  // force SSE2
     GLINT_SIMD_NONE   = 3,  // scalar only
+    GLINT_SIMD_NEON   = 4,  // force AArch64 NEON (crashes if unsupported!)
 };
 
 struct glint_config {

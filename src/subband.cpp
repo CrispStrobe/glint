@@ -10,6 +10,9 @@
 #if defined(__AVX2__) || defined(__AVX__) || defined(__SSE2__) || defined(_M_X64)
 #include <immintrin.h>
 #endif
+#if defined(__ARM_NEON) && defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 
 #ifdef GLINT_FIXED_POINT
 #include "fixedpoint.hpp"
@@ -73,6 +76,23 @@ void SubbandAnalysis::process_slot(const double* samples, double subband_out[kNu
             vsum0 = _mm_add_pd(vsum0, vsum1);
             double tmp[2]; _mm_storeu_pd(tmp, vsum0);
             subband_out[i] = tmp[0] + tmp[1];
+            continue;
+        }
+#endif
+#if defined(__ARM_NEON) && defined(__aarch64__)
+        if (g_simd_level == GLINT_SIMD_NEON) {
+            float64x2_t vsum0 = vdupq_n_f64(0.0);
+            float64x2_t vsum1 = vdupq_n_f64(0.0);
+            for (int k = 0; k < 64; k += 4) {
+                float64x2_t vz0 = vld1q_f64(&z[k]);
+                float64x2_t vm0 = vld1q_f64(&tables::subband_matrix_d[i][k]);
+                vsum0 = vfmaq_f64(vsum0, vz0, vm0);
+                float64x2_t vz1 = vld1q_f64(&z[k+2]);
+                float64x2_t vm1 = vld1q_f64(&tables::subband_matrix_d[i][k+2]);
+                vsum1 = vfmaq_f64(vsum1, vz1, vm1);
+            }
+            vsum0 = vaddq_f64(vsum0, vsum1);
+            subband_out[i] = vgetq_lane_f64(vsum0, 0) + vgetq_lane_f64(vsum0, 1);
             continue;
         }
 #endif

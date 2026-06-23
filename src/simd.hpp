@@ -30,8 +30,11 @@ inline int detect_simd() {
         level = GLINT_SIMD_AVX;
 #endif
     return level;
+#elif defined(__ARM_NEON) || defined(__ARM_NEON__)
+    // AArch64 NEON
+    return GLINT_SIMD_NEON;
 #else
-    // Non-x86: no SIMD
+    // Non-x86, non-ARM: no SIMD
     return GLINT_SIMD_NONE;
 #endif
 }

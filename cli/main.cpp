@@ -329,7 +329,7 @@ static void print_usage(const char* prog) {
 #ifdef GLINT_BOTH_PATHS
     fprintf(stderr, "  -p PATH          double|fixed (default: fixed)\n");
 #endif
-    fprintf(stderr, "  -s SIMD          auto|avx|sse2|none (default: auto)\n");
+    fprintf(stderr, "  -s SIMD          auto|avx|sse2|neon|none (default: auto)\n");
     fprintf(stderr, "  -r RATE:CH:BITS  Raw PCM input (e.g., 44100:1:16)\n");
 }
 
@@ -492,9 +492,10 @@ int main(int argc, char** argv) {
         if (strcmp(simd_str, "auto") == 0) cfg.simd = GLINT_SIMD_AUTO;
         else if (strcmp(simd_str, "avx") == 0) cfg.simd = GLINT_SIMD_AVX;
         else if (strcmp(simd_str, "sse2") == 0 || strcmp(simd_str, "sse") == 0) cfg.simd = GLINT_SIMD_SSE2;
+        else if (strcmp(simd_str, "neon") == 0) cfg.simd = GLINT_SIMD_NEON;
         else if (strcmp(simd_str, "none") == 0 || strcmp(simd_str, "scalar") == 0) cfg.simd = GLINT_SIMD_NONE;
         else {
-            fprintf(stderr, "Error: invalid SIMD '%s' (use auto|avx|sse2|none)\n", simd_str);
+            fprintf(stderr, "Error: invalid SIMD '%s' (use auto|avx|sse2|neon|none)\n", simd_str);
             fclose(wav_file);
             return 1;
         }
