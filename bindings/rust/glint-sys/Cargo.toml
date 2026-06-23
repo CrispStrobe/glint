@@ -1,0 +1,10 @@
+[package]
+name = "glint-sys"
+version = "0.1.0"
+edition = "2021"
+description = "Raw FFI bindings for the glint MP3 encoder"
+license = "MIT"
+links = "glint"
+
+[build-dependencies]
+cc = "1"

@@ -1,0 +1,39 @@
+//! Raw FFI bindings for glint MP3 encoder.
+#![allow(non_camel_case_types)]
+
+use std::os::raw::c_int;
+
+pub type glint_t = *mut std::ffi::c_void;
+
+#[repr(C)]
+pub struct glint_config {
+    pub sample_rate: c_int,
+    pub num_channels: c_int,
+    pub mode: c_int,
+    pub bitrate: c_int,
+    pub path: c_int,
+    pub simd: c_int,
+}
+
+extern "C" {
+    pub fn glint_check_config(sample_rate: c_int, bitrate: c_int) -> c_int;
+    pub fn glint_create(cfg: *const glint_config) -> glint_t;
+    pub fn glint_samples_per_frame(enc: glint_t) -> c_int;
+    pub fn glint_encode(
+        enc: glint_t,
+        channel_data: *const *const i16,
+        out_size: *mut c_int,
+    ) -> *const u8;
+    pub fn glint_encode_float(
+        enc: glint_t,
+        channel_data: *const *const f32,
+        out_size: *mut c_int,
+    ) -> *const u8;
+    pub fn glint_encode_int32(
+        enc: glint_t,
+        channel_data: *const *const i32,
+        out_size: *mut c_int,
+    ) -> *const u8;
+    pub fn glint_flush(enc: glint_t, out_size: *mut c_int) -> *const u8;
+    pub fn glint_destroy(enc: glint_t);
+}

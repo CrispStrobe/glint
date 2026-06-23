@@ -11,3 +11,5 @@ build*/
 *.exe
 __pycache__/
 *.pyc
+bindings/rust/*/target/
+Cargo.lock

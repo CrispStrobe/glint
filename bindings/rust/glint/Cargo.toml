@@ -1,0 +1,9 @@
+[package]
+name = "glint"
+version = "0.1.0"
+edition = "2021"
+description = "Safe Rust wrapper for the glint MP3 encoder"
+license = "MIT"
+
+[dependencies]
+glint-sys = { path = "../glint-sys" }
