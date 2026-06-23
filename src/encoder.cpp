@@ -4,6 +4,7 @@
 #include "encoder.hpp"
 #include "fixedpoint.hpp"
 #include "mdct.hpp"
+#include "simd.hpp"
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
@@ -31,6 +32,7 @@ glint_t glint_create(const glint_config* cfg) {
     if (cfg->num_channels == 2 && cfg->mode == GLINT_MONO) return nullptr;
 
     tables::init_tables();
+    init_simd(cfg->simd);
 
     auto* ctx = new (std::nothrow) glint_context{};
     if (!ctx) return nullptr;

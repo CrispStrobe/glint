@@ -25,12 +25,20 @@ enum glint_path {
     GLINT_PATH_FIXED   = 2,  // force fixed-point Q31
 };
 
+enum glint_simd {
+    GLINT_SIMD_AUTO   = 0,  // detect best available at runtime
+    GLINT_SIMD_AVX    = 1,  // force AVX (crashes if unsupported!)
+    GLINT_SIMD_SSE2   = 2,  // force SSE2
+    GLINT_SIMD_NONE   = 3,  // scalar only
+};
+
 struct glint_config {
     int sample_rate;
     int num_channels;
     enum glint_mode mode;
     int bitrate;
     enum glint_path path;  // signal path selection (0 = default)
+    enum glint_simd simd;  // SIMD selection (0 = auto-detect)
 };
 
 int            glint_check_config(int sample_rate, int bitrate);

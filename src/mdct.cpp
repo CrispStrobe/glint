@@ -6,10 +6,9 @@
 #include <cstring>
 #include <cmath>
 
-#if defined(__AVX2__) || defined(__AVX__)
+#include "simd.hpp"
+#if defined(__AVX2__) || defined(__AVX__) || defined(__SSE2__) || defined(_M_X64)
 #include <immintrin.h>
-#elif defined(__SSE2__)
-#include <emmintrin.h>
 #endif
 
 #ifdef GLINT_FIXED_POINT

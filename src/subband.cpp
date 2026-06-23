@@ -6,10 +6,9 @@
 #include <cstring>
 #include <cmath>
 
-#if defined(__AVX2__) || defined(__AVX__)
+#include "simd.hpp"
+#if defined(__AVX2__) || defined(__AVX__) || defined(__SSE2__) || defined(_M_X64)
 #include <immintrin.h>
-#elif defined(__SSE2__)
-#include <emmintrin.h>
 #endif
 
 #ifdef GLINT_FIXED_POINT
@@ -47,46 +46,41 @@ void SubbandAnalysis::process_slot(const double* samples, double subband_out[kNu
     }
 
     for (int i = 0; i < 32; i++) {
+#if defined(__AVX2__) || defined(__AVX__) || defined(__SSE2__) || defined(_M_X64)
+        if (g_simd_level == GLINT_SIMD_AVX) {
 #if defined(__AVX2__) || defined(__AVX__)
-        __m256d vsum0 = _mm256_setzero_pd();
-        __m256d vsum1 = _mm256_setzero_pd();
-        for (int k = 0; k < 64; k += 8) {
-            __m256d vz0 = _mm256_loadu_pd(&z[k]);
-            __m256d vm0 = _mm256_loadu_pd(&tables::subband_matrix_d[i][k]);
-            vsum0 = _mm256_add_pd(vsum0, _mm256_mul_pd(vz0, vm0));
-            __m256d vz1 = _mm256_loadu_pd(&z[k + 4]);
-            __m256d vm1 = _mm256_loadu_pd(&tables::subband_matrix_d[i][k + 4]);
-            vsum1 = _mm256_add_pd(vsum1, _mm256_mul_pd(vz1, vm1));
-        }
-        vsum0 = _mm256_add_pd(vsum0, vsum1);
-        __m128d lo = _mm256_castpd256_pd128(vsum0);
-        __m128d hi = _mm256_extractf128_pd(vsum0, 1);
-        lo = _mm_add_pd(lo, hi);
-        subband_out[i] = _mm_cvtsd_f64(lo) + _mm_cvtsd_f64(_mm_unpackhi_pd(lo, lo));
-#elif defined(__SSE2__)
-        __m128d vsum0 = _mm_setzero_pd();
-        __m128d vsum1 = _mm_setzero_pd();
-        for (int k = 0; k < 64; k += 4) {
-            __m128d vz0 = _mm_loadu_pd(&z[k]);
-            __m128d vm0 = _mm_loadu_pd(&tables::subband_matrix_d[i][k]);
-            vsum0 = _mm_add_pd(vsum0, _mm_mul_pd(vz0, vm0));
-            __m128d vz1 = _mm_loadu_pd(&z[k + 2]);
-            __m128d vm1 = _mm_loadu_pd(&tables::subband_matrix_d[i][k + 2]);
-            vsum1 = _mm_add_pd(vsum1, _mm_mul_pd(vz1, vm1));
-        }
-        vsum0 = _mm_add_pd(vsum0, vsum1);
-        double tmp[2]; _mm_storeu_pd(tmp, vsum0);
-        subband_out[i] = tmp[0] + tmp[1];
-#else
-        double sum = 0.0;
-
-#ifndef _MSC_VER
-#pragma GCC unroll 8
+            __m256d vsum0 = _mm256_setzero_pd();
+            __m256d vsum1 = _mm256_setzero_pd();
+            for (int k = 0; k < 64; k += 8) {
+                vsum0 = _mm256_add_pd(vsum0, _mm256_mul_pd(_mm256_loadu_pd(&z[k]), _mm256_loadu_pd(&tables::subband_matrix_d[i][k])));
+                vsum1 = _mm256_add_pd(vsum1, _mm256_mul_pd(_mm256_loadu_pd(&z[k+4]), _mm256_loadu_pd(&tables::subband_matrix_d[i][k+4])));
+            }
+            vsum0 = _mm256_add_pd(vsum0, vsum1);
+            __m128d lo = _mm256_castpd256_pd128(vsum0);
+            __m128d hi = _mm256_extractf128_pd(vsum0, 1);
+            lo = _mm_add_pd(lo, hi);
+            subband_out[i] = _mm_cvtsd_f64(lo) + _mm_cvtsd_f64(_mm_unpackhi_pd(lo, lo));
+            continue;
 #endif
+        }
+        if (g_simd_level == GLINT_SIMD_SSE2 || g_simd_level == GLINT_SIMD_AVX) {
+            __m128d vsum0 = _mm_setzero_pd();
+            __m128d vsum1 = _mm_setzero_pd();
+            for (int k = 0; k < 64; k += 4) {
+                vsum0 = _mm_add_pd(vsum0, _mm_mul_pd(_mm_loadu_pd(&z[k]), _mm_loadu_pd(&tables::subband_matrix_d[i][k])));
+                vsum1 = _mm_add_pd(vsum1, _mm_mul_pd(_mm_loadu_pd(&z[k+2]), _mm_loadu_pd(&tables::subband_matrix_d[i][k+2])));
+            }
+            vsum0 = _mm_add_pd(vsum0, vsum1);
+            double tmp[2]; _mm_storeu_pd(tmp, vsum0);
+            subband_out[i] = tmp[0] + tmp[1];
+            continue;
+        }
+#endif
+        // Scalar fallback
+        double sum = 0.0;
         for (int k = 0; k < 64; k++)
             sum += z[k] * tables::subband_matrix_d[i][k];
         subband_out[i] = sum;
-#endif
     }
 }
 

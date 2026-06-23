@@ -93,12 +93,14 @@ static void print_usage(const char* prog) {
 #ifdef GLINT_BOTH_PATHS
     fprintf(stderr, "  -p PATH      double|fixed (default: fixed)\n");
 #endif
+    fprintf(stderr, "  -s SIMD      auto|avx|sse2|none (default: auto)\n");
 }
 
 int main(int argc, char** argv) {
     int bitrate = 128;
     const char* mode_str = nullptr;
     const char* path_str = nullptr;
+    const char* simd_str = nullptr;
     const char* input_path = nullptr;
     const char* output_path = nullptr;
 
@@ -110,6 +112,8 @@ int main(int argc, char** argv) {
             mode_str = argv[++i];
         } else if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) {
             path_str = argv[++i];
+        } else if (strcmp(argv[i], "-s") == 0 && i + 1 < argc) {
+            simd_str = argv[++i];
         } else if (!input_path) {
             input_path = argv[i];
         } else if (!output_path) {
@@ -188,6 +192,18 @@ int main(int argc, char** argv) {
             cfg.path = GLINT_PATH_FIXED;
         else {
             fprintf(stderr, "Error: invalid path '%s' (use double or fixed)\n", path_str);
+            fclose(wav_file);
+            return 1;
+        }
+    }
+    cfg.simd = GLINT_SIMD_AUTO;
+    if (simd_str) {
+        if (strcmp(simd_str, "auto") == 0) cfg.simd = GLINT_SIMD_AUTO;
+        else if (strcmp(simd_str, "avx") == 0) cfg.simd = GLINT_SIMD_AVX;
+        else if (strcmp(simd_str, "sse2") == 0 || strcmp(simd_str, "sse") == 0) cfg.simd = GLINT_SIMD_SSE2;
+        else if (strcmp(simd_str, "none") == 0 || strcmp(simd_str, "scalar") == 0) cfg.simd = GLINT_SIMD_NONE;
+        else {
+            fprintf(stderr, "Error: invalid SIMD '%s' (use auto|avx|sse2|none)\n", simd_str);
             fclose(wav_file);
             return 1;
         }
