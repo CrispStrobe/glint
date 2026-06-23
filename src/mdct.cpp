@@ -6,6 +6,12 @@
 #include <cstring>
 #include <cmath>
 
+#if defined(__AVX2__) || defined(__AVX__)
+#include <immintrin.h>
+#elif defined(__SSE2__)
+#include <emmintrin.h>
+#endif
+
 #ifdef GLINT_FIXED_POINT
 #include "fixedpoint.hpp"
 #endif
@@ -15,6 +21,9 @@ namespace glint {
 // === Double-precision path (always compiled) ===
 
 static double mdct_cos_d[36][18];
+#if defined(__AVX2__) || defined(__AVX__) || defined(__SSE2__)
+static double mdct_cos_d_t[18][36];  // transposed for SIMD contiguous access
+#endif
 static double mdct_win_d[36];
 static double alias_cs_d[8], alias_ca_d[8];
 static bool mdct_init = false;
@@ -27,6 +36,11 @@ static void init_mdct_d() {
         for (int k = 0; k < 18; k++)
             mdct_cos_d[n][k] = std::cos(PI / 72.0 * (2.0*n + 19.0) * (2.0*k + 1.0));
     }
+#if defined(__AVX2__) || defined(__AVX__) || defined(__SSE2__)
+    for (int n = 0; n < 36; n++)
+        for (int k = 0; k < 18; k++)
+            mdct_cos_d_t[k][n] = mdct_cos_d[n][k];
+#endif
     static constexpr double c[8] = {-0.6, -0.535, -0.33, -0.185, -0.095, -0.041, -0.0142, -0.0037};
     for (int i = 0; i < 8; i++) {
         alias_cs_d[i] = 1.0 / std::sqrt(1.0 + c[i]*c[i]);
@@ -47,6 +61,43 @@ void MDCT::process(const double subband[32][18], double mdct_out[32][18]) {
         for (int n = 0; n < 36; n++) x[n] *= mdct_win_d[n];
 
         for (int k = 0; k < 18; k++) {
+#if defined(__AVX2__) || defined(__AVX__)
+            __m256d vsum0 = _mm256_setzero_pd();
+            __m256d vsum1 = _mm256_setzero_pd();
+            // Process n=0..31 (4 iterations of 8)
+            for (int n = 0; n < 32; n += 8) {
+                __m256d vx0 = _mm256_loadu_pd(&x[n]);
+                __m256d vc0 = _mm256_loadu_pd(&mdct_cos_d_t[k][n]);
+                vsum0 = _mm256_add_pd(vsum0, _mm256_mul_pd(vx0, vc0));
+                __m256d vx1 = _mm256_loadu_pd(&x[n + 4]);
+                __m256d vc1 = _mm256_loadu_pd(&mdct_cos_d_t[k][n + 4]);
+                vsum1 = _mm256_add_pd(vsum1, _mm256_mul_pd(vx1, vc1));
+            }
+            // Remaining 4 elements (n=32..35)
+            __m256d vx_tail = _mm256_loadu_pd(&x[32]);
+            __m256d vc_tail = _mm256_loadu_pd(&mdct_cos_d_t[k][32]);
+            vsum0 = _mm256_add_pd(vsum0, _mm256_mul_pd(vx_tail, vc_tail));
+            vsum0 = _mm256_add_pd(vsum0, vsum1);
+            __m128d lo = _mm256_castpd256_pd128(vsum0);
+            __m128d hi = _mm256_extractf128_pd(vsum0, 1);
+            lo = _mm_add_pd(lo, hi);
+            double hsum = _mm_cvtsd_f64(lo) + _mm_cvtsd_f64(_mm_unpackhi_pd(lo, lo));
+            mdct_out[sb][k] = hsum / 288.0;
+#elif defined(__SSE2__)
+            __m128d vsum0 = _mm_setzero_pd();
+            __m128d vsum1 = _mm_setzero_pd();
+            for (int n = 0; n < 36; n += 4) {
+                __m128d vx0 = _mm_loadu_pd(&x[n]);
+                __m128d vc0 = _mm_loadu_pd(&mdct_cos_d_t[k][n]);
+                vsum0 = _mm_add_pd(vsum0, _mm_mul_pd(vx0, vc0));
+                __m128d vx1 = _mm_loadu_pd(&x[n + 2]);
+                __m128d vc1 = _mm_loadu_pd(&mdct_cos_d_t[k][n + 2]);
+                vsum1 = _mm_add_pd(vsum1, _mm_mul_pd(vx1, vc1));
+            }
+            vsum0 = _mm_add_pd(vsum0, vsum1);
+            double tmp[2]; _mm_storeu_pd(tmp, vsum0);
+            mdct_out[sb][k] = (tmp[0] + tmp[1]) / 288.0;
+#else
             double sum = 0.0;
 
 #ifndef _MSC_VER
@@ -55,6 +106,7 @@ void MDCT::process(const double subband[32][18], double mdct_out[32][18]) {
             for (int n = 0; n < 36; n++)
                 sum += x[n] * mdct_cos_d[n][k];
             mdct_out[sb][k] = sum / 288.0;
+#endif
         }
 
         for (int n = 0; n < 18; n++) prev_[sb][n] = subband[sb][n];
