@@ -242,21 +242,29 @@ glint/
   exhaustive trial (+10-37% speedup).
 - **Loop unrolling** -- `#pragma GCC unroll` on all hot loops.
 - **Bit reservoir** -- cross-frame bit lending via `main_data_begin`.
-- **CI/CD** -- GitHub Actions on Linux x86-64/aarch64, macOS, Windows.
-  Release workflow for tagged versions.
-- **Test suite** -- C++ unit tests, Python quality/ASR tests.
+- **x86 SIMD** -- AVX/SSE2 for subband matrixing and MDCT, runtime
+  dispatch via `-s auto|avx|sse2|none` and API `glint_simd` enum.
+- **Multi-format input** -- WAV PCM 8/16/24/32-bit, IEEE float 32/64,
+  A-law, mu-law, WAVE_FORMAT_EXTENSIBLE, raw PCM via `-r`.
+- **Multi-format API** -- `glint_encode()`, `glint_encode_float()`,
+  `glint_encode_int32()` entry points.
+- **Python bindings** -- ctypes wrapper with Encoder class, NumPy support.
+- **CI/CD** -- GitHub Actions on Linux x86-64/aarch64, macOS, Windows,
+  Android (3 ABIs), iOS (device + simulator). Release workflow.
+- **Test suite** -- 19 C++ unit tests, Python quality/ASR tests.
+- **v0.1.0 release** -- pre-built binaries for 4 desktop platforms.
 
 ### Planned
 
+- **Full-precision float path** -- feed float/double directly into
+  subband analysis without int16 bottleneck (preserves 24-bit sources)
 - **ARM NEON** -- SIMD intrinsics for ARM (subband + MDCT)
 - **Quality** -- psychoacoustic energy model, MPEG-II/2.5 validation,
   short block support for transients
-- **Mobile** -- Android AAR / iOS framework packaging, Flutter plugin
-- **Embedded** -- ESP-IDF component, Raspberry Pi Pico (RP2040)
-  validation with fixed-point path
+- **Mobile packaging** -- Android AAR, iOS xcframework, Flutter plugin
+- **Embedded** -- ESP-IDF component, RP2040 validation
 - **Distribution** -- vcpkg, Conan, pip (`glint-mp3`), crates.io
-- **Language bindings** -- Rust (`glint-sys` + safe crate), Dart (FFI
-  for Flutter), Python (ctypes)
+- **Language bindings** -- Rust (`glint-sys` + safe crate), Dart FFI
 
 ## License
 
