@@ -51,6 +51,10 @@ struct glint_context {
     int padding_remainder;
     int padding_threshold;
     int frame_count;
+
+    // Transient detection state (per channel)
+    double prev_granule_energy[2];  // per channel
+    bool prev_energy_valid;
 };
 
 #endif // GLINT_ENCODER_HPP

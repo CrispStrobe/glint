@@ -75,6 +75,31 @@ static int encode_scalefac_compress(int slen1, int slen2) {
     return 0;
 }
 
+// MPEG-2/2.5 scalefac_compress encoding (9 bits).
+// For normal (non-intensity) stereo, long blocks:
+// sfc < 180: slen[0]=sfc/36, slen[1]=(sfc%36)/6, slen[2]=(sfc%36)%6, slen[3]=0
+//   band groups: [6, 5, 5, 5]
+// sfc 180..243: slen[0]=(sfc-180)%64/16, slen[1]=(sfc-180)%16/4, slen[2]=(sfc-180)%4, slen[3]=0
+//   band groups: [6, 5, 7, 3]
+// sfc 244..255: slen[0]=(sfc-244)/3, slen[1]=(sfc-244)%3, slen[2]=0, slen[3]=0
+//   band groups: [11, 10, 0, 0]
+//
+// We use the first range (sfc < 180) for simplicity.
+// Given 4 slen values, encode as: sfc = slen[0]*36 + slen[1]*6 + slen[2]
+// slen[3] must be 0 for this range.
+static int encode_scalefac_compress_m2(int slen0, int slen1, int slen2, int slen3) {
+    // If slen3==0 and all fit in range [0,4] for slen0, [0,5] for slen1/2:
+    if (slen3 == 0 && slen0 < 5 && slen1 < 6 && slen2 < 6) {
+        return slen0 * 36 + slen1 * 6 + slen2;
+    }
+    // Fallback: use range 244..255 (slen[0]*(3) + slen[1], only 2 groups)
+    // This is limited, so try range 180..243 (sfc-180 = s0*16 + s1*4 + s2)
+    if (slen3 == 0 && slen0 < 4 && slen1 < 4 && slen2 < 4) {
+        return 180 + slen0 * 16 + slen1 * 4 + slen2;
+    }
+    return 0;  // all zero
+}
+
 GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
                               int sr_index, int quality_mode) {
     GranuleInfo info{};
@@ -181,15 +206,38 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
         }
 
         if (any) {
-            int max_sf1 = 0, max_sf2 = 0;
-            for (int b = 0; b < 11; b++) max_sf1 = std::max(max_sf1, info.scalefac[b]);
-            for (int b = 11; b < 21; b++) max_sf2 = std::max(max_sf2, info.scalefac[b]);
-            slen1 = 0; while ((1 << slen1) <= max_sf1) slen1++;
-            slen2 = 0; while ((1 << slen2) <= max_sf2) slen2++;
-            if (slen1 > 4) slen1 = 4;
-            if (slen2 > 3) slen2 = 3;
-            info.scalefac_compress = encode_scalefac_compress(slen1, slen2);
-            info.part2_length = slen1 * 11 + slen2 * 10;
+            bool is_mpeg2 = (sr_index >= 3);
+
+            if (is_mpeg2) {
+                // MPEG-2/2.5: 4 band groups [6, 5, 5, 5] = 21 bands
+                // Group 0: bands 0-5, Group 1: bands 6-10,
+                // Group 2: bands 11-15, Group 3: bands 16-20
+                int max_sf[4] = {};
+                for (int b = 0; b < 6; b++) max_sf[0] = std::max(max_sf[0], info.scalefac[b]);
+                for (int b = 6; b < 11; b++) max_sf[1] = std::max(max_sf[1], info.scalefac[b]);
+                for (int b = 11; b < 16; b++) max_sf[2] = std::max(max_sf[2], info.scalefac[b]);
+                for (int b = 16; b < 21; b++) max_sf[3] = std::max(max_sf[3], info.scalefac[b]);
+                int slen[4];
+                for (int g = 0; g < 4; g++) {
+                    slen[g] = 0;
+                    while ((1 << slen[g]) <= max_sf[g]) slen[g]++;
+                    if (slen[g] > 4) slen[g] = 4;
+                }
+                info.scalefac_compress = encode_scalefac_compress_m2(
+                    slen[0], slen[1], slen[2], slen[3]);
+                info.part2_length = slen[0]*6 + slen[1]*5 + slen[2]*5 + slen[3]*5;
+            } else {
+                // MPEG-1: 2 band groups [11, 10] = 21 bands
+                int max_sf1 = 0, max_sf2 = 0;
+                for (int b = 0; b < 11; b++) max_sf1 = std::max(max_sf1, info.scalefac[b]);
+                for (int b = 11; b < 21; b++) max_sf2 = std::max(max_sf2, info.scalefac[b]);
+                slen1 = 0; while ((1 << slen1) <= max_sf1) slen1++;
+                slen2 = 0; while ((1 << slen2) <= max_sf2) slen2++;
+                if (slen1 > 4) slen1 = 4;
+                if (slen2 > 3) slen2 = 3;
+                info.scalefac_compress = encode_scalefac_compress(slen1, slen2);
+                info.part2_length = slen1 * 11 + slen2 * 10;
+            }
             target_bits = available_bits - info.part2_length;
             if (target_bits < 0) target_bits = 0;
 

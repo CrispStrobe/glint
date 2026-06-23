@@ -13,6 +13,25 @@
 
 using namespace glint;
 
+// Transient detection: compares energy between consecutive granules.
+// Returns true if a transient (>9 dB energy jump) is detected.
+static bool detect_transient(const double subband_out[32][36], int gr,
+                             bool prev_energy_valid, double* prev_energy) {
+    double energy = 0;
+    int t0 = gr * 18;
+    for (int sb = 0; sb < 32; sb++)
+        for (int ts = t0; ts < t0 + 18; ts++)
+            energy += subband_out[sb][ts] * subband_out[sb][ts];
+
+    bool transient = false;
+    if (prev_energy_valid && *prev_energy > 0) {
+        double ratio = energy / *prev_energy;
+        if (ratio > 8.0) transient = true;  // 9 dB jump = transient
+    }
+    *prev_energy = energy;
+    return transient;
+}
+
 int glint_check_config(int sample_rate, int bitrate) {
     if (tables::samplerate_to_index(sample_rate) < 0) return -1;
     int mpeg_ver = tables::detect_mpeg_version(sample_rate);
@@ -86,6 +105,10 @@ glint_t glint_create(const glint_config* cfg) {
     ctx->use_fixed_point = false;
 #endif
 
+    ctx->prev_granule_energy[0] = 0;
+    ctx->prev_granule_energy[1] = 0;
+    ctx->prev_energy_valid = false;
+
     for (int ch = 0; ch < ctx->num_channels; ch++) {
         ctx->subband[ch].reset();
         ctx->mdct[ch].reset();
@@ -105,18 +128,27 @@ int glint_samples_per_frame(glint_t enc) {
     return 1152;  // MPEG-1: 2 granules = 1152 samples
 }
 
-static void write_granule_side_info(BitstreamWriter& bs, const GranuleInfo& gi) {
+static void write_granule_side_info(BitstreamWriter& bs, const GranuleInfo& gi,
+                                    int mpeg_version = 1) {
     bs.write_bits(gi.part2_3_length, 12);
     bs.write_bits(gi.regions.big_values, 9);
     bs.write_bits(gi.global_gain, 8);
-    bs.write_bits(gi.scalefac_compress, 4);
+    if (mpeg_version == 1) {
+        bs.write_bits(gi.scalefac_compress, 4);
+    } else {
+        // MPEG-2/2.5: scalefac_compress is 9 bits
+        bs.write_bits(gi.scalefac_compress, 9);
+    }
     bs.write_bits(0, 1);  // window_switching_flag = 0 (long blocks)
     bs.write_bits(gi.regions.table_select[0], 5);
     bs.write_bits(gi.regions.table_select[1], 5);
     bs.write_bits(gi.regions.table_select[2], 5);
     bs.write_bits(gi.regions.region0_count, 4);
     bs.write_bits(gi.regions.region1_count, 3);
-    bs.write_bits(gi.preflag, 1);
+    if (mpeg_version == 1) {
+        bs.write_bits(gi.preflag, 1);
+    }
+    // No preflag for MPEG-2/2.5
     bs.write_bits(gi.scalefac_scale, 1);
     bs.write_bits(gi.regions.count1table, 1);
 }
@@ -194,6 +226,11 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
             }
 
             for (int ch = 0; ch < nch; ch++) {
+                // Transient detection on subband output
+                bool transient_detected = detect_transient(
+                    subband_out_d[ch], gr,
+                    enc->prev_energy_valid, &enc->prev_granule_energy[ch]);
+
                 // Frequency inversion and extract granule slice in one pass
                 double sub_gr[32][18];
                 for (int sb = 0; sb < 32; sb++)
@@ -213,9 +250,20 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
 
                 granule_info[gr][ch] = quantize_granule(mdct_flat, bits_per_granule,
                                                          enc->sr_index, enc->quality_mode);
+
+                // On transient, boost low-band scalefactors to spread noise to
+                // higher frequencies, reducing pre-echo perception
+                if (transient_detected && enc->quality_mode >= 1) {
+                    GranuleInfo& info = granule_info[gr][ch];
+                    for (int b = 0; b < 5; b++)
+                        info.scalefac[b] = std::min(info.scalefac[b] + 2, 7);
+                }
+
                 total_main_bits += granule_info[gr][ch].part2_3_length;
             }
         }
+        // Mark energy as valid after first frame
+        enc->prev_energy_valid = true;
     };
 
 #ifdef GLINT_FIXED_POINT
@@ -343,21 +391,21 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
         }
         for (int gr = 0; gr < 2; gr++)
             for (int ch = 0; ch < nch; ch++)
-                write_granule_side_info(si, granule_info[gr][ch]);
+                write_granule_side_info(si, granule_info[gr][ch], enc->mpeg_version);
     } else {
         // MPEG-2/2.5 side info
         si.write_bits(main_data_begin, 8); // 8 bits for MPEG-2
         if (nch == 1) si.write_bits(0, 1); else si.write_bits(0, 2); // private bits
         // No scfsi for MPEG-2
         for (int ch = 0; ch < nch; ch++)
-            write_granule_side_info(si, granule_info[0][ch]);
+            write_granule_side_info(si, granule_info[0][ch], enc->mpeg_version);
     }
 
     // Write main data
     BitstreamWriter& md = enc->frame_asm.main_data();
     md.reset();
 
-    static const int slen_table[16][2] = {
+    static const int slen_table_m1[16][2] = {
         {0,0},{0,1},{0,2},{0,3},{3,0},{1,1},{1,2},{1,3},
         {2,1},{2,2},{2,3},{3,1},{3,2},{3,3},{4,2},{4,3}
     };
@@ -365,26 +413,64 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
     for (int gr = 0; gr < num_gr; gr++) {
         for (int ch = 0; ch < nch; ch++) {
             const GranuleInfo& gi = granule_info[gr][ch];
-            int slen1 = slen_table[gi.scalefac_compress][0];
-            int slen2 = slen_table[gi.scalefac_compress][1];
 
-            // Write scalefactors, skipping SCFSI-shared groups for granule 1 (MPEG-1 only)
-            if (enc->mpeg_version != 1 || gr == 0) {
-                // MPEG-2 or Granule 0: always write all scalefactors
-                for (int b = 0; b < 11; b++)
-                    if (slen1 > 0) md.write_bits(gi.scalefac[b], slen1);
-                for (int b = 11; b < 21; b++)
-                    if (slen2 > 0) md.write_bits(gi.scalefac[b], slen2);
+            if (enc->mpeg_version != 1) {
+                // MPEG-2/2.5: decode 9-bit scalefac_compress to 4 slen values
+                // Range 0..179: slen[0]=sfc/36, slen[1]=(sfc%36)/6, slen[2]=(sfc%36)%6, slen[3]=0
+                //   band groups: [6, 5, 5, 5]
+                int sfc = gi.scalefac_compress;
+                int slen[4] = {};
+                int nr[4] = {6, 5, 5, 5};
+                if (sfc < 180) {
+                    slen[0] = sfc / 36;
+                    slen[1] = (sfc % 36) / 6;
+                    slen[2] = (sfc % 36) % 6;
+                    slen[3] = 0;
+                } else if (sfc < 244) {
+                    int v = sfc - 180;
+                    slen[0] = v / 16;
+                    slen[1] = (v % 16) / 4;
+                    slen[2] = v % 4;
+                    slen[3] = 0;
+                    nr[0] = 6; nr[1] = 5; nr[2] = 7; nr[3] = 3;
+                } else {
+                    int v = sfc - 244;
+                    slen[0] = v / 3;
+                    slen[1] = v % 3;
+                    slen[2] = 0;
+                    slen[3] = 0;
+                    nr[0] = 11; nr[1] = 10; nr[2] = 0; nr[3] = 0;
+                }
+                // Write scalefactors in 4 groups
+                int b = 0;
+                for (int g = 0; g < 4; g++) {
+                    for (int i = 0; i < nr[g] && b < 21; i++, b++) {
+                        if (slen[g] > 0)
+                            md.write_bits(gi.scalefac[b], slen[g]);
+                    }
+                }
             } else {
-                // MPEG-1 Granule 1: skip groups where scfsi=1
-                for (int b = 0; b < 6; b++)
-                    if (slen1 > 0 && !scfsi[ch][0]) md.write_bits(gi.scalefac[b], slen1);
-                for (int b = 6; b < 11; b++)
-                    if (slen1 > 0 && !scfsi[ch][1]) md.write_bits(gi.scalefac[b], slen1);
-                for (int b = 11; b < 16; b++)
-                    if (slen2 > 0 && !scfsi[ch][2]) md.write_bits(gi.scalefac[b], slen2);
-                for (int b = 16; b < 21; b++)
-                    if (slen2 > 0 && !scfsi[ch][3]) md.write_bits(gi.scalefac[b], slen2);
+                // MPEG-1 scalefactor encoding
+                int slen1 = slen_table_m1[gi.scalefac_compress][0];
+                int slen2 = slen_table_m1[gi.scalefac_compress][1];
+
+                if (gr == 0) {
+                    // Granule 0: always write all scalefactors
+                    for (int b = 0; b < 11; b++)
+                        if (slen1 > 0) md.write_bits(gi.scalefac[b], slen1);
+                    for (int b = 11; b < 21; b++)
+                        if (slen2 > 0) md.write_bits(gi.scalefac[b], slen2);
+                } else {
+                    // Granule 1: skip groups where scfsi=1
+                    for (int b = 0; b < 6; b++)
+                        if (slen1 > 0 && !scfsi[ch][0]) md.write_bits(gi.scalefac[b], slen1);
+                    for (int b = 6; b < 11; b++)
+                        if (slen1 > 0 && !scfsi[ch][1]) md.write_bits(gi.scalefac[b], slen1);
+                    for (int b = 11; b < 16; b++)
+                        if (slen2 > 0 && !scfsi[ch][2]) md.write_bits(gi.scalefac[b], slen2);
+                    for (int b = 16; b < 21; b++)
+                        if (slen2 > 0 && !scfsi[ch][3]) md.write_bits(gi.scalefac[b], slen2);
+                }
             }
 
             huffman_encode(gi.ix, gi.regions, enc->sr_index, md);
@@ -487,6 +573,11 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
         }
 
         for (int ch = 0; ch < nch; ch++) {
+            // Transient detection on subband output
+            bool transient_detected = detect_transient(
+                subband_out_d[ch], gr,
+                enc->prev_energy_valid, &enc->prev_granule_energy[ch]);
+
             double sub_gr[32][18];
             for (int sb = 0; sb < 32; sb++)
                 for (int ts = 0; ts < 18; ts++) {
@@ -505,9 +596,20 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
 
             granule_info[gr][ch] = quantize_granule(mdct_flat, bits_per_granule,
                                                      enc->sr_index, enc->quality_mode);
+
+            // On transient, boost low-band scalefactors to spread noise to
+            // higher frequencies, reducing pre-echo perception
+            if (transient_detected && enc->quality_mode >= 1) {
+                GranuleInfo& info = granule_info[gr][ch];
+                for (int b = 0; b < 5; b++)
+                    info.scalefac[b] = std::min(info.scalefac[b] + 2, 7);
+            }
+
             total_main_bits += granule_info[gr][ch].part2_3_length;
         }
     }
+    // Mark energy as valid after first frame
+    enc->prev_energy_valid = true;
 
     // --- Frame assembly (identical to glint_encode) ---
 
@@ -567,18 +669,18 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
         }
         for (int gr = 0; gr < 2; gr++)
             for (int ch = 0; ch < nch; ch++)
-                write_granule_side_info(si, granule_info[gr][ch]);
+                write_granule_side_info(si, granule_info[gr][ch], enc->mpeg_version);
     } else {
         si.write_bits(main_data_begin, 8);
         if (nch == 1) si.write_bits(0, 1); else si.write_bits(0, 2);
         for (int ch = 0; ch < nch; ch++)
-            write_granule_side_info(si, granule_info[0][ch]);
+            write_granule_side_info(si, granule_info[0][ch], enc->mpeg_version);
     }
 
     BitstreamWriter& md = enc->frame_asm.main_data();
     md.reset();
 
-    static const int slen_table[16][2] = {
+    static const int slen_table_m1f[16][2] = {
         {0,0},{0,1},{0,2},{0,3},{3,0},{1,1},{1,2},{1,3},
         {2,1},{2,2},{2,3},{3,1},{3,2},{3,3},{4,2},{4,3}
     };
@@ -586,23 +688,58 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
     for (int gr = 0; gr < num_gr; gr++) {
         for (int ch = 0; ch < nch; ch++) {
             const GranuleInfo& gi = granule_info[gr][ch];
-            int slen1 = slen_table[gi.scalefac_compress][0];
-            int slen2 = slen_table[gi.scalefac_compress][1];
 
-            if (enc->mpeg_version != 1 || gr == 0) {
-                for (int b = 0; b < 11; b++)
-                    if (slen1 > 0) md.write_bits(gi.scalefac[b], slen1);
-                for (int b = 11; b < 21; b++)
-                    if (slen2 > 0) md.write_bits(gi.scalefac[b], slen2);
+            if (enc->mpeg_version != 1) {
+                // MPEG-2/2.5: decode 9-bit scalefac_compress to 4 slen values
+                int sfc = gi.scalefac_compress;
+                int slen[4] = {};
+                int nr[4] = {6, 5, 5, 5};
+                if (sfc < 180) {
+                    slen[0] = sfc / 36;
+                    slen[1] = (sfc % 36) / 6;
+                    slen[2] = (sfc % 36) % 6;
+                    slen[3] = 0;
+                } else if (sfc < 244) {
+                    int v = sfc - 180;
+                    slen[0] = v / 16;
+                    slen[1] = (v % 16) / 4;
+                    slen[2] = v % 4;
+                    slen[3] = 0;
+                    nr[0] = 6; nr[1] = 5; nr[2] = 7; nr[3] = 3;
+                } else {
+                    int v = sfc - 244;
+                    slen[0] = v / 3;
+                    slen[1] = v % 3;
+                    slen[2] = 0;
+                    slen[3] = 0;
+                    nr[0] = 11; nr[1] = 10; nr[2] = 0; nr[3] = 0;
+                }
+                int b = 0;
+                for (int g = 0; g < 4; g++) {
+                    for (int i = 0; i < nr[g] && b < 21; i++, b++) {
+                        if (slen[g] > 0)
+                            md.write_bits(gi.scalefac[b], slen[g]);
+                    }
+                }
             } else {
-                for (int b = 0; b < 6; b++)
-                    if (slen1 > 0 && !scfsi[ch][0]) md.write_bits(gi.scalefac[b], slen1);
-                for (int b = 6; b < 11; b++)
-                    if (slen1 > 0 && !scfsi[ch][1]) md.write_bits(gi.scalefac[b], slen1);
-                for (int b = 11; b < 16; b++)
-                    if (slen2 > 0 && !scfsi[ch][2]) md.write_bits(gi.scalefac[b], slen2);
-                for (int b = 16; b < 21; b++)
-                    if (slen2 > 0 && !scfsi[ch][3]) md.write_bits(gi.scalefac[b], slen2);
+                int slen1 = slen_table_m1f[gi.scalefac_compress][0];
+                int slen2 = slen_table_m1f[gi.scalefac_compress][1];
+
+                if (gr == 0) {
+                    for (int b = 0; b < 11; b++)
+                        if (slen1 > 0) md.write_bits(gi.scalefac[b], slen1);
+                    for (int b = 11; b < 21; b++)
+                        if (slen2 > 0) md.write_bits(gi.scalefac[b], slen2);
+                } else {
+                    for (int b = 0; b < 6; b++)
+                        if (slen1 > 0 && !scfsi[ch][0]) md.write_bits(gi.scalefac[b], slen1);
+                    for (int b = 6; b < 11; b++)
+                        if (slen1 > 0 && !scfsi[ch][1]) md.write_bits(gi.scalefac[b], slen1);
+                    for (int b = 11; b < 16; b++)
+                        if (slen2 > 0 && !scfsi[ch][2]) md.write_bits(gi.scalefac[b], slen2);
+                    for (int b = 16; b < 21; b++)
+                        if (slen2 > 0 && !scfsi[ch][3]) md.write_bits(gi.scalefac[b], slen2);
+                }
             }
 
             huffman_encode(gi.ix, gi.regions, enc->sr_index, md);

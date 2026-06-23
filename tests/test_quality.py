@@ -224,6 +224,53 @@ def main():
         if not test_stereo(enc_bin, tmpdir):
             all_pass = False
 
+        # --- MPEG-II/2.5 sample rate tests ---
+        print("\n=== MPEG-II/2.5 Sample Rates ===")
+        for sr in [22050, 16000, 11025, 8000]:
+            t = np.arange(sr * 2) / sr
+            pcm = (np.sin(2 * np.pi * min(400, sr/4) * t) * 20000).astype(np.int16)
+            wav = os.path.join(tmpdir, f'sr_{sr}.wav')
+            gen_wav(wav, pcm, sr=sr)
+            mp3 = os.path.join(tmpdir, f'sr_{sr}.mp3')
+            # Use appropriate bitrate for lower sample rates
+            br = 64 if sr <= 16000 else 96
+            try:
+                r = subprocess.run([enc_bin, wav, mp3, '-b', str(br)] + enc_extra,
+                                   capture_output=True, text=True, timeout=30)
+                ok = r.returncode == 0
+                if ok:
+                    errors = check_ffmpeg_errors(mp3)
+                    ok = len(errors) == 0
+            except Exception:
+                ok = False
+            status = "PASS" if ok else "FAIL"
+            print(f"  {status} {sr} Hz @ {br} kbps")
+            if not ok:
+                all_pass = False
+
+        # --- Transient detection test ---
+        print("\n=== Transient Detection ===")
+        # Silence then loud burst - should encode without errors
+        sr_t = 44100
+        pcm_transient = np.zeros(sr_t * 2, dtype=np.int16)
+        pcm_transient[sr_t:sr_t+1000] = 30000  # 23ms burst after 1s silence
+        wav_t = os.path.join(tmpdir, 'transient.wav')
+        gen_wav(wav_t, pcm_transient, sr=sr_t)
+        mp3_t = os.path.join(tmpdir, 'transient.mp3')
+        try:
+            r = subprocess.run([enc_bin, wav_t, mp3_t, '-b', '128'] + enc_extra,
+                               capture_output=True, text=True, timeout=30)
+            ok_t = r.returncode == 0
+            if ok_t:
+                errors = check_ffmpeg_errors(mp3_t)
+                ok_t = len(errors) == 0
+        except Exception:
+            ok_t = False
+        status = "PASS" if ok_t else "FAIL"
+        print(f"  {status} transient signal (silence + burst)")
+        if not ok_t:
+            all_pass = False
+
         # --- Summary ---
         print(f"\n{'ALL TESTS PASSED' if all_pass else 'SOME TESTS FAILED'}")
         sys.exit(0 if all_pass else 1)
