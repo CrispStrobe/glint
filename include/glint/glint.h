@@ -44,7 +44,12 @@ struct glint_config {
 int            glint_check_config(int sample_rate, int bitrate);
 glint_t        glint_create(const struct glint_config* cfg);
 int            glint_samples_per_frame(glint_t enc);
+
+// Encode one frame. channel_data[ch] points to samples_per_frame samples.
 const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data, int* out_size);
+const uint8_t* glint_encode_float(glint_t enc, const float** channel_data, int* out_size);
+const uint8_t* glint_encode_int32(glint_t enc, const int32_t** channel_data, int* out_size);
+
 const uint8_t* glint_flush(glint_t enc, int* out_size);
 void           glint_destroy(glint_t enc);
 

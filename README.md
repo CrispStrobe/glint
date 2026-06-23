@@ -84,12 +84,15 @@ Produces:
 
 ```
 glint_cli [options] input.wav output.mp3
-  -b BITRATE   Bitrate in kbps (default: 128)
-  -m MODE      mono|stereo|joint (default: auto)
+  -b BITRATE        Bitrate in kbps (default: 128)
+  -m MODE           mono|stereo|joint (default: auto)
+  -s SIMD           auto|avx|sse2|none (default: auto)
+  -r RATE:CH:BITS   Raw PCM input (e.g., 44100:1:16)
 ```
 
-Input must be 16-bit PCM WAV. Supported sample rates: 8000, 11025, 12000,
-16000, 22050, 24000, 32000, 44100, 48000 Hz.
+Input formats: WAV with PCM (8/16/24/32-bit), IEEE float (32/64-bit),
+A-law, mu-law, or WAVE_FORMAT_EXTENSIBLE. Raw headerless PCM via `-r`.
+Sample rates: 8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000 Hz.
 
 ### C API
 
@@ -121,7 +124,9 @@ glint_destroy(enc);
 | `glint_check_config(sr, br)` | Validate sample rate / bitrate pair |
 | `glint_create(cfg)` | Create encoder, returns handle (NULL on error) |
 | `glint_samples_per_frame(enc)` | Samples per channel per frame (1152 or 576) |
-| `glint_encode(enc, channels, &size)` | Encode one frame, returns MP3 bytes |
+| `glint_encode(enc, channels, &size)` | Encode from `int16_t**` |
+| `glint_encode_float(enc, channels, &size)` | Encode from `float**` (range [-1, 1]) |
+| `glint_encode_int32(enc, channels, &size)` | Encode from `int32_t**` (full 32-bit range) |
 | `glint_flush(enc, &size)` | Flush remaining data |
 | `glint_destroy(enc)` | Free encoder |
 

@@ -406,6 +406,54 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
     return enc->output_buf;
 }
 
+const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
+                                  int* out_size) {
+    if (!enc || !channel_data || !out_size) {
+        if (out_size) *out_size = 0;
+        return nullptr;
+    }
+    int spf = glint_samples_per_frame(enc);
+    int nch = enc->num_channels;
+    int16_t* bufs[2];
+    bufs[0] = new int16_t[spf];
+    bufs[1] = (nch > 1) ? new int16_t[spf] : nullptr;
+    for (int ch = 0; ch < nch; ch++) {
+        for (int i = 0; i < spf; i++) {
+            float v = channel_data[ch][i] * 32767.0f;
+            if (v > 32767.0f) v = 32767.0f;
+            if (v < -32768.0f) v = -32768.0f;
+            bufs[ch][i] = static_cast<int16_t>(v);
+        }
+    }
+    const int16_t* ptrs[2] = { bufs[0], bufs[1] };
+    const uint8_t* result = glint_encode(enc, ptrs, out_size);
+    delete[] bufs[0];
+    delete[] bufs[1];
+    return result;
+}
+
+const uint8_t* glint_encode_int32(glint_t enc, const int32_t** channel_data,
+                                   int* out_size) {
+    if (!enc || !channel_data || !out_size) {
+        if (out_size) *out_size = 0;
+        return nullptr;
+    }
+    int spf = glint_samples_per_frame(enc);
+    int nch = enc->num_channels;
+    int16_t* bufs[2];
+    bufs[0] = new int16_t[spf];
+    bufs[1] = (nch > 1) ? new int16_t[spf] : nullptr;
+    for (int ch = 0; ch < nch; ch++) {
+        for (int i = 0; i < spf; i++)
+            bufs[ch][i] = static_cast<int16_t>(channel_data[ch][i] >> 16);
+    }
+    const int16_t* ptrs[2] = { bufs[0], bufs[1] };
+    const uint8_t* result = glint_encode(enc, ptrs, out_size);
+    delete[] bufs[0];
+    delete[] bufs[1];
+    return result;
+}
+
 const uint8_t* glint_flush(glint_t enc, int* out_size) {
     if (!enc || !out_size) {
         if (out_size) *out_size = 0;
