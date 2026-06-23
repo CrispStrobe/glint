@@ -330,6 +330,7 @@ static void print_usage(const char* prog) {
     fprintf(stderr, "  -p PATH          double|fixed (default: fixed)\n");
 #endif
     fprintf(stderr, "  -s SIMD          auto|avx|sse2|neon|none (default: auto)\n");
+    fprintf(stderr, "  -q QUALITY       speed|normal (default: speed)\n");
     fprintf(stderr, "  -r RATE:CH:BITS  Raw PCM input (e.g., 44100:1:16)\n");
 }
 
@@ -360,6 +361,7 @@ int main(int argc, char** argv) {
     const char* mode_str = nullptr;
     const char* path_str = nullptr;
     const char* simd_str = nullptr;
+    const char* quality_str = nullptr;
     const char* raw_spec = nullptr;
     const char* input_path = nullptr;
     const char* output_path = nullptr;
@@ -374,6 +376,8 @@ int main(int argc, char** argv) {
             path_str = argv[++i];
         } else if (strcmp(argv[i], "-s") == 0 && i + 1 < argc) {
             simd_str = argv[++i];
+        } else if (strcmp(argv[i], "-q") == 0 && i + 1 < argc) {
+            quality_str = argv[++i];
         } else if (strcmp(argv[i], "-r") == 0 && i + 1 < argc) {
             raw_spec = argv[++i];
         } else if (!input_path) {
@@ -496,6 +500,16 @@ int main(int argc, char** argv) {
         else if (strcmp(simd_str, "none") == 0 || strcmp(simd_str, "scalar") == 0) cfg.simd = GLINT_SIMD_NONE;
         else {
             fprintf(stderr, "Error: invalid SIMD '%s' (use auto|avx|sse2|neon|none)\n", simd_str);
+            fclose(wav_file);
+            return 1;
+        }
+    }
+    cfg.quality = GLINT_QUALITY_SPEED;
+    if (quality_str) {
+        if (strcmp(quality_str, "speed") == 0) cfg.quality = GLINT_QUALITY_SPEED;
+        else if (strcmp(quality_str, "normal") == 0) cfg.quality = GLINT_QUALITY_NORMAL;
+        else {
+            fprintf(stderr, "Error: invalid quality '%s' (use speed or normal)\n", quality_str);
             fclose(wav_file);
             return 1;
         }

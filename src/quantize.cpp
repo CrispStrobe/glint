@@ -76,7 +76,7 @@ static int encode_scalefac_compress(int slen1, int slen2) {
 }
 
 GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
-                              int sr_index) {
+                              int sr_index, int quality_mode) {
     GranuleInfo info{};
     std::memset(&info, 0, sizeof(info));
     init_quant_tables();
@@ -147,8 +147,29 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
                 if (band_energy[band] / max_energy > 0.01) active_bands++;
         }
 
-        if (max_energy > 0.0 && active_bands >= 3) {
-            bool any = false;
+        bool any = false;
+        if (quality_mode == 1 && max_energy > 0.0) {
+            // Spreading function: each band masks neighbors at ~8 dB/band distance
+            double masking[21] = {};
+            for (int i = 0; i < 21; i++) {
+                for (int j = 0; j < 21; j++) {
+                    double spread = std::pow(10.0, -std::abs(i - j) * 0.8);
+                    masking[i] += band_energy[j] * spread;
+                }
+            }
+
+            // Scalefactor = inverse of signal-to-mask ratio
+            for (int band = 0; band < 21; band++) {
+                if (masking[band] > 0 && band_energy[band] > 0) {
+                    double smr = band_energy[band] / masking[band];
+                    int sf = 7 - static_cast<int>(std::log2(std::max(smr, 0.001)) * 1.5);
+                    if (sf < 0) sf = 0;
+                    if (sf > 7) sf = 7;
+                    info.scalefac[band] = sf;
+                    if (sf > 0) any = true;
+                }
+            }
+        } else if (max_energy > 0.0 && active_bands >= 3) {
             for (int band = 0; band < 21; band++) {
                 double ratio = band_energy[band] / max_energy;
                 if (ratio > 0.01) {
@@ -157,31 +178,32 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
                     if (sf > 0) { info.scalefac[band] = sf; any = true; }
                 }
             }
-            if (any) {
-                int max_sf1 = 0, max_sf2 = 0;
-                for (int b = 0; b < 11; b++) max_sf1 = std::max(max_sf1, info.scalefac[b]);
-                for (int b = 11; b < 21; b++) max_sf2 = std::max(max_sf2, info.scalefac[b]);
-                slen1 = 0; while ((1 << slen1) <= max_sf1) slen1++;
-                slen2 = 0; while ((1 << slen2) <= max_sf2) slen2++;
-                if (slen1 > 4) slen1 = 4;
-                if (slen2 > 3) slen2 = 3;
-                info.scalefac_compress = encode_scalefac_compress(slen1, slen2);
-                info.part2_length = slen1 * 11 + slen2 * 10;
-                target_bits = available_bits - info.part2_length;
-                if (target_bits < 0) target_bits = 0;
+        }
 
-                lo = min_gain; hi = 255; best_gain = 255;
-                for (int iter = 0; iter < 16 && lo <= hi; iter++) {
-                    int gain = (lo + hi) / 2;
-                    int bits = quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
-                                               info.scalefac_scale, info.preflag, sr_index);
-                    if (bits <= target_bits) { hi = gain; best_gain = gain; }
-                    else { lo = gain + 1; }
-                }
-                info.global_gain = best_gain;
-                quantize_and_count(mdct_in, info.ix, best_gain, info.scalefac,
-                                   info.scalefac_scale, info.preflag, sr_index);
+        if (any) {
+            int max_sf1 = 0, max_sf2 = 0;
+            for (int b = 0; b < 11; b++) max_sf1 = std::max(max_sf1, info.scalefac[b]);
+            for (int b = 11; b < 21; b++) max_sf2 = std::max(max_sf2, info.scalefac[b]);
+            slen1 = 0; while ((1 << slen1) <= max_sf1) slen1++;
+            slen2 = 0; while ((1 << slen2) <= max_sf2) slen2++;
+            if (slen1 > 4) slen1 = 4;
+            if (slen2 > 3) slen2 = 3;
+            info.scalefac_compress = encode_scalefac_compress(slen1, slen2);
+            info.part2_length = slen1 * 11 + slen2 * 10;
+            target_bits = available_bits - info.part2_length;
+            if (target_bits < 0) target_bits = 0;
+
+            lo = min_gain; hi = 255; best_gain = 255;
+            for (int iter = 0; iter < 16 && lo <= hi; iter++) {
+                int gain = (lo + hi) / 2;
+                int bits = quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
+                                           info.scalefac_scale, info.preflag, sr_index);
+                if (bits <= target_bits) { hi = gain; best_gain = gain; }
+                else { lo = gain + 1; }
             }
+            info.global_gain = best_gain;
+            quantize_and_count(mdct_in, info.ix, best_gain, info.scalefac,
+                               info.scalefac_scale, info.preflag, sr_index);
         }
     }
 

@@ -51,6 +51,7 @@ glint_t glint_create(const glint_config* cfg) {
 
     ctx->num_channels = cfg->num_channels;
     ctx->frame_count = 0;
+    ctx->quality_mode = static_cast<int>(cfg->quality);
 
     if (ctx->mpeg_version == 1) {
         // MPEG-1: side info is 17 bytes (mono) or 32 bytes (stereo)
@@ -211,7 +212,7 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                         mdct_flat[sb * 18 + k] = mdct_out[sb][k];
 
                 granule_info[gr][ch] = quantize_granule(mdct_flat, bits_per_granule,
-                                                         enc->sr_index);
+                                                         enc->sr_index, enc->quality_mode);
                 total_main_bits += granule_info[gr][ch].part2_3_length;
             }
         }
@@ -259,7 +260,7 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                         mdct_flat[sb * 18 + k] = mdct_out[sb][k] / 16777216.0;
 
                 granule_info[gr][ch] = quantize_granule(mdct_flat, bits_per_granule,
-                                                         enc->sr_index);
+                                                         enc->sr_index, enc->quality_mode);
                 total_main_bits += granule_info[gr][ch].part2_3_length;
             }
         }
@@ -503,7 +504,7 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
                     mdct_flat[sb * 18 + k] = mdct_out[sb][k];
 
             granule_info[gr][ch] = quantize_granule(mdct_flat, bits_per_granule,
-                                                     enc->sr_index);
+                                                     enc->sr_index, enc->quality_mode);
             total_main_bits += granule_info[gr][ch].part2_3_length;
         }
     }

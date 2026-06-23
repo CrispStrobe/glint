@@ -33,6 +33,11 @@ enum glint_simd {
     GLINT_SIMD_NEON   = 4,  // force AArch64 NEON (crashes if unsupported!)
 };
 
+enum glint_quality {
+    GLINT_QUALITY_SPEED  = 0,  // default: no masking model
+    GLINT_QUALITY_NORMAL = 1,  // simplified energy-based masking
+};
+
 struct glint_config {
     int sample_rate;
     int num_channels;
@@ -40,6 +45,7 @@ struct glint_config {
     int bitrate;
     enum glint_path path;  // signal path selection (0 = default)
     enum glint_simd simd;  // SIMD selection (0 = auto-detect)
+    enum glint_quality quality;  // quality mode (0 = speed, 1 = normal)
 };
 
 int            glint_check_config(int sample_rate, int bitrate);

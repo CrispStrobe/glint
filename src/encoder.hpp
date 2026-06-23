@@ -28,6 +28,7 @@ struct glint_context {
     int side_info_bits;
 
     bool use_fixed_point;  // runtime path selection
+    int quality_mode;      // 0=speed, 1=normal (psychoacoustic masking)
 
     glint::SubbandAnalysis subband[2];
     glint::MDCT mdct[2];

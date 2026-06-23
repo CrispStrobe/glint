@@ -22,7 +22,7 @@ struct GranuleInfo {
 };
 
 GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
-                              int sr_index);
+                              int sr_index, int quality_mode = 0);
 
 } // namespace glint
 
