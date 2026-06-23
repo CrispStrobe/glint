@@ -12,30 +12,31 @@ real-time use.
 
 At 128 kbps mono, 44100 Hz (measured against ffmpeg decode):
 
-| Signal | Correlation | SNR | Amplitude ratio |
-|---|---|---|---|
-| 1 kHz sine | 1.0000 | 81.5 dB | 1.000 |
-| Speech (JFK) | 1.0000 | 57.3 dB | 1.000 |
-| Multi-tone (6 freq) | 1.0000 | 55.1 dB | 1.000 |
+| Signal | Correlation | SNR |
+|---|---|---|
+| 1 kHz sine | 0.9955 | 18.6 dB |
+| 440 Hz sine | 0.9900 | 16.1 dB |
+| Multi-tone (6 freq) | 0.9930 | 5.9 dB |
+| Speech (JFK) | 0.9408 | 4.6 dB |
 
-Whisper ASR produces identical word-level transcription on the original
-and encoded-then-decoded speech.
+Whisper ASR round-trip: 91% word similarity (identical content,
+punctuation differences only). All bitrates 32-320 kbps decode
+without errors via ffmpeg.
 
 ## Speed
 
-Encoding speed on Intel Xeon Skylake, single-threaded, `-O2`:
+Encoding speed on Intel Xeon Skylake, single-threaded, Release build:
 
-| Mode | Bitrate | Speed |
+| Signal | Mono 128 kbps | vs LAME |
 |---|---|---|
-| Mono | 128 kbps | 7.1x realtime |
-| Mono | 320 kbps | 8.0x realtime |
-| Stereo | 128 kbps | 6.3x realtime |
-| Stereo | 320 kbps | 3.5x realtime |
+| Sine | 144x realtime | 3.6x faster |
+| Speech | ~80x realtime | 2x faster |
+| Noise | 38x realtime | ~1x (comparable) |
 
-For comparison, LAME achieves ~40x mono / ~20x stereo on the same hardware.
-The gap is primarily due to the double-precision signal path (LAME uses
-optimized integer/SIMD); converting to fixed-point (Phase 1 in the roadmap)
-is expected to close this significantly.
+Optimizations: pow34 table lookup, fused subband+MDCT pipeline,
+max-value Huffman table selection, pragma loop unrolling,
+`-march=native -ffast-math`. Bit reservoir enabled for cross-frame
+bit lending.
 
 ## Building
 
@@ -161,13 +162,15 @@ for time-domain alias cancellation (TDAC).
 
 **Quantization** -- The inner loop uses `ix = floor(|xr|^(3/4) * gain + 0.4054)`
 with anti-clipping: computes the minimum `global_gain` that keeps all
-quantized values below 8191 before starting the binary search. Energy-based
-scalefactor assignment with spectral diversity guard (only activates for
-broadband signals). SCFSI shares identical scalefactors between granules.
+quantized values below 8191 before starting the binary search. `x^(3/4)` uses
+interpolating lookup in a 10000-entry table (no `std::pow` in the hot loop).
+Energy-based scalefactor assignment with spectral diversity guard. SCFSI
+shares identical scalefactors between granules. Bit reservoir enables
+cross-frame bit lending via `main_data_begin`.
 
 **Huffman tables** -- All 34 tables from ISO 11172-3 Annex B (Tables B.7).
-Region boundaries derived from scalefactor band tables. Table selection
-by exhaustive trial per region. ESC tables (16-31) with linbits for
+Region boundaries derived from scalefactor band tables. Max-value-indexed
+table selection (O(1) lookup). ESC tables (16-31) with linbits for
 values >= 15.
 
 **MPEG version support** -- MPEG-1 (32/44.1/48 kHz, 2 granules),
@@ -195,70 +198,33 @@ glint/
 
 ## Roadmap
 
-The encoder is functional and produces correct MP3 output. Planned
-improvements grouped by phase:
+### Done
 
-### Phase 1 -- Fixed-point signal path
+- **Fixed-point signal path** -- Q24/Q31 integer subband analysis,
+  MDCT, and alias reduction via `-DGLINT_MODE=fixed`. Three build
+  modes: double, fixed, both (runtime `-p` flag). Platform-portable
+  (`__int128` on GCC/Clang, int64 fallback on MSVC).
+- **pow34 table lookup** -- interpolating `pow34_table[10000]` replaces
+  `std::pow(x, 0.75)` in the quantizer (2.09x speedup).
+- **Fused subband+MDCT pipeline** -- eliminated 72 KB intermediate buffer.
+- **Huffman max-value lookup** -- O(1) table selection replaces
+  exhaustive trial (+10-37% speedup).
+- **Loop unrolling** -- `#pragma GCC unroll` on all hot loops.
+- **Bit reservoir** -- cross-frame bit lending via `main_data_begin`.
+- **CI/CD** -- GitHub Actions on Linux x86-64/aarch64, macOS, Windows.
+  Release workflow for tagged versions.
+- **Test suite** -- C++ unit tests, Python quality/ASR tests.
 
-Convert the per-frame hot path from `double` to `int32_t` Q31, gated by
-a compile-time flag (`-DGLINT_FIXED_POINT`) so both paths coexist.
-A third build mode (`-DGLINT_BOTH`) compiles both and selects at
-runtime via CLI flag (`-p fixed`/`-p double`) or API parameter.
+### Planned
 
-- Convert subband analysis, MDCT, alias reduction to Q31 using
-  `fpmul()`/`fpmul_acc()` from `fixedpoint.hpp`
-- Activate platform multiply intrinsics: ARM `smmul`/`smmla`,
-  MIPS `mult`/`mfhi` (already defined in `fixedpoint.hpp`, unused)
-- Integer-indexed `pow34_table[10000]` -- replace `std::pow(x, 0.75)`
-  with direct lookup in the quantizer inner loop
-- Precomputed gain step table for the quantizer binary search
-- Target: >= 200x realtime on modern x86-64
-
-### Phase 2 -- Pipeline optimisation
-
-- **Fused subband+MDCT** -- eliminate the intermediate 32x36 buffer
-  by streaming subband samples directly into the MDCT (~20-30%
-  speedup on cache-constrained cores)
-- **Loop unrolling** -- manual unroll of subband (64 MACs), MDCT
-  (36 MACs), and alias reduction (8 butterflies) by factor 4-8
-- **Huffman table selection** -- max-value-indexed lookup instead of
-  exhaustive trial per region
-
-### Phase 3 -- Bit reservoir
-
-- Enable cross-frame bit lending via `main_data_begin` (interface
-  exists in `reservoir.hpp`, disabled pending frame assembly work)
-- Back-buffer for main data spanning across frames
-- Stuffing bits to drain reservoir at end-of-stream
-- Expected quality gain: 1-2 dB SNR on variable-complexity material
-
-### Phase 4 -- SIMD
-
-- x86 SSE/AVX for subband matrixing (32x64 matrix-vector multiply
-  is a natural fit for `_mm_madd_epi16` / `_mm256_mullo_epi32`)
-- x86 SSE/AVX for MDCT inner loop (36-point dot product)
-- NEON intrinsics for ARM (complementing the existing scalar
-  `smmul`/`smmla` paths)
-
-### Phase 5 -- Quality refinements
-
-- Simplified psychoacoustic energy model for smarter per-band bit
-  allocation (energy-weighted scalefactors instead of uniform)
-- Full MPEG-II/2.5 validation across all sample rates
-- Short block support for transient signals
-
-### Phase 6 -- CI/CD and distribution
-
-- GitHub Actions: build + test on Linux (x86-64, aarch64), macOS
-  (Apple Silicon), Windows (MSVC)
-- Release binaries: pre-built CLI for all platforms via CI
-- Package manager support (vcpkg, Conan)
-
-### Phase 7 -- Language bindings
-
-- **Rust** — `glint-sys` (raw FFI) + `glint` (safe wrapper crate)
-- **Dart** — FFI bindings for Flutter mobile/desktop MP3 encoding
-- **Python** — `ctypes` or `pybind11` wrapper
+- **SIMD** -- x86 SSE/AVX for subband matrixing and MDCT dot products,
+  ARM NEON intrinsics
+- **Quality** -- simplified psychoacoustic energy model, MPEG-II/2.5
+  validation, short block support for transients
+- **Distribution** -- package managers (vcpkg, Conan), pre-built
+  release binaries
+- **Language bindings** -- Rust (`glint-sys` + safe crate), Dart (FFI
+  for Flutter), Python (`ctypes` or `pybind11`)
 
 ## License
 
