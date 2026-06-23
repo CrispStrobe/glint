@@ -256,15 +256,21 @@ glint/
 
 ### Planned
 
-- **Full-precision float path** -- feed float/double directly into
-  subband analysis without int16 bottleneck (preserves 24-bit sources)
-- **ARM NEON** -- SIMD intrinsics for ARM (subband + MDCT)
-- **Quality** -- psychoacoustic energy model, MPEG-II/2.5 validation,
-  short block support for transients
+- **ARM NEON** -- SIMD intrinsics for ARM subband + MDCT (like AVX/SSE2
+  on x86, with runtime dispatch)
+- **Psychoacoustic model** -- simplified energy-based masking for
+  smarter per-band bit allocation (currently uses uniform energy ratio)
+- **Short blocks** -- block switching for transient signals (currently
+  long blocks only)
+- **MPEG-II/2.5 validation** -- end-to-end test across all lower
+  sample rates (8-24 kHz)
 - **Mobile packaging** -- Android AAR, iOS xcframework, Flutter plugin
-- **Embedded** -- ESP-IDF component, RP2040 validation
-- **Distribution** -- vcpkg, Conan, pip (`glint-mp3`), crates.io
-- **Language bindings** -- Rust (`glint-sys` + safe crate), Dart FFI
+  with pub.dev / CocoaPods distribution
+- **Embedded validation** -- ESP-IDF component, RP2040 / Cortex-M
+  testing with fixed-point path
+- **Package managers** -- vcpkg, Conan, pip (`glint-mp3`), crates.io
+- **Streaming API** -- callback-based output, non-blocking encode for
+  real-time use (currently frame-at-a-time only)
 
 ## License
 
