@@ -96,6 +96,18 @@ void SubbandAnalysis::analyze(const int16_t* pcm, double out[kNumSubbands][kTime
     }
 }
 
+void SubbandAnalysis::analyze_float(const float* pcm, double out[kNumSubbands][kTimeSlots], int num_slots) {
+    for (int ts = 0; ts < num_slots; ts++) {
+        double samples[32];
+        for (int i = 0; i < 32; i++)
+            samples[i] = static_cast<double>(pcm[ts * 32 + i]);  // float [-1,1] directly
+        double slot_out[kNumSubbands];
+        process_slot(samples, slot_out);
+        for (int sb = 0; sb < kNumSubbands; sb++)
+            out[sb][ts] = slot_out[sb];
+    }
+}
+
 #ifdef GLINT_FIXED_POINT
 
 // === Fixed-point (Q24) path ===

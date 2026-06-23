@@ -412,24 +412,213 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
         if (out_size) *out_size = 0;
         return nullptr;
     }
-    int spf = glint_samples_per_frame(enc);
+
     int nch = enc->num_channels;
-    int16_t* bufs[2];
-    bufs[0] = new int16_t[spf];
-    bufs[1] = (nch > 1) ? new int16_t[spf] : nullptr;
-    for (int ch = 0; ch < nch; ch++) {
-        for (int i = 0; i < spf; i++) {
-            float v = channel_data[ch][i] * 32767.0f;
-            if (v > 32767.0f) v = 32767.0f;
-            if (v < -32768.0f) v = -32768.0f;
-            bufs[ch][i] = static_cast<int16_t>(v);
+    bool use_ms = (enc->config.mode == GLINT_JOINT && nch == 2);
+
+    // If using fixed-point path, fall back to int16 conversion (float path
+    // only applies to the double-precision signal path).
+    if (enc->use_fixed_point) {
+        int spf = glint_samples_per_frame(enc);
+        int16_t* bufs[2];
+        bufs[0] = new int16_t[spf];
+        bufs[1] = (nch > 1) ? new int16_t[spf] : nullptr;
+        for (int ch = 0; ch < nch; ch++) {
+            for (int i = 0; i < spf; i++) {
+                float v = channel_data[ch][i] * 32767.0f;
+                if (v > 32767.0f) v = 32767.0f;
+                if (v < -32768.0f) v = -32768.0f;
+                bufs[ch][i] = static_cast<int16_t>(v);
+            }
+        }
+        const int16_t* ptrs[2] = { bufs[0], bufs[1] };
+        const uint8_t* result = glint_encode(enc, ptrs, out_size);
+        delete[] bufs[0];
+        delete[] bufs[1];
+        return result;
+    }
+
+    // --- Double-precision float path: feed float directly into subband analysis ---
+
+    // Padding
+    enc->padding = 0;
+    int bitrate_bps = enc->config.bitrate * 1000;
+    int frame_slot_mult = (enc->mpeg_version == 1) ? 144 : 72;
+    int remainder = (frame_slot_mult * bitrate_bps) % enc->config.sample_rate;
+    enc->padding_remainder += remainder;
+    if (enc->padding_remainder >= enc->config.sample_rate) {
+        enc->padding_remainder -= enc->config.sample_rate;
+        enc->padding = 1;
+    }
+
+    int this_frame_size = enc->frame_size + enc->padding;
+    int this_frame_bits = this_frame_size * 8 - 32 - enc->side_info_bits;
+
+    int reservoir_bytes = 0;
+    int available_bits = this_frame_bits;
+
+    int num_gr = enc->num_granules;
+    int bits_per_granule = available_bits / (num_gr * nch);
+    if (bits_per_granule < 0) bits_per_granule = 0;
+
+    int num_slots = num_gr * 18;
+    GranuleInfo granule_info[2][2];
+    int total_main_bits = 0;
+    int mode_ext = 0;
+
+    // Subband analysis using float input (no int16 truncation)
+    double subband_out_d[2][32][36];
+    for (int ch = 0; ch < nch; ch++)
+        enc->subband[ch].analyze_float(channel_data[ch], subband_out_d[ch], num_slots);
+
+    for (int gr = 0; gr < num_gr; gr++) {
+        int t0 = gr * 18;
+
+        if (use_ms) {
+            for (int sb = 0; sb < 32; sb++)
+                for (int ts = 0; ts < 18; ts++) {
+                    double l = subband_out_d[0][sb][t0 + ts];
+                    double r = subband_out_d[1][sb][t0 + ts];
+                    subband_out_d[0][sb][t0 + ts] = (l + r) * 0.7071067811865476;
+                    subband_out_d[1][sb][t0 + ts] = (l - r) * 0.7071067811865476;
+                }
+            mode_ext = 2;
+        }
+
+        for (int ch = 0; ch < nch; ch++) {
+            double sub_gr[32][18];
+            for (int sb = 0; sb < 32; sb++)
+                for (int ts = 0; ts < 18; ts++) {
+                    double v = subband_out_d[ch][sb][t0 + ts];
+                    sub_gr[sb][ts] = ((sb & 1) && (ts & 1)) ? -v : v;
+                }
+
+            double mdct_out[32][18];
+            enc->mdct[ch].process(sub_gr, mdct_out);
+            alias_reduce_d(mdct_out);
+
+            double mdct_flat[576];
+            for (int sb = 0; sb < 32; sb++)
+                for (int k = 0; k < 18; k++)
+                    mdct_flat[sb * 18 + k] = mdct_out[sb][k];
+
+            granule_info[gr][ch] = quantize_granule(mdct_flat, bits_per_granule,
+                                                     enc->sr_index);
+            total_main_bits += granule_info[gr][ch].part2_3_length;
         }
     }
-    const int16_t* ptrs[2] = { bufs[0], bufs[1] };
-    const uint8_t* result = glint_encode(enc, ptrs, out_size);
-    delete[] bufs[0];
-    delete[] bufs[1];
-    return result;
+
+    // --- Frame assembly (identical to glint_encode) ---
+
+    // Compute SCFSI
+    static const int scfsi_band[5] = {0, 6, 11, 16, 21};
+    int scfsi[2][4] = {};
+    if (num_gr == 2) {
+        for (int ch = 0; ch < nch; ch++) {
+            for (int group = 0; group < 4; group++) {
+                bool match = true;
+                for (int b = scfsi_band[group]; b < scfsi_band[group+1] && b < 21; b++) {
+                    if (granule_info[0][ch].scalefac[b] != granule_info[1][ch].scalefac[b]) {
+                        match = false;
+                        break;
+                    }
+                }
+                scfsi[ch][group] = match ? 1 : 0;
+            }
+            if (granule_info[1][ch].part2_length > 0) {
+                static const int slen_table_scfsi[16][2] = {
+                    {0,0},{0,1},{0,2},{0,3},{3,0},{1,1},{1,2},{1,3},
+                    {2,1},{2,2},{2,3},{3,1},{3,2},{3,3},{4,2},{4,3}
+                };
+                int slen1 = slen_table_scfsi[granule_info[1][ch].scalefac_compress][0];
+                int slen2 = slen_table_scfsi[granule_info[1][ch].scalefac_compress][1];
+                int saved = 0;
+                if (scfsi[ch][0]) saved += slen1 * 6;
+                if (scfsi[ch][1]) saved += slen1 * 5;
+                if (scfsi[ch][2]) saved += slen2 * 5;
+                if (scfsi[ch][3]) saved += slen2 * 5;
+                granule_info[1][ch].part2_length -= saved;
+                granule_info[1][ch].part2_3_length -= saved;
+                total_main_bits -= saved;
+            }
+        }
+    }
+
+    int channel_mode = mode_to_mpeg(enc->config.mode);
+    int hdr_sr_index = (enc->sr_index < 3) ? enc->sr_index : (enc->sr_index - 3);
+    enc->frame_asm.reset();
+    enc->frame_asm.write_header(enc->br_index, hdr_sr_index,
+                                 enc->padding, channel_mode, mode_ext,
+                                 enc->mpeg_version);
+
+    BitstreamWriter& si = enc->frame_asm.side_info();
+    si.reset();
+    int main_data_begin = std::min(reservoir_bytes, enc->reservoir_buf_size);
+
+    if (enc->mpeg_version == 1) {
+        si.write_bits(main_data_begin, 9);
+        if (nch == 1) si.write_bits(0, 5); else si.write_bits(0, 3);
+        for (int ch = 0; ch < nch; ch++) {
+            si.write_bits(scfsi[ch][0], 1);
+            si.write_bits(scfsi[ch][1], 1);
+            si.write_bits(scfsi[ch][2], 1);
+            si.write_bits(scfsi[ch][3], 1);
+        }
+        for (int gr = 0; gr < 2; gr++)
+            for (int ch = 0; ch < nch; ch++)
+                write_granule_side_info(si, granule_info[gr][ch]);
+    } else {
+        si.write_bits(main_data_begin, 8);
+        if (nch == 1) si.write_bits(0, 1); else si.write_bits(0, 2);
+        for (int ch = 0; ch < nch; ch++)
+            write_granule_side_info(si, granule_info[0][ch]);
+    }
+
+    BitstreamWriter& md = enc->frame_asm.main_data();
+    md.reset();
+
+    static const int slen_table[16][2] = {
+        {0,0},{0,1},{0,2},{0,3},{3,0},{1,1},{1,2},{1,3},
+        {2,1},{2,2},{2,3},{3,1},{3,2},{3,3},{4,2},{4,3}
+    };
+
+    for (int gr = 0; gr < num_gr; gr++) {
+        for (int ch = 0; ch < nch; ch++) {
+            const GranuleInfo& gi = granule_info[gr][ch];
+            int slen1 = slen_table[gi.scalefac_compress][0];
+            int slen2 = slen_table[gi.scalefac_compress][1];
+
+            if (enc->mpeg_version != 1 || gr == 0) {
+                for (int b = 0; b < 11; b++)
+                    if (slen1 > 0) md.write_bits(gi.scalefac[b], slen1);
+                for (int b = 11; b < 21; b++)
+                    if (slen2 > 0) md.write_bits(gi.scalefac[b], slen2);
+            } else {
+                for (int b = 0; b < 6; b++)
+                    if (slen1 > 0 && !scfsi[ch][0]) md.write_bits(gi.scalefac[b], slen1);
+                for (int b = 6; b < 11; b++)
+                    if (slen1 > 0 && !scfsi[ch][1]) md.write_bits(gi.scalefac[b], slen1);
+                for (int b = 11; b < 16; b++)
+                    if (slen2 > 0 && !scfsi[ch][2]) md.write_bits(gi.scalefac[b], slen2);
+                for (int b = 16; b < 21; b++)
+                    if (slen2 > 0 && !scfsi[ch][3]) md.write_bits(gi.scalefac[b], slen2);
+            }
+
+            huffman_encode(gi.ix, gi.regions, enc->sr_index, md);
+        }
+    }
+
+    md.flush();
+    int md_bytes = md.byte_count();
+
+    enc->reservoir.update(total_main_bits);
+
+    const uint8_t* frame = enc->frame_asm.assemble(this_frame_size, out_size);
+    std::memcpy(enc->output_buf, frame, *out_size);
+    enc->reservoir_buf_size = std::min(enc->reservoir_buf_size + md_bytes, 8192);
+
+    enc->frame_count++;
+    return enc->output_buf;
 }
 
 const uint8_t* glint_encode_int32(glint_t enc, const int32_t** channel_data,

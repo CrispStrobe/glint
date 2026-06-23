@@ -214,6 +214,139 @@ static void test_fixed_vs_double() {
 }
 #endif
 
+// --- Float subband analysis preserves more precision than int16 path ---
+static void test_float_subband() {
+    std::printf("Float subband analysis precision...\n");
+    glint::tables::init_tables();
+
+    // Generate a low-amplitude sine that exercises precision beyond 16-bit
+    // A value like 0.00003 (~1 LSB in int16) should survive float path but
+    // gets quantized to 0 or 1 in int16.
+    const int num_slots = 36;
+    const int num_samples = num_slots * 32;
+    float pcm_float[num_samples];
+    int16_t pcm_int16[num_samples];
+    for (int i = 0; i < num_samples; i++) {
+        // Use a signal that has detail below int16 precision
+        float v = static_cast<float>(std::sin(2.0 * 3.14159265 * 1000.0 * i / 44100.0) * 0.001);
+        pcm_float[i] = v;
+        // Simulate the old float->int16->double round-trip
+        float vi = v * 32767.0f;
+        if (vi > 32767.0f) vi = 32767.0f;
+        if (vi < -32768.0f) vi = -32768.0f;
+        pcm_int16[i] = static_cast<int16_t>(vi);
+    }
+
+    // Run float path
+    glint::SubbandAnalysis sb_f;
+    double out_float[32][36];
+    sb_f.analyze_float(pcm_float, out_float, num_slots);
+
+    // Run int16 path (simulates old glint_encode_float behavior)
+    glint::SubbandAnalysis sb_i;
+    double out_int16[32][36];
+    sb_i.analyze(pcm_int16, out_int16, num_slots);
+
+    // The float path should produce non-zero output for low-amplitude signals
+    double float_energy = 0, int16_energy = 0;
+    for (int sb = 0; sb < 32; sb++)
+        for (int ts = 0; ts < 36; ts++) {
+            float_energy += out_float[sb][ts] * out_float[sb][ts];
+            int16_energy += out_int16[sb][ts] * out_int16[sb][ts];
+        }
+
+    CHECK(float_energy > 0, "float path produces non-zero output for low-level signal");
+    // Float path should have more energy (or equal) since it doesn't truncate
+    CHECK(float_energy >= int16_energy * 0.99,
+          "float path preserves at least as much energy as int16 path");
+}
+
+// --- Float encode API smoke test ---
+static void test_float_encode_api() {
+    std::printf("Float encode API...\n");
+
+    glint_config cfg = {};
+    cfg.sample_rate = 44100;
+    cfg.num_channels = 1;
+    cfg.mode = GLINT_MONO;
+    cfg.bitrate = 128;
+    cfg.path = GLINT_PATH_DEFAULT;
+
+    glint_t enc = glint_create(&cfg);
+    CHECK(enc != nullptr, "encoder created for float test");
+
+    int spf = glint_samples_per_frame(enc);
+
+    // Generate a test signal as float [-1,1]
+    float* pcm = new float[spf];
+    for (int i = 0; i < spf; i++)
+        pcm[i] = static_cast<float>(std::sin(2.0 * 3.14159265 * 440.0 * i / 44100.0) * 0.5);
+
+    const float* ch[] = { pcm };
+    int out_size = 0;
+    const uint8_t* frame = glint_encode_float(enc, ch, &out_size);
+    CHECK(frame != nullptr, "float encode returns non-null");
+    CHECK(out_size > 0, "float encode returns data");
+    CHECK(frame[0] == 0xFF && (frame[1] & 0xE0) == 0xE0, "float encode produces valid MP3 sync word");
+
+    // Encode a second frame to verify state continuity
+    int out_size2 = 0;
+    const uint8_t* frame2 = glint_encode_float(enc, ch, &out_size2);
+    CHECK(frame2 != nullptr, "float encode second frame non-null");
+    CHECK(out_size2 > 0, "float encode second frame has data");
+
+    delete[] pcm;
+    glint_destroy(enc);
+}
+
+// --- Float vs int16 encode: float path should produce equal or better output ---
+static void test_float_vs_int16_encode() {
+    std::printf("Float vs int16 encode comparison...\n");
+
+    glint_config cfg = {};
+    cfg.sample_rate = 44100;
+    cfg.num_channels = 1;
+    cfg.mode = GLINT_MONO;
+    cfg.bitrate = 128;
+    cfg.path = GLINT_PATH_DOUBLE;
+
+    // Encode via float path
+    glint_t enc_f = glint_create(&cfg);
+    int spf = glint_samples_per_frame(enc_f);
+
+    float* pcm_float = new float[spf];
+    for (int i = 0; i < spf; i++)
+        pcm_float[i] = static_cast<float>(std::sin(2.0 * 3.14159265 * 1000.0 * i / 44100.0) * 0.8);
+
+    const float* ch_f[] = { pcm_float };
+    int out_f = 0;
+    const uint8_t* frame_f = glint_encode_float(enc_f, ch_f, &out_f);
+    CHECK(frame_f != nullptr && out_f > 0, "float path encode OK");
+
+    // Encode via int16 path (same signal converted to int16)
+    glint_t enc_i = glint_create(&cfg);
+    int16_t* pcm_int16 = new int16_t[spf];
+    for (int i = 0; i < spf; i++) {
+        float v = pcm_float[i] * 32767.0f;
+        if (v > 32767.0f) v = 32767.0f;
+        if (v < -32768.0f) v = -32768.0f;
+        pcm_int16[i] = static_cast<int16_t>(v);
+    }
+
+    const int16_t* ch_i[] = { pcm_int16 };
+    int out_i = 0;
+    const uint8_t* frame_i = glint_encode(enc_i, ch_i, &out_i);
+    CHECK(frame_i != nullptr && out_i > 0, "int16 path encode OK");
+
+    // Both should produce valid frames of same size (same bitrate/padding)
+    CHECK(out_f == out_i, "float and int16 paths produce same frame size");
+
+    delete[] pcm_float;
+    delete[] pcm_int16;
+    glint_destroy(enc_f);
+    glint_destroy(enc_i);
+}
+
 int main() {
     std::printf("=== glint unit tests ===\n\n");
 
@@ -223,6 +356,9 @@ int main() {
     test_quantize_roundtrip();
     test_mdct_tdac();
     test_api();
+    test_float_subband();
+    test_float_encode_api();
+    test_float_vs_int16_encode();
 
 #ifdef GLINT_FIXED_POINT
     test_fixed_vs_double();

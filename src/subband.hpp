@@ -16,6 +16,7 @@ class SubbandAnalysis {
 public:
     SubbandAnalysis();
     void analyze(const int16_t* pcm, double out[kNumSubbands][kTimeSlots], int num_slots = kTimeSlots);
+    void analyze_float(const float* pcm, double out[kNumSubbands][kTimeSlots], int num_slots = kTimeSlots);
     void reset();
 
 private:
