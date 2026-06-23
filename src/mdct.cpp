@@ -84,11 +84,15 @@ void MDCT_FP::process(const int32_t subband[32][18], int32_t mdct_out[32][18]) {
         for (int n = 0; n < 36; n++)
             x[n] = static_cast<int32_t>((static_cast<int64_t>(x[n]) * tables::mdct_window[n]) >> 31);
 
+        // MDCT cosine accumulation: x is Q24, mdct_cos is Q31.
+        // Full product Q24*Q31 = Q55, sum of 36 terms can overflow int64.
+        // Pre-shift x >> 2 to Q22: Q22*Q31 = Q53, sum of 36 fits int64.
+        // Divide by 288, then >> 29 to get Q24.
         for (int k = 0; k < 18; k++) {
             int64_t sum = 0;
             for (int n = 0; n < 36; n++)
-                sum += static_cast<int64_t>(x[n]) * tables::mdct_cos[n][k];
-            mdct_out[sb][k] = static_cast<int32_t>((sum / 288) >> 31);
+                sum += static_cast<int64_t>(x[n] >> 2) * tables::mdct_cos[n][k];
+            mdct_out[sb][k] = static_cast<int32_t>((sum / 288) >> 29);
         }
 
         for (int n = 0; n < 18; n++) prev_[sb][n] = subband[sb][n];
