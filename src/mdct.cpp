@@ -48,7 +48,10 @@ void MDCT::process(const double subband[32][18], double mdct_out[32][18]) {
 
         for (int k = 0; k < 18; k++) {
             double sum = 0.0;
+
+#ifndef _MSC_VER
 #pragma GCC unroll 6
+#endif
             for (int n = 0; n < 36; n++)
                 sum += x[n] * mdct_cos_d[n][k];
             mdct_out[sb][k] = sum / 288.0;
@@ -60,7 +63,10 @@ void MDCT::process(const double subband[32][18], double mdct_out[32][18]) {
 
 void alias_reduce_d(double mdct_out[32][18]) {
     for (int sb = 0; sb < 31; sb++) {
+
+#ifndef _MSC_VER
 #pragma GCC unroll 8
+#endif
         for (int i = 0; i < 8; i++) {
             double a = mdct_out[sb][17 - i];
             double b = mdct_out[sb + 1][i];
@@ -92,7 +98,10 @@ void MDCT_FP::process(const int32_t subband[32][18], int32_t mdct_out[32][18]) {
         // Divide by 288, then >> 29 to get Q24.
         for (int k = 0; k < 18; k++) {
             int64_t sum = 0;
+
+#ifndef _MSC_VER
 #pragma GCC unroll 6
+#endif
             for (int n = 0; n < 36; n++)
                 sum += static_cast<int64_t>(x[n] >> 2) * tables::mdct_cos[n][k];
             mdct_out[sb][k] = static_cast<int32_t>((sum / 288) >> 29);
@@ -104,7 +113,10 @@ void MDCT_FP::process(const int32_t subband[32][18], int32_t mdct_out[32][18]) {
 
 void alias_reduce_fp(int32_t mdct_out[32][18]) {
     for (int sb = 0; sb < 31; sb++) {
+
+#ifndef _MSC_VER
 #pragma GCC unroll 8
+#endif
         for (int i = 0; i < 8; i++) {
             int32_t a = mdct_out[sb][17 - i];
             int32_t b = mdct_out[sb + 1][i];

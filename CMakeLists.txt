@@ -6,7 +6,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Enable native architecture optimizations in Release builds
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
-    add_compile_options(-march=native -ffast-math)
+    if(MSVC)
+        add_compile_options(/O2 /fp:fast)
+    else()
+        add_compile_options(-march=native -ffast-math)
+    endif()
 endif()
 
 # Signal path mode:
