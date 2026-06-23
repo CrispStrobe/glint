@@ -1,0 +1,49 @@
+// glint - Encoder orchestrator
+// MIT License - Clean-room implementation
+
+#ifndef GLINT_ENCODER_HPP
+#define GLINT_ENCODER_HPP
+
+#include <cstdint>
+#include "glint/glint.h"
+#include "subband.hpp"
+#include "mdct.hpp"
+#include "quantize.hpp"
+#include "huffman.hpp"
+#include "reservoir.hpp"
+#include "bitstream.hpp"
+#include "tables.hpp"
+
+// Define at global scope to match the C forward declaration in glint.h
+struct glint_context {
+    glint_config config;
+    int sr_index;
+    int br_index;
+    int num_channels;
+    int mpeg_version;  // 1 = MPEG-1, 0 = MPEG-2, -1 = MPEG-2.5
+    int num_granules;  // 2 for MPEG-1, 1 for MPEG-2/2.5
+    int frame_size;
+    int padding;
+    int mean_bits_per_frame;
+    int side_info_bits;
+
+    glint::SubbandAnalysis subband[2];
+    glint::MDCT mdct[2];
+    glint::BitReservoir reservoir;
+
+    // Bit reservoir back-buffer (circular): holds main data from previous frames
+    // so the decoder can reference main_data_begin bytes before current frame.
+    uint8_t reservoir_buf[8192];
+    int reservoir_buf_write;   // write position in circular buffer
+    int reservoir_buf_size;    // valid bytes in circular buffer (up to 8192)
+
+    glint::FrameAssembler frame_asm;
+    uint8_t output_buf[glint::kMaxFrameSize];
+    int output_size;
+
+    int padding_remainder;
+    int padding_threshold;
+    int frame_count;
+};
+
+#endif // GLINT_ENCODER_HPP
