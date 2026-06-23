@@ -325,6 +325,7 @@ static void print_usage(const char* prog) {
     fprintf(stderr, "Usage: %s [options] input.wav output.mp3\n", prog);
     fprintf(stderr, "Options:\n");
     fprintf(stderr, "  -b BITRATE       Bitrate in kbps (default: 128)\n");
+    fprintf(stderr, "  -V QUALITY       VBR quality 0-9 (0=best/largest, 9=worst/smallest)\n");
     fprintf(stderr, "  -m MODE          mono|stereo|joint (default: auto)\n");
 #ifdef GLINT_BOTH_PATHS
     fprintf(stderr, "  -p PATH          double|fixed (default: fixed)\n");
@@ -358,6 +359,7 @@ static bool parse_raw_spec(const char* spec, int* rate, int* channels, int* bits
 
 int main(int argc, char** argv) {
     int bitrate = 128;
+    int vbr_quality = -1;  // -1 = not set (CBR mode)
     const char* mode_str = nullptr;
     const char* path_str = nullptr;
     const char* simd_str = nullptr;
@@ -370,6 +372,12 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-b") == 0 && i + 1 < argc) {
             bitrate = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "-V") == 0 && i + 1 < argc) {
+            vbr_quality = atoi(argv[++i]);
+            if (vbr_quality < 0 || vbr_quality > 9) {
+                fprintf(stderr, "Error: VBR quality must be 0-9\n");
+                return 1;
+            }
         } else if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) {
             mode_str = argv[++i];
         } else if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) {
@@ -459,10 +467,11 @@ int main(int argc, char** argv) {
         mode = (wav.num_channels == 1) ? GLINT_MONO : GLINT_JOINT;
     }
 
-    // Validate config
-    if (glint_check_config(wav.sample_rate, bitrate) != 0) {
+    // Validate config (VBR uses 320 kbps internally)
+    int check_bitrate = (vbr_quality >= 0) ? 320 : bitrate;
+    if (glint_check_config(wav.sample_rate, check_bitrate) != 0) {
         fprintf(stderr, "Error: invalid sample rate (%d) or bitrate (%d kbps)\n",
-                wav.sample_rate, bitrate);
+                wav.sample_rate, check_bitrate);
         fclose(wav_file);
         return 1;
     }
@@ -514,6 +523,12 @@ int main(int argc, char** argv) {
             return 1;
         }
     }
+    cfg.vbr = GLINT_VBR_OFF;
+    cfg.vbr_quality = 0;
+    if (vbr_quality >= 0) {
+        cfg.vbr = GLINT_VBR_ON;
+        cfg.vbr_quality = vbr_quality;
+    }
 
     glint_t enc = glint_create(&cfg);
     if (!enc) {
@@ -531,10 +546,17 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    fprintf(stderr, "Encoding: %d kbps, %s\n", bitrate,
-            mode == GLINT_MONO ? "mono" :
-            mode == GLINT_JOINT ? "joint stereo" :
-            mode == GLINT_STEREO ? "stereo" : "dual channel");
+    if (vbr_quality >= 0) {
+        fprintf(stderr, "Encoding: VBR quality %d, %s\n", vbr_quality,
+                mode == GLINT_MONO ? "mono" :
+                mode == GLINT_JOINT ? "joint stereo" :
+                mode == GLINT_STEREO ? "stereo" : "dual channel");
+    } else {
+        fprintf(stderr, "Encoding: %d kbps, %s\n", bitrate,
+                mode == GLINT_MONO ? "mono" :
+                mode == GLINT_JOINT ? "joint stereo" :
+                mode == GLINT_STEREO ? "stereo" : "dual channel");
+    }
 
     // Encode
     int samples_per_frame = glint_samples_per_frame(enc);

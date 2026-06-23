@@ -152,7 +152,14 @@ int glint_check_config(int sample_rate, int bitrate) {
 
 glint_t glint_create(const glint_config* cfg) {
     if (!cfg) return nullptr;
-    if (glint_check_config(cfg->sample_rate, cfg->bitrate) != 0) return nullptr;
+
+    // For VBR, use 320 kbps frame size (max bitrate) regardless of -b
+    int effective_bitrate = cfg->bitrate;
+    if (cfg->vbr == GLINT_VBR_ON) {
+        effective_bitrate = 320;
+    }
+
+    if (glint_check_config(cfg->sample_rate, effective_bitrate) != 0) return nullptr;
     if (cfg->num_channels < 1 || cfg->num_channels > 2) return nullptr;
     if (cfg->num_channels == 1 && cfg->mode != GLINT_MONO) return nullptr;
     if (cfg->num_channels == 2 && cfg->mode == GLINT_MONO) return nullptr;
@@ -164,6 +171,10 @@ glint_t glint_create(const glint_config* cfg) {
     if (!ctx) return nullptr;
 
     ctx->config = *cfg;
+    // Override the stored bitrate to 320 for VBR
+    if (cfg->vbr == GLINT_VBR_ON) {
+        ctx->config.bitrate = effective_bitrate;
+    }
     ctx->mpeg_version = tables::detect_mpeg_version(cfg->sample_rate);
     ctx->sr_index = tables::make_unified_sr_index(
         ctx->mpeg_version, tables::samplerate_to_index(cfg->sample_rate));
@@ -178,6 +189,8 @@ glint_t glint_create(const glint_config* cfg) {
     ctx->num_channels = cfg->num_channels;
     ctx->frame_count = 0;
     ctx->quality_mode = static_cast<int>(cfg->quality);
+    ctx->vbr_mode = (cfg->vbr == GLINT_VBR_ON);
+    ctx->vbr_quality = cfg->vbr_quality;
 
     if (ctx->mpeg_version == 1) {
         // MPEG-1: side info is 17 bytes (mono) or 32 bytes (stereo)
@@ -382,8 +395,13 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                     double mdct_flat[576];
                     reorder_short_blocks(mdct_out_short, mdct_flat, enc->sr_index);
 
-                    granule_info[gr][ch] = quantize_granule(mdct_flat, bits_per_granule,
-                                                             enc->sr_index, enc->quality_mode);
+                    if (enc->vbr_mode) {
+                        granule_info[gr][ch] = quantize_granule_vbr(mdct_flat,
+                            enc->sr_index, enc->quality_mode, enc->vbr_quality);
+                    } else {
+                        granule_info[gr][ch] = quantize_granule(mdct_flat, bits_per_granule,
+                                                                 enc->sr_index, enc->quality_mode);
+                    }
                     granule_info[gr][ch].block_type = 2;
 
                     // Re-determine regions for short blocks
@@ -403,8 +421,13 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                         for (int k = 0; k < 18; k++)
                             mdct_flat[sb * 18 + k] = mdct_out[sb][k];
 
-                    granule_info[gr][ch] = quantize_granule(mdct_flat, bits_per_granule,
-                                                             enc->sr_index, enc->quality_mode);
+                    if (enc->vbr_mode) {
+                        granule_info[gr][ch] = quantize_granule_vbr(mdct_flat,
+                            enc->sr_index, enc->quality_mode, enc->vbr_quality);
+                    } else {
+                        granule_info[gr][ch] = quantize_granule(mdct_flat, bits_per_granule,
+                                                                 enc->sr_index, enc->quality_mode);
+                    }
                     granule_info[gr][ch].block_type = 0;
                 }
 
@@ -457,8 +480,13 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                     for (int k = 0; k < 18; k++)
                         mdct_flat[sb * 18 + k] = mdct_out[sb][k] / 16777216.0;
 
-                granule_info[gr][ch] = quantize_granule(mdct_flat, bits_per_granule,
-                                                         enc->sr_index, enc->quality_mode);
+                if (enc->vbr_mode) {
+                    granule_info[gr][ch] = quantize_granule_vbr(mdct_flat,
+                        enc->sr_index, enc->quality_mode, enc->vbr_quality);
+                } else {
+                    granule_info[gr][ch] = quantize_granule(mdct_flat, bits_per_granule,
+                                                             enc->sr_index, enc->quality_mode);
+                }
                 total_main_bits += granule_info[gr][ch].part2_3_length;
             }
         }
@@ -756,8 +784,13 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
                 double mdct_flat[576];
                 reorder_short_blocks(mdct_out_short, mdct_flat, enc->sr_index);
 
-                granule_info[gr][ch] = quantize_granule(mdct_flat, bits_per_granule,
-                                                         enc->sr_index, enc->quality_mode);
+                if (enc->vbr_mode) {
+                    granule_info[gr][ch] = quantize_granule_vbr(mdct_flat,
+                        enc->sr_index, enc->quality_mode, enc->vbr_quality);
+                } else {
+                    granule_info[gr][ch] = quantize_granule(mdct_flat, bits_per_granule,
+                                                             enc->sr_index, enc->quality_mode);
+                }
                 granule_info[gr][ch].block_type = 2;
 
                 granule_info[gr][ch].regions = determine_regions_short(
@@ -775,8 +808,13 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
                     for (int k = 0; k < 18; k++)
                         mdct_flat[sb * 18 + k] = mdct_out[sb][k];
 
-                granule_info[gr][ch] = quantize_granule(mdct_flat, bits_per_granule,
-                                                         enc->sr_index, enc->quality_mode);
+                if (enc->vbr_mode) {
+                    granule_info[gr][ch] = quantize_granule_vbr(mdct_flat,
+                        enc->sr_index, enc->quality_mode, enc->vbr_quality);
+                } else {
+                    granule_info[gr][ch] = quantize_granule(mdct_flat, bits_per_granule,
+                                                             enc->sr_index, enc->quality_mode);
+                }
                 granule_info[gr][ch].block_type = 0;
             }
 

@@ -30,6 +30,9 @@ struct glint_context {
     bool use_fixed_point;  // runtime path selection
     int quality_mode;      // 0=speed, 1=normal (psychoacoustic masking)
 
+    bool vbr_mode;         // true when VBR encoding is active
+    int vbr_quality;       // VBR quality 0-9 (0=best, 9=worst)
+
 #if !defined(GLINT_FIXED_POINT) || defined(GLINT_BOTH_PATHS)
     glint::SubbandAnalysis subband[2];
     glint::MDCT mdct[2];

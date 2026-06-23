@@ -261,4 +261,139 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
     return info;
 }
 
+// VBR quality 0-9 maps to target global_gain values:
+// 0 (best): gain ~150 (fine quantization, many bits)
+// 5 (medium): gain ~186
+// 9 (worst): gain ~230 (coarse quantization, few bits)
+static const int vbr_target_gain[10] = {
+    150, 155, 162, 170, 178, 186, 194, 204, 216, 230
+};
+
+GranuleInfo quantize_granule_vbr(const double* mdct_in, int sr_index,
+                                  int quality_mode, int vbr_quality) {
+    GranuleInfo info{};
+    std::memset(&info, 0, sizeof(info));
+    init_quant_tables();
+
+    if (vbr_quality < 0) vbr_quality = 0;
+    if (vbr_quality > 9) vbr_quality = 9;
+
+    int target_gain = vbr_target_gain[vbr_quality];
+
+    // Compute minimum gain to prevent clipping (ix > 8191).
+    double max_abs = 0.0;
+    for (int i = 0; i < 576; i++) {
+        double v = std::fabs(mdct_in[i]);
+        if (v > max_abs) max_abs = v;
+    }
+    int min_gain = 0;
+    if (max_abs > 0.0) {
+        double pow34_peak = fast_pow34(max_abs);
+        if (pow34_peak > 0.0) {
+            double ratio = 8190.0 / pow34_peak;
+            if (ratio > 0.0) {
+                double g_min = 210.0 - (16.0 / 3.0) * std::log2(ratio);
+                min_gain = static_cast<int>(std::ceil(g_min));
+                if (min_gain < 0) min_gain = 0;
+            }
+        }
+    }
+
+    // Use the target gain, but never go below min_gain (clipping protection)
+    int gain = std::max(target_gain, min_gain);
+    info.global_gain = gain;
+
+    // Quantize with the chosen gain
+    quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
+                       info.scalefac_scale, info.preflag, sr_index);
+
+    // Energy-based scalefactor adjustment (same logic as CBR)
+    {
+        const int* sfb = tables::get_sfb_long_by_unified(sr_index);
+        double band_energy[21], max_energy = 0.0;
+        for (int band = 0; band < 21; band++) {
+            double e = 0.0;
+            for (int i = sfb[band]; i < sfb[band+1] && i < 576; i++)
+                e += mdct_in[i] * mdct_in[i];
+            band_energy[band] = e;
+            if (e > max_energy) max_energy = e;
+        }
+
+        int active_bands = 0;
+        if (max_energy > 0.0) {
+            for (int band = 0; band < 21; band++)
+                if (band_energy[band] / max_energy > 0.01) active_bands++;
+        }
+
+        bool any = false;
+        if (quality_mode == 1 && max_energy > 0.0) {
+            double masking[21] = {};
+            for (int i = 0; i < 21; i++) {
+                for (int j = 0; j < 21; j++) {
+                    double spread = std::pow(10.0, -std::abs(i - j) * 0.8);
+                    masking[i] += band_energy[j] * spread;
+                }
+            }
+            for (int band = 0; band < 21; band++) {
+                if (masking[band] > 0 && band_energy[band] > 0) {
+                    double smr = band_energy[band] / masking[band];
+                    int sf = 7 - static_cast<int>(std::log2(std::max(smr, 0.001)) * 1.5);
+                    if (sf < 0) sf = 0;
+                    if (sf > 7) sf = 7;
+                    info.scalefac[band] = sf;
+                    if (sf > 0) any = true;
+                }
+            }
+        } else if (max_energy > 0.0 && active_bands >= 3) {
+            for (int band = 0; band < 21; band++) {
+                double ratio = band_energy[band] / max_energy;
+                if (ratio > 0.01) {
+                    int sf = static_cast<int>(ratio * 4.0 + 0.5);
+                    if (sf > 7) sf = 7;
+                    if (sf > 0) { info.scalefac[band] = sf; any = true; }
+                }
+            }
+        }
+
+        if (any) {
+            bool is_mpeg2 = (sr_index >= 3);
+            if (is_mpeg2) {
+                int max_sf[4] = {};
+                for (int b = 0; b < 6; b++) max_sf[0] = std::max(max_sf[0], info.scalefac[b]);
+                for (int b = 6; b < 11; b++) max_sf[1] = std::max(max_sf[1], info.scalefac[b]);
+                for (int b = 11; b < 16; b++) max_sf[2] = std::max(max_sf[2], info.scalefac[b]);
+                for (int b = 16; b < 21; b++) max_sf[3] = std::max(max_sf[3], info.scalefac[b]);
+                int slen[4];
+                for (int g = 0; g < 4; g++) {
+                    slen[g] = 0;
+                    while ((1 << slen[g]) <= max_sf[g]) slen[g]++;
+                    if (slen[g] > 4) slen[g] = 4;
+                }
+                info.scalefac_compress = encode_scalefac_compress_m2(
+                    slen[0], slen[1], slen[2], slen[3]);
+                info.part2_length = slen[0]*6 + slen[1]*5 + slen[2]*5 + slen[3]*5;
+            } else {
+                int max_sf1 = 0, max_sf2 = 0;
+                for (int b = 0; b < 11; b++) max_sf1 = std::max(max_sf1, info.scalefac[b]);
+                for (int b = 11; b < 21; b++) max_sf2 = std::max(max_sf2, info.scalefac[b]);
+                int slen1 = 0; while ((1 << slen1) <= max_sf1) slen1++;
+                int slen2 = 0; while ((1 << slen2) <= max_sf2) slen2++;
+                if (slen1 > 4) slen1 = 4;
+                if (slen2 > 3) slen2 = 3;
+                info.scalefac_compress = encode_scalefac_compress(slen1, slen2);
+                info.part2_length = slen1 * 11 + slen2 * 10;
+            }
+
+            // Re-quantize with scalefactors applied
+            quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
+                               info.scalefac_scale, info.preflag, sr_index);
+        }
+    }
+
+    info.regions = huffman_determine_regions(info.ix, sr_index);
+    info.part2_3_length = info.part2_length +
+                          huffman_count_bits(info.ix, info.regions, sr_index);
+    return info;
+}
+
 } // namespace glint

@@ -38,6 +38,11 @@ enum glint_quality {
     GLINT_QUALITY_NORMAL = 1,  // simplified energy-based masking
 };
 
+enum glint_vbr {
+    GLINT_VBR_OFF = 0,  // CBR (default)
+    GLINT_VBR_ON  = 1,  // VBR with quality target
+};
+
 struct glint_config {
     int sample_rate;
     int num_channels;
@@ -46,6 +51,8 @@ struct glint_config {
     enum glint_path path;  // signal path selection (0 = default)
     enum glint_simd simd;  // SIMD selection (0 = auto-detect)
     enum glint_quality quality;  // quality mode (0 = speed, 1 = normal)
+    enum glint_vbr vbr;           // VBR mode (0 = CBR, 1 = VBR)
+    int vbr_quality;               // VBR quality 0-9 (0=best, 9=worst), only used when vbr=1
 };
 
 // Callback: called with each encoded MP3 frame
