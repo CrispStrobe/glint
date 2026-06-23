@@ -1,2 +1,0 @@
-/usr/bin/ar qc libglint.a CMakeFiles/glint_static.dir/src/subband.cpp.o CMakeFiles/glint_static.dir/src/mdct.cpp.o CMakeFiles/glint_static.dir/src/quantize.cpp.o CMakeFiles/glint_static.dir/src/huffman.cpp.o CMakeFiles/glint_static.dir/src/reservoir.cpp.o CMakeFiles/glint_static.dir/src/bitstream.cpp.o CMakeFiles/glint_static.dir/src/encoder.cpp.o
-/usr/bin/ranlib libglint.a

@@ -4,3 +4,8 @@ build/
 *.so
 .claude/
 HANDOVER.md
+build*/
+*.o
+*.a
+*.so
+*.exe

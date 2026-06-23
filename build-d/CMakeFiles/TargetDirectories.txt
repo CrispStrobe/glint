@@ -1,5 +1,0 @@
-/tmp/glint-fresh/build-d/CMakeFiles/glint_static.dir
-/tmp/glint-fresh/build-d/CMakeFiles/glint_shared.dir
-/tmp/glint-fresh/build-d/CMakeFiles/glint_cli.dir
-/tmp/glint-fresh/build-d/CMakeFiles/edit_cache.dir
-/tmp/glint-fresh/build-d/CMakeFiles/rebuild_cache.dir
