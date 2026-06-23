@@ -2,13 +2,95 @@
 // MIT License - Clean-room implementation
 //
 // Minimal WAV-to-MP3 encoder command line tool.
+// Supports: PCM 8/16/24/32-bit, IEEE float 32/64-bit,
+//           A-law, mu-law, and WAVE_FORMAT_EXTENSIBLE.
 
 #include "glint/glint.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cstdint>
+#include <cmath>
 #include <chrono>
+
+// WAV format tags
+static constexpr uint16_t WAVE_FORMAT_PCM        = 0x0001;
+static constexpr uint16_t WAVE_FORMAT_IEEE_FLOAT  = 0x0003;
+static constexpr uint16_t WAVE_FORMAT_ALAW        = 0x0006;
+static constexpr uint16_t WAVE_FORMAT_MULAW       = 0x0007;
+static constexpr uint16_t WAVE_FORMAT_EXTENSIBLE   = 0xFFFE;
+
+// ITU-T G.711 A-law decode table (256 entries)
+static constexpr int16_t alaw_table[256] = {
+    -5504, -5248, -6016, -5760, -4480, -4224, -4992, -4736,
+    -7552, -7296, -8064, -7808, -6528, -6272, -7040, -6784,
+    -2752, -2624, -3008, -2880, -2240, -2112, -2496, -2368,
+    -3776, -3648, -4032, -3904, -3264, -3136, -3520, -3392,
+    -22016,-20992,-24064,-23040,-17920,-16896,-19968,-18944,
+    -30208,-29184,-32256,-31232,-26112,-25088,-28160,-27136,
+    -11008,-10496,-12032,-11520, -8960, -8448, -9984, -9472,
+    -15104,-14592,-16128,-15616,-13056,-12544,-14080,-13568,
+      -344,  -328,  -376,  -360,  -280,  -264,  -312,  -296,
+      -472,  -456,  -504,  -488,  -408,  -392,  -440,  -424,
+      -88,   -72,  -120,  -104,   -24,    -8,   -56,   -40,
+     -216,  -200,  -248,  -232,  -152,  -136,  -184,  -168,
+    -1376, -1312, -1504, -1440, -1120, -1056, -1248, -1184,
+    -1888, -1824, -2016, -1952, -1632, -1568, -1760, -1696,
+     -688,  -656,  -752,  -720,  -560,  -528,  -624,  -592,
+     -944,  -912, -1008,  -976,  -816,  -784,  -880,  -848,
+     5504,  5248,  6016,  5760,  4480,  4224,  4992,  4736,
+     7552,  7296,  8064,  7808,  6528,  6272,  7040,  6784,
+     2752,  2624,  3008,  2880,  2240,  2112,  2496,  2368,
+     3776,  3648,  4032,  3904,  3264,  3136,  3520,  3392,
+    22016, 20992, 24064, 23040, 17920, 16896, 19968, 18944,
+    30208, 29184, 32256, 31232, 26112, 25088, 28160, 27136,
+    11008, 10496, 12032, 11520,  8960,  8448,  9984,  9472,
+    15104, 14592, 16128, 15616, 13056, 12544, 14080, 13568,
+      344,   328,   376,   360,   280,   264,   312,   296,
+      472,   456,   504,   488,   408,   392,   440,   424,
+       88,    72,   120,   104,    24,     8,    56,    40,
+      216,   200,   248,   232,   152,   136,   184,   168,
+     1376,  1312,  1504,  1440,  1120,  1056,  1248,  1184,
+     1888,  1824,  2016,  1952,  1632,  1568,  1760,  1696,
+      688,   656,   752,   720,   560,   528,   624,   592,
+      944,   912,  1008,   976,   816,   784,   880,   848,
+};
+
+// ITU-T G.711 mu-law decode table (256 entries)
+static constexpr int16_t ulaw_table[256] = {
+    -32124,-31100,-30076,-29052,-28028,-27004,-25980,-24956,
+    -23932,-22908,-21884,-20860,-19836,-18812,-17788,-16764,
+    -15996,-15484,-14972,-14460,-13948,-13436,-12924,-12412,
+    -11900,-11388,-10876,-10364, -9852, -9340, -8828, -8316,
+     -7932, -7676, -7420, -7164, -6908, -6652, -6396, -6140,
+     -5884, -5628, -5372, -5116, -4860, -4604, -4348, -4092,
+     -3900, -3772, -3644, -3516, -3388, -3260, -3132, -3004,
+     -2876, -2748, -2620, -2492, -2364, -2236, -2108, -1980,
+     -1884, -1820, -1756, -1692, -1628, -1564, -1500, -1436,
+     -1372, -1308, -1244, -1180, -1116, -1052,  -988,  -924,
+      -876,  -844,  -812,  -780,  -748,  -716,  -684,  -652,
+      -620,  -588,  -556,  -524,  -492,  -460,  -428,  -396,
+      -372,  -356,  -340,  -324,  -308,  -292,  -276,  -260,
+      -244,  -228,  -212,  -196,  -180,  -164,  -148,  -132,
+      -120,  -112,  -104,   -96,   -88,   -80,   -72,   -64,
+       -56,   -48,   -40,   -32,   -24,   -16,    -8,     0,
+     32124, 31100, 30076, 29052, 28028, 27004, 25980, 24956,
+     23932, 22908, 21884, 20860, 19836, 18812, 17788, 16764,
+     15996, 15484, 14972, 14460, 13948, 13436, 12924, 12412,
+     11900, 11388, 10876, 10364,  9852,  9340,  8828,  8316,
+      7932,  7676,  7420,  7164,  6908,  6652,  6396,  6140,
+      5884,  5628,  5372,  5116,  4860,  4604,  4348,  4092,
+      3900,  3772,  3644,  3516,  3388,  3260,  3132,  3004,
+      2876,  2748,  2620,  2492,  2364,  2236,  2108,  1980,
+      1884,  1820,  1756,  1692,  1628,  1564,  1500,  1436,
+      1372,  1308,  1244,  1180,  1116,  1052,   988,   924,
+       876,   844,   812,   780,   748,   716,   684,   652,
+       620,   588,   556,   524,   492,   460,   428,   396,
+       372,   356,   340,   324,   308,   292,   276,   260,
+       244,   228,   212,   196,   180,   164,   148,   132,
+       120,   112,   104,    96,    88,    80,    72,    64,
+        56,    48,    40,    32,    24,    16,     8,     0,
+};
 
 // WAV file header structures
 #pragma pack(push, 1)
@@ -24,22 +106,108 @@ struct ChunkHeader {
 };
 
 struct FmtChunk {
-    uint16_t audio_format;  // 1 = PCM
+    uint16_t audio_format;  // 1 = PCM, 3 = float, 6 = A-law, 7 = mu-law
     uint16_t num_channels;
     uint32_t sample_rate;
     uint32_t byte_rate;
     uint16_t block_align;
     uint16_t bits_per_sample;
 };
+
+// Extended format chunk fields (for WAVE_FORMAT_EXTENSIBLE)
+struct FmtExtension {
+    uint16_t cb_size;           // Size of extension (22 for extensible)
+    uint16_t valid_bits;        // Valid bits per sample
+    uint32_t channel_mask;      // Speaker position mask
+    uint8_t  sub_format[16];    // SubFormat GUID
+};
 #pragma pack(pop)
+
+// Known SubFormat GUIDs (first 2 bytes encode the format tag)
+static const uint8_t KSDATAFORMAT_SUBTYPE_PCM[16] = {
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00,
+    0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71
+};
+static const uint8_t KSDATAFORMAT_SUBTYPE_IEEE_FLOAT[16] = {
+    0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00,
+    0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71
+};
+static const uint8_t KSDATAFORMAT_SUBTYPE_ALAW[16] = {
+    0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00,
+    0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71
+};
+static const uint8_t KSDATAFORMAT_SUBTYPE_MULAW[16] = {
+    0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00,
+    0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71
+};
 
 struct WavInfo {
     int sample_rate;
     int num_channels;
     int bits_per_sample;
+    uint16_t audio_format;  // resolved format (1, 3, 6, or 7)
     long data_offset;
     uint32_t data_size;
 };
+
+// Convert a single sample from raw bytes to int16_t
+static int16_t convert_sample(const uint8_t* data, uint16_t format, int bps) {
+    switch (format) {
+    case WAVE_FORMAT_PCM:
+        switch (bps) {
+        case 8:
+            return static_cast<int16_t>((static_cast<int>(data[0]) - 128) << 8);
+        case 16: {
+            int16_t s;
+            memcpy(&s, data, 2);
+            return s;
+        }
+        case 24: {
+            // Read 3 bytes little-endian, sign-extend to int32, shift >> 8
+            int32_t val = static_cast<int32_t>(data[0])
+                        | (static_cast<int32_t>(data[1]) << 8)
+                        | (static_cast<int32_t>(data[2]) << 16);
+            // Sign extend from 24 bits
+            if (val & 0x800000) val |= 0xFF000000;
+            return static_cast<int16_t>(val >> 8);
+        }
+        case 32: {
+            int32_t val;
+            memcpy(&val, data, 4);
+            return static_cast<int16_t>(val >> 16);
+        }
+        default:
+            return 0;
+        }
+
+    case WAVE_FORMAT_IEEE_FLOAT:
+        if (bps == 32) {
+            float f;
+            memcpy(&f, data, 4);
+            float scaled = f * 32767.0f;
+            if (scaled > 32767.0f) scaled = 32767.0f;
+            if (scaled < -32768.0f) scaled = -32768.0f;
+            return static_cast<int16_t>(scaled);
+        } else if (bps == 64) {
+            double d;
+            memcpy(&d, data, 8);
+            double scaled = d * 32767.0;
+            if (scaled > 32767.0) scaled = 32767.0;
+            if (scaled < -32768.0) scaled = -32768.0;
+            return static_cast<int16_t>(scaled);
+        }
+        return 0;
+
+    case WAVE_FORMAT_ALAW:
+        return alaw_table[data[0]];
+
+    case WAVE_FORMAT_MULAW:
+        return ulaw_table[data[0]];
+
+    default:
+        return 0;
+    }
+}
 
 static bool read_wav_header(FILE* f, WavInfo* info) {
     RiffHeader riff;
@@ -55,23 +223,73 @@ static bool read_wav_header(FILE* f, WavInfo* info) {
         if (fread(&ch, sizeof(ch), 1, f) != 1) break;
 
         if (memcmp(ch.chunk_id, "fmt ", 4) == 0) {
+            long fmt_start = ftell(f);
             FmtChunk fmt;
             if (fread(&fmt, sizeof(fmt), 1, f) != 1) return false;
-            if (fmt.audio_format != 1) {
-                fprintf(stderr, "Error: only PCM WAV files are supported\n");
+
+            uint16_t resolved_format = fmt.audio_format;
+            int bps = fmt.bits_per_sample;
+
+            if (fmt.audio_format == WAVE_FORMAT_EXTENSIBLE) {
+                // Read the extension
+                FmtExtension ext;
+                if (ch.chunk_size < sizeof(FmtChunk) + sizeof(FmtExtension)) {
+                    fprintf(stderr, "Error: extensible WAV header too short\n");
+                    return false;
+                }
+                if (fread(&ext, sizeof(ext), 1, f) != 1) return false;
+
+                // Resolve format from SubFormat GUID
+                if (memcmp(ext.sub_format, KSDATAFORMAT_SUBTYPE_PCM, 16) == 0) {
+                    resolved_format = WAVE_FORMAT_PCM;
+                } else if (memcmp(ext.sub_format, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, 16) == 0) {
+                    resolved_format = WAVE_FORMAT_IEEE_FLOAT;
+                } else if (memcmp(ext.sub_format, KSDATAFORMAT_SUBTYPE_ALAW, 16) == 0) {
+                    resolved_format = WAVE_FORMAT_ALAW;
+                } else if (memcmp(ext.sub_format, KSDATAFORMAT_SUBTYPE_MULAW, 16) == 0) {
+                    resolved_format = WAVE_FORMAT_MULAW;
+                } else {
+                    fprintf(stderr, "Error: unsupported WAVE_FORMAT_EXTENSIBLE SubFormat\n");
+                    return false;
+                }
+
+                if (ext.valid_bits > 0) bps = ext.valid_bits;
+            }
+
+            // Validate format/bps combinations
+            bool valid = false;
+            switch (resolved_format) {
+            case WAVE_FORMAT_PCM:
+                valid = (bps == 8 || bps == 16 || bps == 24 || bps == 32);
+                break;
+            case WAVE_FORMAT_IEEE_FLOAT:
+                valid = (bps == 32 || bps == 64);
+                break;
+            case WAVE_FORMAT_ALAW:
+            case WAVE_FORMAT_MULAW:
+                valid = (bps == 8);
+                break;
+            default:
+                fprintf(stderr, "Error: unsupported WAV format tag 0x%04X\n", fmt.audio_format);
                 return false;
             }
-            if (fmt.bits_per_sample != 16) {
-                fprintf(stderr, "Error: only 16-bit WAV files are supported\n");
+
+            if (!valid) {
+                fprintf(stderr, "Error: unsupported bit depth %d for format 0x%04X\n",
+                        bps, resolved_format);
                 return false;
             }
+
             info->sample_rate = fmt.sample_rate;
             info->num_channels = fmt.num_channels;
-            info->bits_per_sample = fmt.bits_per_sample;
+            info->bits_per_sample = bps;
+            info->audio_format = resolved_format;
             found_fmt = true;
-            // Skip any extra fmt bytes
-            long extra = ch.chunk_size - sizeof(FmtChunk);
-            if (extra > 0) fseek(f, extra, SEEK_CUR);
+
+            // Skip any remaining fmt bytes
+            long consumed = ftell(f) - fmt_start;
+            long remaining = static_cast<long>(ch.chunk_size) - consumed;
+            if (remaining > 0) fseek(f, remaining, SEEK_CUR);
         } else if (memcmp(ch.chunk_id, "data", 4) == 0) {
             info->data_offset = ftell(f);
             info->data_size = ch.chunk_size;
@@ -85,15 +303,56 @@ static bool read_wav_header(FILE* f, WavInfo* info) {
     return found_fmt && found_data;
 }
 
+static const char* format_name(uint16_t fmt, int bps) {
+    switch (fmt) {
+    case WAVE_FORMAT_PCM:
+        if (bps == 8) return "8-bit unsigned PCM";
+        if (bps == 16) return "16-bit signed PCM";
+        if (bps == 24) return "24-bit signed PCM";
+        if (bps == 32) return "32-bit signed PCM";
+        return "PCM";
+    case WAVE_FORMAT_IEEE_FLOAT:
+        if (bps == 32) return "32-bit IEEE float";
+        if (bps == 64) return "64-bit IEEE float";
+        return "IEEE float";
+    case WAVE_FORMAT_ALAW:  return "A-law";
+    case WAVE_FORMAT_MULAW: return "mu-law";
+    default: return "unknown";
+    }
+}
+
 static void print_usage(const char* prog) {
     fprintf(stderr, "Usage: %s [options] input.wav output.mp3\n", prog);
     fprintf(stderr, "Options:\n");
-    fprintf(stderr, "  -b BITRATE   Bitrate in kbps (default: 128)\n");
-    fprintf(stderr, "  -m MODE      mono|stereo|joint (default: auto)\n");
+    fprintf(stderr, "  -b BITRATE       Bitrate in kbps (default: 128)\n");
+    fprintf(stderr, "  -m MODE          mono|stereo|joint (default: auto)\n");
 #ifdef GLINT_BOTH_PATHS
-    fprintf(stderr, "  -p PATH      double|fixed (default: fixed)\n");
+    fprintf(stderr, "  -p PATH          double|fixed (default: fixed)\n");
 #endif
-    fprintf(stderr, "  -s SIMD      auto|avx|sse2|none (default: auto)\n");
+    fprintf(stderr, "  -s SIMD          auto|avx|sse2|none (default: auto)\n");
+    fprintf(stderr, "  -r RATE:CH:BITS  Raw PCM input (e.g., 44100:1:16)\n");
+}
+
+// Parse raw PCM spec: "RATE:CHANNELS:BITS"
+static bool parse_raw_spec(const char* spec, int* rate, int* channels, int* bits) {
+    char buf[128];
+    strncpy(buf, spec, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+
+    char* p1 = strchr(buf, ':');
+    if (!p1) return false;
+    *p1++ = '\0';
+    char* p2 = strchr(p1, ':');
+    if (!p2) return false;
+    *p2++ = '\0';
+
+    *rate = atoi(buf);
+    *channels = atoi(p1);
+    *bits = atoi(p2);
+
+    if (*rate <= 0 || *channels <= 0 || *channels > 2) return false;
+    if (*bits != 8 && *bits != 16 && *bits != 24 && *bits != 32) return false;
+    return true;
 }
 
 int main(int argc, char** argv) {
@@ -101,6 +360,7 @@ int main(int argc, char** argv) {
     const char* mode_str = nullptr;
     const char* path_str = nullptr;
     const char* simd_str = nullptr;
+    const char* raw_spec = nullptr;
     const char* input_path = nullptr;
     const char* output_path = nullptr;
 
@@ -114,6 +374,8 @@ int main(int argc, char** argv) {
             path_str = argv[++i];
         } else if (strcmp(argv[i], "-s") == 0 && i + 1 < argc) {
             simd_str = argv[++i];
+        } else if (strcmp(argv[i], "-r") == 0 && i + 1 < argc) {
+            raw_spec = argv[++i];
         } else if (!input_path) {
             input_path = argv[i];
         } else if (!output_path) {
@@ -129,7 +391,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // Open input WAV
+    // Open input file
     FILE* wav_file = fopen(input_path, "rb");
     if (!wav_file) {
         fprintf(stderr, "Error: cannot open input file '%s'\n", input_path);
@@ -137,14 +399,43 @@ int main(int argc, char** argv) {
     }
 
     WavInfo wav;
-    if (!read_wav_header(wav_file, &wav)) {
-        fprintf(stderr, "Error: invalid WAV file\n");
-        fclose(wav_file);
-        return 1;
-    }
+    memset(&wav, 0, sizeof(wav));
 
-    fprintf(stderr, "Input: %d Hz, %d channel(s), 16-bit PCM\n",
-            wav.sample_rate, wav.num_channels);
+    if (raw_spec) {
+        // Raw PCM mode: skip WAV header parsing
+        int rate, channels, bits;
+        if (!parse_raw_spec(raw_spec, &rate, &channels, &bits)) {
+            fprintf(stderr, "Error: invalid raw spec '%s' (expected RATE:CHANNELS:BITS)\n", raw_spec);
+            fclose(wav_file);
+            return 1;
+        }
+        wav.sample_rate = rate;
+        wav.num_channels = channels;
+        wav.bits_per_sample = bits;
+        wav.audio_format = WAVE_FORMAT_PCM;
+        wav.data_offset = 0;
+
+        // Get file size for data_size
+        fseek(wav_file, 0, SEEK_END);
+        long file_size = ftell(wav_file);
+        fseek(wav_file, 0, SEEK_SET);
+        wav.data_size = static_cast<uint32_t>(file_size);
+
+        fprintf(stderr, "Input: %d Hz, %d channel(s), %s (raw PCM)\n",
+                wav.sample_rate, wav.num_channels,
+                format_name(wav.audio_format, wav.bits_per_sample));
+    } else {
+        // WAV file mode
+        if (!read_wav_header(wav_file, &wav)) {
+            fprintf(stderr, "Error: invalid WAV file\n");
+            fclose(wav_file);
+            return 1;
+        }
+
+        fprintf(stderr, "Input: %d Hz, %d channel(s), %s\n",
+                wav.sample_rate, wav.num_channels,
+                format_name(wav.audio_format, wav.bits_per_sample));
+    }
 
     // Determine encoder mode
     glint_mode mode;
@@ -233,13 +524,16 @@ int main(int argc, char** argv) {
     // Encode
     int samples_per_frame = glint_samples_per_frame(enc);
     int nch = wav.num_channels;
-    int frame_samples = samples_per_frame * nch; // interleaved samples per frame
-    int16_t* pcm_buf = new int16_t[frame_samples];
+    int bytes_per_sample = wav.bits_per_sample / 8;
+    int sample_stride = bytes_per_sample * nch;  // bytes per interleaved sample group
+
+    // Allocate raw byte buffer for reading
+    uint8_t* raw_buf = new uint8_t[samples_per_frame * sample_stride];
     int16_t* channel_buf[2];
     channel_buf[0] = new int16_t[samples_per_frame];
     channel_buf[1] = new int16_t[samples_per_frame];
 
-    uint32_t total_samples = wav.data_size / (nch * 2); // per channel
+    uint32_t total_samples = wav.data_size / sample_stride; // per-frame sample groups
     uint32_t samples_encoded = 0;
     uint64_t bytes_written = 0;
 
@@ -249,25 +543,26 @@ int main(int argc, char** argv) {
 
     while (samples_encoded < total_samples) {
         int samples_to_read = samples_per_frame;
-        if (samples_encoded + samples_to_read > total_samples) {
-            samples_to_read = total_samples - samples_encoded;
+        if (samples_encoded + static_cast<uint32_t>(samples_to_read) > total_samples) {
+            samples_to_read = static_cast<int>(total_samples - samples_encoded);
         }
 
-        // Read interleaved PCM
-        size_t read = fread(pcm_buf, sizeof(int16_t) * nch, samples_to_read, wav_file);
-        if (read == 0) break;
-        int got = static_cast<int>(read);
+        // Read raw interleaved bytes
+        size_t read_count = fread(raw_buf, sample_stride, samples_to_read, wav_file);
+        if (read_count == 0) break;
+        int got = static_cast<int>(read_count);
 
-        // Deinterleave and zero-pad to full frame
-        // If downmixing stereo to mono, average L+R
+        // Convert and deinterleave
         bool downmix = (enc_channels == 1 && nch == 2);
         for (int i = 0; i < got; i++) {
             if (downmix) {
-                channel_buf[0][i] = (pcm_buf[i * 2] + pcm_buf[i * 2 + 1]) / 2;
+                int16_t l = convert_sample(raw_buf + i * sample_stride, wav.audio_format, wav.bits_per_sample);
+                int16_t r = convert_sample(raw_buf + i * sample_stride + bytes_per_sample, wav.audio_format, wav.bits_per_sample);
+                channel_buf[0][i] = static_cast<int16_t>((l + r) / 2);
             } else {
-                channel_buf[0][i] = pcm_buf[i * nch];
+                channel_buf[0][i] = convert_sample(raw_buf + i * sample_stride, wav.audio_format, wav.bits_per_sample);
                 if (nch > 1) {
-                    channel_buf[1][i] = pcm_buf[i * nch + 1];
+                    channel_buf[1][i] = convert_sample(raw_buf + i * sample_stride + bytes_per_sample, wav.audio_format, wav.bits_per_sample);
                 }
             }
         }
@@ -309,7 +604,7 @@ int main(int argc, char** argv) {
             speed, audio_duration, elapsed);
 
     // Cleanup
-    delete[] pcm_buf;
+    delete[] raw_buf;
     delete[] channel_buf[0];
     delete[] channel_buf[1];
     glint_destroy(enc);
