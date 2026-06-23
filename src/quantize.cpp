@@ -29,6 +29,13 @@ static void init_quant_tables() {
 
 static double fast_pow34(double x) {
     if (x <= 0.0) return 0.0;
+    if (x < static_cast<double>(tables::kPow34TableSize - 1)) {
+        int idx = static_cast<int>(x);
+        double frac = x - idx;
+        double a = tables::pow34_table[idx] * (1.0 / 65536.0);
+        double b = tables::pow34_table[idx + 1] * (1.0 / 65536.0);
+        return a + frac * (b - a);  // linear interpolation
+    }
     return std::pow(x, 0.75);
 }
 
