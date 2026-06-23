@@ -9,3 +9,5 @@ build*/
 *.a
 *.so
 *.exe
+__pycache__/
+*.pyc
