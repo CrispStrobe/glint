@@ -7,65 +7,15 @@
 
 namespace glint {
 
-// Find the best Huffman table for a region of pairs
+// Find the best Huffman table for a region via max-value-indexed lookup.
 int select_best_table(const int* ix, int start, int end) {
     if (start >= end) return 0;
-
-    // Find maximum absolute value in region
     int max_val = 0;
     for (int i = start; i < end; i++) {
         int v = std::abs(ix[i]);
         if (v > max_val) max_val = v;
     }
-
-    if (max_val == 0) return 0;
-
-    // Candidate tables for each max_val range
-    // Try all applicable tables and pick the one with fewest bits
-    int best_table = 0;
-    int best_bits = 999999;
-
-    auto try_table = [&](int table_id) {
-        int bits = 0;
-        for (int i = start; i < end; i += 2) {
-            int x = std::abs(ix[i]);
-            int y = (i + 1 < end) ? std::abs(ix[i + 1]) : 0;
-            bits += tables::huff_code_length(table_id, ix[i], (i + 1 < end) ? ix[i + 1] : 0);
-        }
-        if (bits < best_bits) {
-            best_bits = bits;
-            best_table = table_id;
-        }
-    };
-
-    if (max_val <= 1) {
-        try_table(1);
-    } else if (max_val <= 2) {
-        try_table(2); try_table(3);
-    } else if (max_val <= 3) {
-        try_table(5); try_table(6);
-    } else if (max_val <= 5) {
-        try_table(7); try_table(8); try_table(9);
-    } else if (max_val <= 7) {
-        try_table(10); try_table(11); try_table(12);
-    } else if (max_val <= 15) {
-        try_table(13); try_table(15);
-    } else {
-        // Need ESC tables (16-31)
-        // Try tables with sufficient linbits
-        for (int t = 16; t < 32; t++) {
-            int lb = tables::kLinbits[t - 16];
-            if (max_val - 15 <= (1 << lb) - 1) {
-                try_table(t);
-            }
-        }
-        if (best_table == 0) {
-            // Fallback to table with most linbits
-            try_table(23); try_table(31);
-        }
-    }
-
-    return best_table;
+    return tables::choose_huff_table(max_val);
 }
 
 HuffRegions huffman_determine_regions(const int* ix, int sr_index) {
