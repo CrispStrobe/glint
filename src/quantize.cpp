@@ -148,27 +148,40 @@ static PsychoModel s_psycho;
 
 GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
                               int sr_index, int quality_mode) {
-    // Quality mode 2 (best): per-frame gain correction search.
+    // Quality mode 2 (best): gain correction + post-quantization coefficient
+    // pruning + iterative refinement.
     //
-    // The MDCT normalization (/288) causes a systematic ~0.75x gain error
-    // in the decoder output. We correct this by scaling the MDCT coefficients
-    // before quantization, which shifts the global_gain so the decoder
-    // produces output at the correct amplitude.
-    //
-    // We search multiple gain correction factors per frame and pick the one
-    // that minimizes total MSE against the original MDCT coefficients. This
-    // accounts for the content-dependent interaction between quantization
-    // and gain compensation.
+    // Strategy:
+    // 1. Try gain correction factors (compensates MDCT /288 normalization)
+    // 2. For the best result, prune quantized coefficients whose reconstruction
+    //    contributes less than the masking threshold, then re-quantize with a
+    //    lower (more precise) global_gain using the freed bits.
+    // 3. Iterate pruning to find the optimal sparsity/precision tradeoff.
     if (quality_mode >= 2) {
-        // MSE metric: simulate decoder output and compare against original
-        auto mse_vs_original = [&](const GranuleInfo& gi) -> double {
-            init_quant_tables();
+        init_quant_tables();
+        const int* sfb_q2 = tables::get_sfb_long_by_unified(sr_index);
+
+        // Compute psychoacoustic masking thresholds
+        double masking_threshold[576];
+        s_psycho.compute_masking(mdct_in, masking_threshold, sr_index);
+
+        // NMR metric (from Vorbis/Opus insight): weight noise by inverse
+        // masking threshold so noise in masked bands doesn't penalize.
+        // Per-band masking thresholds (sum of per-coefficient thresholds)
+        double band_mask[21];
+        for (int b = 0; b < 21; b++) {
+            band_mask[b] = 0;
+            for (int i = sfb_q2[b]; i < sfb_q2[b+1] && i < 576; i++)
+                band_mask[b] += masking_threshold[i];
+            if (band_mask[b] <= 0) band_mask[b] = 1e-30;
+        }
+
+        auto nmr_vs_original = [&](const GranuleInfo& gi) -> double {
             double decoder_gain = std::pow(2.0, 0.25 * (gi.global_gain - 210));
-            double noise = 0.0;
-            const int* sfb2 = tables::get_sfb_long_by_unified(sr_index);
+            double band_noise[21] = {};
             int b2 = 0;
             for (int i = 0; i < 576; i++) {
-                while (b2 < 20 && i >= sfb2[b2 + 1]) b2++;
+                while (b2 < 20 && i >= sfb_q2[b2 + 1]) b2++;
                 int sf = gi.scalefac[b2];
                 if (gi.preflag && b2 < 22) sf += tables::preemphasis[b2];
                 double sf_d = std::pow(2.0, -0.5 * sf * (1 + gi.scalefac_scale));
@@ -179,29 +192,63 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
                                            mdct_in[i]);
                 }
                 double err = mdct_in[i] - xr_hat;
-                noise += err * err;
+                band_noise[b2] += err * err;
             }
-            return noise;
+            // NMR: sum of (noise / mask) across bands
+            double total_nmr = 0;
+            for (int b = 0; b < 21; b++)
+                total_nmr += band_noise[b] / band_mask[b];
+            return total_nmr;
         };
 
-        // Search gain correction factors centered around the empirically
-        // optimal 288/194 (~1.485). Each factor is tried with the mode=1
-        // distortion-controlled outer loop.
+        // Gain correction search with coefficient pruning.
+        // Total candidates: 6 (gain factors) * 1 (original) + 3 (prune levels) * 3 (gain factors) = 15
         GranuleInfo best_result{};
-        double best_mse = 1e30;
+        double best_nmr = 1e30;
         static constexpr double kFactors[] = {
             288.0/200.0, 288.0/196.0, 288.0/194.0,
             288.0/192.0, 288.0/190.0, 288.0/186.0
         };
+
+        // Phase 1: Original signal with all gain factors (6 candidates)
         for (double factor : kFactors) {
             double mdct_scaled[576];
             for (int i = 0; i < 576; i++)
                 mdct_scaled[i] = mdct_in[i] * factor;
             GranuleInfo gi = quantize_granule(mdct_scaled, available_bits, sr_index, 1);
-            double d = mse_vs_original(gi);
-            if (d < best_mse) {
-                best_mse = d;
+            double d = nmr_vs_original(gi);
+            if (d < best_nmr) {
+                best_nmr = d;
                 best_result = gi;
+            }
+        }
+
+        // Phase 2: Psychoacoustic pruning at different aggressiveness levels.
+        // prune_scale > 1 means more aggressive zeroing (zero coefficients
+        // whose energy is up to prune_scale * masking_threshold).
+        static constexpr double kPruneScales[] = { 1.0, 4.0, 16.0 };
+        for (double prune_scale : kPruneScales) {
+            double mdct_pruned[576];
+            for (int i = 0; i < 576; i++) {
+                if (mdct_in[i] * mdct_in[i] < prune_scale * masking_threshold[i])
+                    mdct_pruned[i] = 0.0;
+                else
+                    mdct_pruned[i] = mdct_in[i];
+            }
+
+            // Try 3 gain factors for each prune level (9 candidates total)
+            static constexpr int kPruneFactorIdx[] = { 1, 2, 4 }; // 196, 194, 190
+            for (int fi : kPruneFactorIdx) {
+                double factor = kFactors[fi];
+                double mdct_scaled[576];
+                for (int i = 0; i < 576; i++)
+                    mdct_scaled[i] = mdct_pruned[i] * factor;
+                GranuleInfo gi = quantize_granule(mdct_scaled, available_bits, sr_index, 1);
+                double d = nmr_vs_original(gi);
+                if (d < best_nmr) {
+                    best_nmr = d;
+                    best_result = gi;
+                }
             }
         }
 
