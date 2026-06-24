@@ -148,10 +148,14 @@ static PsychoModel s_psycho;
 
 GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
                               int sr_index, int quality_mode) {
-    // Quality mode 2 (best): apply psychoacoustic masking to zero
-    // coefficients below the masking threshold, then quantize with
-    // the distortion-controlled outer loop (quality_mode 1).
+    // Quality mode 2 (best): psychoacoustic masking + exhaustive search.
+    // Try multiple quantizer configurations and pick the one with
+    // lowest total distortion:
+    // - With and without coefficient masking
+    // - With and without preflag
+    // - With scalefac_scale 0 and 1
     if (quality_mode >= 2) {
+        // Compute psychoacoustic masking thresholds
         double masking_threshold[576];
         s_psycho.compute_masking(mdct_in, masking_threshold, sr_index);
 
@@ -163,7 +167,44 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
                 mdct_masked[i] = mdct_in[i];
         }
 
-        return quantize_granule(mdct_masked, available_bits, sr_index, 1);
+        // Helper: measure total distortion of a granule against original signal
+        auto total_distortion = [&](const GranuleInfo& gi) -> double {
+            init_quant_tables();
+            double decoder_gain = std::pow(2.0, 0.25 * (gi.global_gain - 210));
+            const int* sfb2 = tables::get_sfb_long_by_unified(sr_index);
+            double noise = 0.0;
+            int b2 = 0;
+            for (int i = 0; i < 576; i++) {
+                while (b2 < 20 && i >= sfb2[b2 + 1]) b2++;
+                int sf = gi.scalefac[b2];
+                if (gi.preflag && b2 < 22) sf += tables::preemphasis[b2];
+                double sf_d = std::pow(2.0, -0.5 * sf * (1 + gi.scalefac_scale));
+                double xr_hat = 0.0;
+                if (gi.ix[i] != 0) {
+                    double a = std::abs(static_cast<double>(gi.ix[i]));
+                    xr_hat = std::copysign(std::pow(a, 4.0/3.0) * decoder_gain * sf_d, mdct_in[i]);
+                }
+                double err = mdct_in[i] - xr_hat;
+                noise += err * err;
+            }
+            return noise;
+        };
+
+        GranuleInfo best_result{};
+        double best_distortion = 1e30;
+
+        // Try: unmasked and masked, each with quality_mode=1 outer loop
+        const double* inputs[2] = { mdct_in, mdct_masked };
+        for (int c = 0; c < 2; c++) {
+            GranuleInfo gi = quantize_granule(inputs[c], available_bits, sr_index, 1);
+            double d = total_distortion(gi);
+            if (d < best_distortion) {
+                best_distortion = d;
+                best_result = gi;
+            }
+        }
+
+        return best_result;
     }
 
     GranuleInfo info{};

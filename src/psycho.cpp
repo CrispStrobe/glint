@@ -99,34 +99,35 @@ void PsychoModel::compute_masking(const double* mdct, double* threshold, int sr_
     }
 
     // Step 2: Apply spreading function (simultaneous masking)
-    // Each band's masking threshold is determined by energy spread
-    // from neighboring bands
+    // Each band's masking threshold is based on energy spread from
+    // NEIGHBORING bands only (exclude self to avoid masking own signal).
     double masking[25];
     for (int b = 0; b < 25; b++) {
         double sum = 0.0;
         for (int j = 0; j < 25; j++) {
+            if (j == b) continue;  // exclude self-masking
             sum += bark_energy[j] * spread_matrix_[b][j];
         }
         masking[b] = sum;
     }
 
     // Step 3: Apply absolute threshold of hearing as floor
-    // Use a noise-to-mask ratio of -13 dB (0.05) which is typical
-    // for noise-like maskers in MPEG psychoacoustic models
+    // Use a conservative noise-to-mask ratio: -20 dB (0.01)
+    // This ensures we only zero coefficients that are strongly masked
+    // by neighboring bands' energy.
     for (int b = 0; b < 25; b++) {
         double ath_linear = std::pow(10.0, (tables::ath_cb[b] - 96.0) / 10.0);
-        masking[b] = std::max(masking[b] * 0.05, ath_linear);
+        masking[b] = std::max(masking[b] * 0.01, ath_linear);
     }
 
-    // Step 4: Map bark-band thresholds back to individual MDCT coefficients
-    // Use per-coefficient thresholding: a coefficient is masked if its
-    // energy is below the average masking energy per coefficient in its band
+    // Step 4: Map bark-band thresholds to individual coefficients
     for (int i = 0; i < 576; i++) {
         int b = 0;
         while (b < 24 && i >= bark_band[b + 1]) b++;
 
         int band_width = bark_band[b + 1] - bark_band[b];
         if (band_width < 1) band_width = 1;
+
         threshold[i] = masking[b] / band_width;
     }
 }
