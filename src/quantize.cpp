@@ -66,7 +66,8 @@ static int quantize_and_count(const double* mdct_in, int* ix,
                                int scalefac_scale, int preflag,
                                int sr_index,
                                HuffRegions* out_regions = nullptr,
-                               const QuantCache* cache = nullptr) {
+                               const QuantCache* cache = nullptr,
+                               bool short_block = false) {
     init_quant_tables();
     double base_step = gain_table[global_gain];
 
@@ -102,8 +103,11 @@ static int quantize_and_count(const double* mdct_in, int* ix,
     }
 
     // Fast path: if max_val is small, the bit count is cheap to estimate
-    // Still need full region determination for accurate counting
-    HuffRegions regions = huffman_determine_regions(ix, sr_index);
+    // Still need full region determination for accurate counting.
+    // Short blocks use a different region layout; the gain search must count
+    // bits with the same layout the encoder will actually use.
+    HuffRegions regions = short_block ? huffman_determine_regions_short(ix, sr_index)
+                                      : huffman_determine_regions(ix, sr_index);
     if (out_regions) *out_regions = regions;
     return huffman_count_bits(ix, regions, sr_index);
 }
@@ -199,7 +203,7 @@ static bool compute_headroom_scalefactors(int scalefac[21],
 }
 
 GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
-                              int sr_index, int quality_mode) {
+                              int sr_index, int quality_mode, bool short_block) {
     // Quality mode 2 (best): wide gain correction search with refinement.
     //
     // The /288 MDCT normalization causes quantization at a sub-optimal
@@ -249,7 +253,7 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
             double mdct_scaled[576];
             for (int i = 0; i < 576; i++)
                 mdct_scaled[i] = mdct_in[i] * factor;
-            GranuleInfo gi = quantize_granule(mdct_scaled, available_bits, sr_index, 1);
+            GranuleInfo gi = quantize_granule(mdct_scaled, available_bits, sr_index, 1, short_block);
             double d = mse_vs_original(gi);
             if (d < best_mse) {
                 best_mse = d;
@@ -266,7 +270,7 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
             double mdct_scaled[576];
             for (int i = 0; i < 576; i++)
                 mdct_scaled[i] = mdct_in[i] * factor;
-            GranuleInfo gi = quantize_granule(mdct_scaled, available_bits, sr_index, 1);
+            GranuleInfo gi = quantize_granule(mdct_scaled, available_bits, sr_index, 1, short_block);
             double d = mse_vs_original(gi);
             if (d < best_mse) {
                 best_mse = d;
@@ -296,7 +300,7 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
                     double mdct_scaled[576];
                     for (int i = 0; i < 576; i++)
                         mdct_scaled[i] = mdct_pruned[i] * factor;
-                    GranuleInfo gi = quantize_granule(mdct_scaled, available_bits, sr_index, 1);
+                    GranuleInfo gi = quantize_granule(mdct_scaled, available_bits, sr_index, 1, short_block);
                     double d = mse_vs_original(gi);
                     if (d < best_mse) {
                         best_mse = d;
@@ -364,7 +368,7 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
         int gain = (lo + hi) / 2;
         int bits = quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
                                        info.scalefac_scale, info.preflag, sr_index,
-                                       nullptr, &cache);
+                                       nullptr, &cache, short_block);
         if (bits <= target_bits) { hi = gain - 1; best_gain = gain; }
         else { lo = gain + 1; }
     }
@@ -427,7 +431,8 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
             for (int iter = 0; iter < 8 && lo <= hi; iter++) {
                 int gain = (lo + hi) / 2;
                 int bits = quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
-                                           info.scalefac_scale, info.preflag, sr_index);
+                                           info.scalefac_scale, info.preflag, sr_index,
+                                           nullptr, nullptr, short_block);
                 if (bits <= target_bits) { hi = gain - 1; best_gain = gain; }
                 else { lo = gain + 1; }
             }
@@ -449,11 +454,13 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
             // Try finer gains (lower value = more precision) if bits remain
             {
                 int actual_bits = quantize_and_count(mdct_in, info.ix, best_gain,
-                    info.scalefac, info.scalefac_scale, info.preflag, sr_index);
+                    info.scalefac, info.scalefac_scale, info.preflag, sr_index,
+                    nullptr, nullptr, short_block);
                 for (int delta = 1; delta <= 2 && best_gain - delta >= min_gain; delta++) {
                     int test_gain = best_gain - delta;
                     int test_bits = quantize_and_count(mdct_in, info.ix, test_gain,
-                        info.scalefac, info.scalefac_scale, info.preflag, sr_index);
+                        info.scalefac, info.scalefac_scale, info.preflag, sr_index,
+                        nullptr, nullptr, short_block);
                     if (test_bits <= target_bits) {
                         best_gain = test_gain;
                         info.global_gain = best_gain;
@@ -484,9 +491,28 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
     // and cache the regions to avoid redundant huffman_determine_regions call
     quantize_and_count(mdct_in, info.ix, best_gain, info.scalefac,
                        info.scalefac_scale, info.preflag, sr_index,
-                       &info.regions);
+                       &info.regions, nullptr, short_block);
     info.part2_3_length = info.part2_length +
                           huffman_count_bits(info.ix, info.regions, sr_index);
+
+    // Budget guarantee: part2_3_length must fit both the per-granule bit
+    // budget and the 12-bit side-info field. The gain search above counts
+    // bits with the correct (long/short) region layout, so this rarely
+    // triggers, but it is a hard safety net: coarsen the quantization
+    // (raise global_gain) until the granule fits. Without it, an overflowing
+    // part2_3_length wraps the 12-bit field and desyncs the decoder.
+    {
+        int limit = available_bits;
+        if (limit > 4095) limit = 4095;  // 12-bit part2_3_length field
+        while (info.part2_3_length > limit && info.global_gain < 255) {
+            info.global_gain++;
+            quantize_and_count(mdct_in, info.ix, info.global_gain, info.scalefac,
+                               info.scalefac_scale, info.preflag, sr_index,
+                               &info.regions, nullptr, short_block);
+            info.part2_3_length = info.part2_length +
+                                  huffman_count_bits(info.ix, info.regions, sr_index);
+        }
+    }
     return info;
 }
 
@@ -499,7 +525,8 @@ static const int vbr_target_gain[10] = {
 };
 
 GranuleInfo quantize_granule_vbr(const double* mdct_in, int sr_index,
-                                  int quality_mode, int vbr_quality) {
+                                  int quality_mode, int vbr_quality,
+                                  bool short_block) {
     if (quality_mode >= 2) {
         double masking_threshold[576];
         s_psycho.compute_masking(mdct_in, masking_threshold, sr_index);
@@ -512,7 +539,7 @@ GranuleInfo quantize_granule_vbr(const double* mdct_in, int sr_index,
                 mdct_masked[i] = mdct_in[i];
         }
 
-        return quantize_granule_vbr(mdct_masked, sr_index, 1, vbr_quality);
+        return quantize_granule_vbr(mdct_masked, sr_index, 1, vbr_quality, short_block);
     }
 
     GranuleInfo info{};
@@ -627,12 +654,25 @@ GranuleInfo quantize_granule_vbr(const double* mdct_in, int sr_index,
         }
     }
 
-    // Final quantize and cache regions
+    // Final quantize and cache regions (using the correct long/short layout)
     quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
                        info.scalefac_scale, info.preflag, sr_index,
-                       &info.regions);
+                       &info.regions, nullptr, short_block);
     info.part2_3_length = info.part2_length +
                           huffman_count_bits(info.ix, info.regions, sr_index);
+
+    // Budget guarantee: part2_3_length is written into a 12-bit side-info
+    // field (max 4095). VBR has no bit budget, but a fine target gain on a
+    // dense short block can still exceed the field. Coarsen until it fits.
+    while (info.part2_3_length > 4095 && gain < 255) {
+        gain++;
+        info.global_gain = gain;
+        quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
+                           info.scalefac_scale, info.preflag, sr_index,
+                           &info.regions, nullptr, short_block);
+        info.part2_3_length = info.part2_length +
+                              huffman_count_bits(info.ix, info.regions, sr_index);
+    }
     return info;
 }
 

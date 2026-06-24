@@ -23,12 +23,14 @@ struct GranuleInfo {
 };
 
 GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
-                              int sr_index, int quality_mode = 0);
+                              int sr_index, int quality_mode = 0,
+                              bool short_block = false);
 
 // VBR quantization: uses a fixed target gain instead of binary-searching
 // for a bit budget.  vbr_quality is 0 (best) to 9 (worst).
 GranuleInfo quantize_granule_vbr(const double* mdct_in, int sr_index,
-                                  int quality_mode, int vbr_quality);
+                                  int quality_mode, int vbr_quality,
+                                  bool short_block = false);
 
 } // namespace glint
 

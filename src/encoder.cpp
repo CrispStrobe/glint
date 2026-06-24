@@ -49,76 +49,6 @@ static void reorder_short_blocks(const double mdct_short[32][3][6],
     }
 }
 
-// Determine Huffman regions for short blocks.
-// Short blocks use only 2 regions (region0 + region1) with fixed boundaries:
-// region0_count = 8, region1_count = 0 (only 1 region effectively).
-// The big_values region covers up to the last non-zero pair.
-static HuffRegions determine_regions_short(const int* ix, int sr_index) {
-    HuffRegions r{};
-
-    // Find rzero: last nonzero value
-    int rzero = 576;
-    while (rzero > 0 && ix[rzero - 1] == 0) rzero--;
-
-    // Find count1 boundary
-    int count1_start = rzero;
-    count1_start = (count1_start + 3) & ~3;
-    if (count1_start > rzero) count1_start = rzero;
-
-    while (count1_start >= 4) {
-        bool all_small = true;
-        for (int i = count1_start - 4; i < count1_start; i++) {
-            if (i < 576 && std::abs(ix[i]) > 1) {
-                all_small = false;
-                break;
-            }
-        }
-        if (!all_small) break;
-        count1_start -= 4;
-    }
-
-    if (count1_start & 1) count1_start++;
-
-    r.big_values = count1_start / 2;
-    r.count1 = (rzero - count1_start) / 4;
-    if (r.count1 < 0) r.count1 = 0;
-    r.rzero = rzero;
-
-    // For short blocks with window_switching_flag=1, the decoder computes
-    // region boundaries as: region0_end = 36, region1_end = big_values*2.
-    // We set region0_count so that sfb_long[region0_count+1] == 36, which
-    // makes huffman_count_bits/huffman_encode compute the right boundaries.
-    // For all MPEG-1 rates: sfb_long[8] = 36, so region0_count = 7.
-    // For MPEG-2 rates: sfb_long_m2[6] = 36, so region0_count = 5.
-    const int* sfb_long = tables::get_sfb_long_by_unified(sr_index);
-    int r0c = 7;  // default for MPEG-1
-    for (int b = 0; b < 21; b++) {
-        if (sfb_long[b + 1] >= 36) {
-            r0c = b;
-            break;
-        }
-    }
-    r.region0_count = r0c;
-    r.region1_count = 0;
-
-    int region0_end = 36;
-    if (region0_end > count1_start) region0_end = count1_start;
-
-    r.table_select[0] = select_best_table(ix, 0, region0_end);
-    r.table_select[1] = select_best_table(ix, region0_end, count1_start);
-    r.table_select[2] = 0;  // not used for short blocks
-
-    // Choose count1 table
-    int bits_a = 0, bits_b = 0;
-    for (int i = count1_start; i + 3 < rzero; i += 4) {
-        bits_a += tables::count1_code_length(32, ix[i], ix[i+1], ix[i+2], ix[i+3]);
-        bits_b += tables::count1_code_length(33, ix[i], ix[i+1], ix[i+2], ix[i+3]);
-    }
-    r.count1table = (bits_b < bits_a) ? 1 : 0;
-
-    return r;
-}
-
 // Transient detection: compares energy between consecutive granules.
 // Returns true if a transient (>9 dB energy jump) is detected.
 static bool detect_transient(const double subband_out[32][36], int gr,
@@ -417,21 +347,22 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                     double mdct_flat[576];
                     reorder_short_blocks(mdct_out_short, mdct_flat, enc->sr_index);
 
+                    // Quantize with short-block region layout so the gain
+                    // search fits the bit budget under the SAME layout the
+                    // bitstream actually uses. (Previously the gain was fitted
+                    // with the long-block layout and the regions were swapped
+                    // afterwards, leaving part2_3_length far over budget and
+                    // overflowing the 12-bit side-info field.)
                     if (enc->vbr_mode) {
                         granule_info[gr][ch] = quantize_granule_vbr(mdct_flat,
-                            enc->sr_index, enc->quality_mode, enc->vbr_quality);
+                            enc->sr_index, enc->quality_mode, enc->vbr_quality,
+                            /*short_block=*/true);
                     } else {
                         granule_info[gr][ch] = quantize_granule(mdct_flat, gr_bits,
-                                                                 enc->sr_index, enc->quality_mode);
+                                                                 enc->sr_index, enc->quality_mode,
+                                                                 /*short_block=*/true);
                     }
                     granule_info[gr][ch].block_type = 2;
-
-                    // Re-determine regions for short blocks
-                    granule_info[gr][ch].regions = determine_regions_short(
-                        granule_info[gr][ch].ix, enc->sr_index);
-                    granule_info[gr][ch].part2_3_length = granule_info[gr][ch].part2_length +
-                        huffman_count_bits(granule_info[gr][ch].ix,
-                                           granule_info[gr][ch].regions, enc->sr_index);
                 } else {
                     // Long-block path
                     double mdct_out[32][18];
@@ -802,20 +733,18 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
                 double mdct_flat[576];
                 reorder_short_blocks(mdct_out_short, mdct_flat, enc->sr_index);
 
+                // Short-block quantization with the matching region layout
+                // (see glint_encode for the rationale).
                 if (enc->vbr_mode) {
                     granule_info[gr][ch] = quantize_granule_vbr(mdct_flat,
-                        enc->sr_index, enc->quality_mode, enc->vbr_quality);
+                        enc->sr_index, enc->quality_mode, enc->vbr_quality,
+                        /*short_block=*/true);
                 } else {
                     granule_info[gr][ch] = quantize_granule(mdct_flat, bits_per_granule,
-                                                             enc->sr_index, enc->quality_mode);
+                                                             enc->sr_index, enc->quality_mode,
+                                                             /*short_block=*/true);
                 }
                 granule_info[gr][ch].block_type = 2;
-
-                granule_info[gr][ch].regions = determine_regions_short(
-                    granule_info[gr][ch].ix, enc->sr_index);
-                granule_info[gr][ch].part2_3_length = granule_info[gr][ch].part2_length +
-                    huffman_count_bits(granule_info[gr][ch].ix,
-                                       granule_info[gr][ch].regions, enc->sr_index);
             } else {
                 double mdct_out[32][18];
                 enc->mdct[ch].process(sub_gr, mdct_out);

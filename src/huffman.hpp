@@ -42,6 +42,13 @@ void huffman_encode(const int* ix, const HuffRegions& regions,
 // Returns filled HuffRegions struct
 HuffRegions huffman_determine_regions(const int* ix, int sr_index);
 
+// Determine regions for a short (block_type 2) granule. Short blocks use a
+// fixed region0_end of 36 and only two big-value sub-regions, so they need a
+// different region layout than long blocks. The gain search and the final
+// encode MUST use the same layout, otherwise the stored part2_3_length will
+// not match the bits actually written.
+HuffRegions huffman_determine_regions_short(const int* ix, int sr_index);
+
 // Select the best Huffman table for a region
 // Returns table_id that minimizes bit count
 int select_best_table(const int* ix, int start, int end);
