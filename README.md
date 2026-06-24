@@ -167,10 +167,13 @@ glint/
 ├── src/                       Encoder core (7 modules + tables)
 ├── cli/main.cpp               WAV-to-MP3 CLI
 ├── tests/                     Unit tests + quality tests + ASR
-├── bindings/python/            ctypes wrapper
-├── bindings/rust/              glint-sys (FFI) + glint (safe)
-├── bindings/dart/              Flutter FFI
-├── .github/workflows/          CI (desktop + Android + iOS)
+├── bindings/
+│   ├── python/                ctypes wrapper + pip packaging
+│   ├── rust/                  glint-sys (FFI) + glint (safe)
+│   └── dart/                  Flutter FFI
+├── esp-idf/                   ESP32 component (50 KB RAM)
+├── packaging/vcpkg/           vcpkg port
+├── .github/workflows/         CI + release (9 platforms)
 └── CMakeLists.txt
 ```
 
@@ -185,10 +188,9 @@ Pre-built binaries at
 
 ## Roadmap
 
-- ESP-IDF component and ESP32 validation
-- Cortex-M / RP2040 bare-metal testing
-- Android AAR, iOS xcframework, Flutter plugin packaging
-- Publish to pip, crates.io, vcpkg
+- Hardware validation: ESP32 with I2S mic, Cortex-M / RP2040 bare-metal
+- Mobile framework packaging: Android AAR, iOS xcframework, Flutter plugin
+- Publish packages: pip upload, crates.io publish, vcpkg PR
 
 ## License
 
