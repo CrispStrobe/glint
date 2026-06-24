@@ -446,11 +446,11 @@ static GranuleInfo quantize_base(const double* mdct_in, int available_bits,
     QuantCache final_cache;
     fill_quant_cache(final_cache, mdct_in, info.scalefac, info.scalefac_scale,
                      info.preflag, sr_index);
-    quantize_and_count(mdct_in, info.ix, best_gain, info.scalefac,
-                       info.scalefac_scale, info.preflag, sr_index,
-                       &info.regions, &final_cache, short_block);
-    info.part2_3_length = info.part2_length +
-                          huffman_count_bits(info.ix, info.regions, sr_index);
+    int huff_bits = quantize_and_count(mdct_in, info.ix, best_gain,
+                                       info.scalefac, info.scalefac_scale,
+                                       info.preflag, sr_index, &info.regions,
+                                       &final_cache, short_block);
+    info.part2_3_length = info.part2_length + huff_bits;
 
     // Budget guarantee: part2_3_length must fit both the per-granule bit
     // budget and the 12-bit side-info field. The gain search above counts
@@ -463,11 +463,11 @@ static GranuleInfo quantize_base(const double* mdct_in, int available_bits,
         if (limit > 4095) limit = 4095;  // 12-bit part2_3_length field
         while (info.part2_3_length > limit && info.global_gain < 255) {
             info.global_gain++;
-            quantize_and_count(mdct_in, info.ix, info.global_gain, info.scalefac,
-                               info.scalefac_scale, info.preflag, sr_index,
-                               &info.regions, &final_cache, short_block);
-            info.part2_3_length = info.part2_length +
-                                  huffman_count_bits(info.ix, info.regions, sr_index);
+            huff_bits = quantize_and_count(mdct_in, info.ix, info.global_gain,
+                                           info.scalefac, info.scalefac_scale,
+                                           info.preflag, sr_index, &info.regions,
+                                           &final_cache, short_block);
+            info.part2_3_length = info.part2_length + huff_bits;
         }
     }
     return info;
@@ -624,11 +624,11 @@ GranuleInfo quantize_granule_vbr(const double* mdct_in, int available_bits,
     QuantCache final_cache;
     fill_quant_cache(final_cache, mdct_in, info.scalefac, info.scalefac_scale,
                      info.preflag, sr_index);
-    quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
-                       info.scalefac_scale, info.preflag, sr_index,
-                       &info.regions, &final_cache, short_block);
-    info.part2_3_length = info.part2_length +
-                          huffman_count_bits(info.ix, info.regions, sr_index);
+    int huff_bits = quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
+                                       info.scalefac_scale, info.preflag,
+                                       sr_index, &info.regions, &final_cache,
+                                       short_block);
+    info.part2_3_length = info.part2_length + huff_bits;
 
     // Budget guarantee: with the reservoir disabled, each granule must fit its
     // share of the frame, and part2_3_length must also fit the 12-bit side-info
@@ -640,11 +640,11 @@ GranuleInfo quantize_granule_vbr(const double* mdct_in, int available_bits,
     while (info.part2_3_length > limit && gain < 255) {
         gain++;
         info.global_gain = gain;
-        quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
-                           info.scalefac_scale, info.preflag, sr_index,
-                           &info.regions, &final_cache, short_block);
-        info.part2_3_length = info.part2_length +
-                              huffman_count_bits(info.ix, info.regions, sr_index);
+        huff_bits = quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
+                                       info.scalefac_scale, info.preflag,
+                                       sr_index, &info.regions, &final_cache,
+                                       short_block);
+        info.part2_3_length = info.part2_length + huff_bits;
     }
     return info;
 }
