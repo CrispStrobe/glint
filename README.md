@@ -199,6 +199,22 @@ Pre-built binaries at
 
 ## Roadmap
 
+### Quality
+- **Bark-band psychoacoustic masking** (`-q best`) — zero masked MDCT
+  coefficients using spreading function + ATH, target 12-18 dB SNR
+  (in progress)
+- **Iterative SF amplification** — boost scalefactors for bands exceeding
+  masking threshold (builds on psycho model)
+- **Temporal noise shaping (TNS)** — filter quantization noise to follow
+  signal envelope, reduce pre-echo without short blocks
+- **Mixed blocks** — short blocks for low subbands (pre-echo sensitive),
+  long blocks for the rest
+- **Perceptual entropy** — estimate per-granule bit need from masking,
+  use for VBR quality targeting and block switching decisions
+- **Inter-granule bit allocation** — give more bits to high-energy
+  granules instead of equal split
+
+### Packaging and hardware
 - Hardware validation: ESP32 with I2S mic, Cortex-M / RP2040 bare-metal
 - Mobile framework packaging: Android AAR, iOS xcframework, Flutter plugin
 - Publish packages: pip upload, crates.io publish, vcpkg PR
