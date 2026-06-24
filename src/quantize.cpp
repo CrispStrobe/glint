@@ -40,27 +40,57 @@ static double fast_pow34(double x) {
     return std::pow(x, 0.75);
 }
 
-static int quantize_and_count(const double* mdct_in, int* ix,
-                               int global_gain, const int scalefac[21],
-                               int scalefac_scale, int preflag,
-                               int sr_index,
-                               HuffRegions* out_regions = nullptr) {
-    init_quant_tables();
-    const int* sfb = tables::get_sfb_long_by_unified(sr_index);
-    double base_step = gain_table[global_gain];
+// Cache for pre-computed per-coefficient values (constant across binary search)
+struct QuantCache {
+    double pow34_sf[576]; // pow34(|xr|) * sf_scale — precomputed
+    int sign[576];        // +1 or -1
+};
 
+static void fill_quant_cache(QuantCache& cache, const double* mdct_in,
+                              const int scalefac[21], int scalefac_scale,
+                              int preflag, int sr_index) {
+    const int* sfb = tables::get_sfb_long_by_unified(sr_index);
     int band = 0;
     for (int i = 0; i < 576; i++) {
         while (band < 21 && i >= sfb[band + 1]) band++;
         int sf = scalefac[band];
         if (preflag && band < 22) sf += tables::preemphasis[band];
-        double sf_scale = (sf > 0 && sf < 16) ? sf_table[scalefac_scale][sf] : 1.0;
+        double sfs = (sf > 0 && sf < 16) ? sf_table[scalefac_scale][sf] : 1.0;
+        cache.pow34_sf[i] = fast_pow34(std::fabs(mdct_in[i])) * sfs;
+        cache.sign[i] = (mdct_in[i] < 0.0) ? -1 : 1;
+    }
+}
 
-        double abs_xr = std::fabs(mdct_in[i]);
-        double pow34_val = fast_pow34(abs_xr);
-        double qval_d = pow34_val * base_step * sf_scale + 0.4054;
-        int qval = (qval_d >= 8191.0) ? 8191 : static_cast<int>(qval_d);
-        ix[i] = (mdct_in[i] < 0.0) ? -qval : qval;
+static int quantize_and_count(const double* mdct_in, int* ix,
+                               int global_gain, const int scalefac[21],
+                               int scalefac_scale, int preflag,
+                               int sr_index,
+                               HuffRegions* out_regions = nullptr,
+                               const QuantCache* cache = nullptr) {
+    init_quant_tables();
+    double base_step = gain_table[global_gain];
+
+    if (cache) {
+        // Fast path: only multiply by base_step (pow34*sf already cached)
+        for (int i = 0; i < 576; i++) {
+            double qval_d = cache->pow34_sf[i] * base_step + 0.4054;
+            int qval = (qval_d >= 8191.0) ? 8191 : static_cast<int>(qval_d);
+            ix[i] = cache->sign[i] * qval;
+        }
+    } else {
+        const int* sfb = tables::get_sfb_long_by_unified(sr_index);
+        int band = 0;
+        for (int i = 0; i < 576; i++) {
+            while (band < 21 && i >= sfb[band + 1]) band++;
+            int sf = scalefac[band];
+            if (preflag && band < 22) sf += tables::preemphasis[band];
+            double sf_scale = (sf > 0 && sf < 16) ? sf_table[scalefac_scale][sf] : 1.0;
+            double abs_xr = std::fabs(mdct_in[i]);
+            double pow34_val = fast_pow34(abs_xr);
+            double qval_d = pow34_val * base_step * sf_scale + 0.4054;
+            int qval = (qval_d >= 8191.0) ? 8191 : static_cast<int>(qval_d);
+            ix[i] = (mdct_in[i] < 0.0) ? -qval : qval;
+        }
     }
 
     HuffRegions regions = huffman_determine_regions(ix, sr_index);
@@ -123,8 +153,6 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
                 mdct_masked[i] = mdct_in[i];
         }
 
-        // Recurse with quality_mode=1 (distortion-controlled outer loop)
-        // on the masked spectrum
         return quantize_granule(mdct_masked, available_bits, sr_index, 1);
     }
 
@@ -161,6 +189,11 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
         }
     }
 
+    // Pre-compute pow34 * sf_scale for all coefficients (constant across binary search)
+    QuantCache cache;
+    fill_quant_cache(cache, mdct_in, info.scalefac, info.scalefac_scale,
+                     info.preflag, sr_index);
+
     // Binary search for global_gain.
     // Higher gain = coarser quantization = fewer bits.
     // Lower bound is min_gain to prevent 8191 clipping.
@@ -169,7 +202,8 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
     for (int iter = 0; iter < 8 && lo <= hi; iter++) {
         int gain = (lo + hi) / 2;
         int bits = quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
-                                       info.scalefac_scale, info.preflag, sr_index);
+                                       info.scalefac_scale, info.preflag, sr_index,
+                                       nullptr, &cache);
         if (bits <= target_bits) { hi = gain - 1; best_gain = gain; }
         else { lo = gain + 1; }
     }
@@ -350,7 +384,6 @@ static const int vbr_target_gain[10] = {
 
 GranuleInfo quantize_granule_vbr(const double* mdct_in, int sr_index,
                                   int quality_mode, int vbr_quality) {
-    // Quality mode 2 (best): apply psychoacoustic masking before VBR quantization
     if (quality_mode >= 2) {
         double masking_threshold[576];
         s_psycho.compute_masking(mdct_in, masking_threshold, sr_index);
