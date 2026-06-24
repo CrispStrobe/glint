@@ -148,31 +148,24 @@ static PsychoModel s_psycho;
 
 GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
                               int sr_index, int quality_mode) {
-    // Quality mode 2 (best): psychoacoustic masking + exhaustive search.
-    // Try multiple quantizer configurations and pick the one with
-    // lowest total distortion:
-    // - With and without coefficient masking
-    // - With and without preflag
-    // - With scalefac_scale 0 and 1
+    // Quality mode 2 (best): per-frame gain correction search.
+    //
+    // The MDCT normalization (/288) causes a systematic ~0.75x gain error
+    // in the decoder output. We correct this by scaling the MDCT coefficients
+    // before quantization, which shifts the global_gain so the decoder
+    // produces output at the correct amplitude.
+    //
+    // We search multiple gain correction factors per frame and pick the one
+    // that minimizes total MSE against the original MDCT coefficients. This
+    // accounts for the content-dependent interaction between quantization
+    // and gain compensation.
     if (quality_mode >= 2) {
-        // Compute psychoacoustic masking thresholds
-        double masking_threshold[576];
-        s_psycho.compute_masking(mdct_in, masking_threshold, sr_index);
-
-        double mdct_masked[576];
-        for (int i = 0; i < 576; i++) {
-            if (mdct_in[i] * mdct_in[i] < masking_threshold[i])
-                mdct_masked[i] = 0.0;
-            else
-                mdct_masked[i] = mdct_in[i];
-        }
-
-        // Helper: measure total distortion of a granule against original signal
-        auto total_distortion = [&](const GranuleInfo& gi) -> double {
+        // MSE metric: simulate decoder output and compare against original
+        auto mse_vs_original = [&](const GranuleInfo& gi) -> double {
             init_quant_tables();
             double decoder_gain = std::pow(2.0, 0.25 * (gi.global_gain - 210));
-            const int* sfb2 = tables::get_sfb_long_by_unified(sr_index);
             double noise = 0.0;
+            const int* sfb2 = tables::get_sfb_long_by_unified(sr_index);
             int b2 = 0;
             for (int i = 0; i < 576; i++) {
                 while (b2 < 20 && i >= sfb2[b2 + 1]) b2++;
@@ -182,7 +175,8 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
                 double xr_hat = 0.0;
                 if (gi.ix[i] != 0) {
                     double a = std::abs(static_cast<double>(gi.ix[i]));
-                    xr_hat = std::copysign(std::pow(a, 4.0/3.0) * decoder_gain * sf_d, mdct_in[i]);
+                    xr_hat = std::copysign(std::pow(a, 4.0/3.0) * decoder_gain * sf_d,
+                                           mdct_in[i]);
                 }
                 double err = mdct_in[i] - xr_hat;
                 noise += err * err;
@@ -190,16 +184,23 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
             return noise;
         };
 
+        // Search gain correction factors centered around the empirically
+        // optimal 288/194 (~1.485). Each factor is tried with the mode=1
+        // distortion-controlled outer loop.
         GranuleInfo best_result{};
-        double best_distortion = 1e30;
-
-        // Try: unmasked and masked, each with quality_mode=1 outer loop
-        const double* inputs[2] = { mdct_in, mdct_masked };
-        for (int c = 0; c < 2; c++) {
-            GranuleInfo gi = quantize_granule(inputs[c], available_bits, sr_index, 1);
-            double d = total_distortion(gi);
-            if (d < best_distortion) {
-                best_distortion = d;
+        double best_mse = 1e30;
+        static constexpr double kFactors[] = {
+            288.0/200.0, 288.0/196.0, 288.0/194.0,
+            288.0/192.0, 288.0/190.0, 288.0/186.0
+        };
+        for (double factor : kFactors) {
+            double mdct_scaled[576];
+            for (int i = 0; i < 576; i++)
+                mdct_scaled[i] = mdct_in[i] * factor;
+            GranuleInfo gi = quantize_granule(mdct_scaled, available_bits, sr_index, 1);
+            double d = mse_vs_original(gi);
+            if (d < best_mse) {
+                best_mse = d;
                 best_result = gi;
             }
         }
