@@ -1,0 +1,13 @@
+{
+    "name": "glint",
+    "version": "0.4.1",
+    "description": "Fast, lightweight MP3 encoder — clean-room C++17 implementation",
+    "homepage": "https://github.com/CrispStrobe/glint",
+    "license": "MIT",
+    "supports": "!uwp",
+    "features": {
+        "fixed-point": {
+            "description": "Q31 fixed-point signal path (no FPU needed)"
+        }
+    }
+}
