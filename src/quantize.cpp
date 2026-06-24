@@ -209,10 +209,37 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
         init_quant_tables();
         const int* sfb_q2 = tables::get_sfb_long_by_unified(sr_index);
 
-        // MSE metric: simulate decoder reconstruction, compare to original
-        auto mse_vs_original = [&](const GranuleInfo& gi) -> double {
+        // NMR metric: noise-to-mask ratio weighted by psychoacoustic spreading.
+        // Bands where noise is masked contribute less to the score, allowing
+        // the optimizer to allocate bits where they matter most perceptually.
+        double band_energy_q2[21];
+        double band_mask_q2[21];
+        for (int b = 0; b < 21; b++) {
+            double e = 0;
+            for (int i = sfb_q2[b]; i < sfb_q2[b+1] && i < 576; i++)
+                e += mdct_in[i] * mdct_in[i];
+            band_energy_q2[b] = e;
+        }
+        for (int band = 0; band < 21; band++) {
+            band_mask_q2[band] = 0;
+            for (int other = 0; other < 21; other++) {
+                if (other == band) continue;
+                double spread;
+                if (other > band)
+                    spread = std::pow(10.0, -0.8 * (other - band));
+                else
+                    spread = std::pow(10.0, -0.4 * (band - other));
+                band_mask_q2[band] += band_energy_q2[other] * spread;
+            }
+            double ath_linear = std::pow(10.0, (tables::ath_cb[std::min(band, 24)] - 96.0) / 10.0);
+            ath_linear /= (288.0 * 288.0);
+            band_mask_q2[band] = std::max(band_mask_q2[band] * 0.1, ath_linear);
+            if (band_mask_q2[band] <= 0) band_mask_q2[band] = 1e-30;
+        }
+
+        auto nmr_vs_original = [&](const GranuleInfo& gi) -> double {
             double decoder_gain = std::pow(2.0, 0.25 * (gi.global_gain - 210));
-            double noise = 0.0;
+            double band_noise[21] = {};
             int b2 = 0;
             for (int i = 0; i < 576; i++) {
                 while (b2 < 20 && i >= sfb_q2[b2 + 1]) b2++;
@@ -226,13 +253,16 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
                                            mdct_in[i]);
                 }
                 double err = mdct_in[i] - xr_hat;
-                noise += err * err;
+                band_noise[b2] += err * err;
             }
-            return noise;
+            double total_nmr = 0;
+            for (int b = 0; b < 21; b++)
+                total_nmr += band_noise[b] / band_mask_q2[b];
+            return total_nmr;
         };
 
         GranuleInfo best_result{};
-        double best_mse = 1e30;
+        double best_nmr = 1e30;
 
         // Two-phase gain correction search:
         // Phase 1: 16-point coarse scan over [0.70, 2.20]
@@ -250,47 +280,27 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
             for (int i = 0; i < 576; i++)
                 mdct_scaled[i] = mdct_in[i] * factor;
             GranuleInfo gi = quantize_granule(mdct_scaled, available_bits, sr_index, 1);
-            double d = mse_vs_original(gi);
-            if (d < best_mse) {
-                best_mse = d;
+            double d = nmr_vs_original(gi);
+            if (d < best_nmr) {
+                best_nmr = d;
                 best_result = gi;
                 best_factor = factor;
             }
         }
 
-        // Phase 2: Fine refinement around the coarse winner
-        {
-            double refined_factor = best_factor;
-            for (int step = -4; step <= 4; step++) {
-                if (step == 0) continue;
-                double factor = best_factor + step * 0.05;
-                if (factor < 0.5) continue;
-                double mdct_scaled[576];
-                for (int i = 0; i < 576; i++)
-                    mdct_scaled[i] = mdct_in[i] * factor;
-                GranuleInfo gi = quantize_granule(mdct_scaled, available_bits, sr_index, 1);
-                double d = mse_vs_original(gi);
-                if (d < best_mse) {
-                    best_mse = d;
-                    best_result = gi;
-                    refined_factor = factor;
-                }
-            }
-
-            // Phase 3: Ultra-fine with 0.01 steps around refined winner
-            for (int step = -3; step <= 3; step++) {
-                if (step == 0) continue;
-                double factor = refined_factor + step * 0.01;
-                if (factor < 0.5) continue;
-                double mdct_scaled[576];
-                for (int i = 0; i < 576; i++)
-                    mdct_scaled[i] = mdct_in[i] * factor;
-                GranuleInfo gi = quantize_granule(mdct_scaled, available_bits, sr_index, 1);
-                double d = mse_vs_original(gi);
-                if (d < best_mse) {
-                    best_mse = d;
-                    best_result = gi;
-                }
+        // Phase 2: Fine refinement with 0.025 steps around the winner
+        for (int step = -3; step <= 3; step++) {
+            if (step == 0) continue;
+            double factor = best_factor + step * 0.025;
+            if (factor < 0.5) continue;
+            double mdct_scaled[576];
+            for (int i = 0; i < 576; i++)
+                mdct_scaled[i] = mdct_in[i] * factor;
+            GranuleInfo gi = quantize_granule(mdct_scaled, available_bits, sr_index, 1);
+            double d = nmr_vs_original(gi);
+            if (d < best_nmr) {
+                best_nmr = d;
+                best_result = gi;
             }
         }
 
