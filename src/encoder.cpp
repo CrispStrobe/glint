@@ -335,7 +335,16 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                         sub_gr[sb][ts] = ((sb & 1) && (ts & 1)) ? -v : v;
                     }
 
-                bool use_short = transient_detected && enc->quality_mode >= 1;
+                // Short blocks are disabled while the bit reservoir is
+                // disabled. A transient frame wants far more bits than a single
+                // frame's budget; with no reservoir to borrow from it gets
+                // coarsened so hard that quality drops 4-9 dB below the
+                // long-block path (and short blocks were the source of the
+                // part2_3_length overflow). Transient detection still runs so
+                // prev_granule_energy stays warm for when this is re-enabled.
+                static constexpr bool kShortBlocksEnabled = false;
+                bool use_short = kShortBlocksEnabled && transient_detected &&
+                                 enc->quality_mode >= 1;
 
                 if (use_short) {
                     // Short-block path
@@ -724,7 +733,11 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
                     sub_gr[sb][ts] = ((sb & 1) && (ts & 1)) ? -v : v;
                 }
 
-            bool use_short = transient_detected && enc->quality_mode >= 1;
+            // Short blocks disabled while the reservoir is disabled (see the
+            // int16 path above for the rationale).
+            static constexpr bool kShortBlocksEnabled = false;
+            bool use_short = kShortBlocksEnabled && transient_detected &&
+                             enc->quality_mode >= 1;
 
             if (use_short) {
                 double mdct_out_short[32][3][6];
