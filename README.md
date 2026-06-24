@@ -16,10 +16,8 @@ path needs only 50 KB RAM and no FPU.
   (compile-time or runtime selectable)
 - **SIMD**: AVX/SSE2 (x86) and NEON (AArch64), runtime dispatch
   (`-s auto|avx|sse2|neon|none`)
-- **Psychoacoustic model**: masking-based scalefactor allocation
-  (`-q speed|normal`)
-- **Short blocks**: transient detection with 12-point MDCT block switching
-- **Bit reservoir**: cross-frame bit lending via `main_data_begin`
+- **Quality tiers** (`-q speed|normal|best`): per-granule scale search that
+  matches the source's level and bandwidth, trading encode time for SNR
 - **All sample rates**: 8-48 kHz (MPEG-1, MPEG-2, MPEG-2.5)
 - **All WAV formats**: PCM 8/16/24/32-bit, IEEE float 32/64, A-law,
   mu-law, WAVE_FORMAT_EXTENSIBLE, raw PCM (`-r`)
@@ -27,28 +25,21 @@ path needs only 50 KB RAM and no FPU.
 - **Bindings**: Python (ctypes), Rust (FFI + safe), Dart (Flutter FFI)
 - **Embedded**: 50 KB RAM (fixed-point), fits ESP32/RP2040/STM32F4
 
-## Benchmarks vs Shine vs LAME
+## Benchmarks
 
-128 kbps mono, 44100 Hz, Intel Xeon Skylake:
+**Quality** — speech, 256 kbps stereo, vs. the original (1-min clip, measured
+with `tests/measure_audio.py`; `double` and `fixed` paths are identical):
 
-**Quality** (speech SNR, higher = better):
-
-| Mode | glint | Shine | LAME |
-|---|---|---|---|
-| -q speed | 4.6 dB | — | — |
-| **-q normal (default)** | **11.0 dB** | — | — |
-| -q best | 12.3 dB | — | — |
-| — | — | 18.1 dB | 26.0 dB |
-
-Sine: 18.6 dB (speed), 11.5 dB (normal), 21.8 dB (best).
-
-**Speed** (x-realtime, higher = faster):
-
-| Signal | -q speed | -q normal | -q best | Shine | LAME |
+| Mode | overall SNR | seg-SNR | 95% rolloff | level vs source | encode speed |
 |---|---|---|---|---|---|
-| Sine | 204x | 261x | 19x | 190x | 44x |
-| Noise | 76x | 56x | 3x | 146x | 37x |
-| Speech | 85x | 72x | 4x | — | — |
+| -q speed | 12.5 dB | 10.8 dB | 3.4 kHz | ±0.3 dB | ~86× realtime |
+| **-q normal (default)** | **14.3 dB** | **13.4 dB** | 4.4 kHz | ±0.3 dB | ~33× realtime |
+| -q best | 14.9 dB | 14.0 dB | 4.5 kHz | ±0.3 dB | ~13× realtime |
+
+Reference (source) rolloff on this clip is 5.4 kHz. All three tiers reconstruct
+at the source's level and bandwidth; the tiers trade encode time for the last
+~2 dB of SNR (see the per-granule scale search in the roadmap). Apple Silicon,
+256 kbps stereo; speeds are relative, not absolute.
 
 **Footprint**:
 
@@ -58,8 +49,8 @@ Sine: 18.6 dB (speed), 11.5 dB (normal), 21.8 dB (best).
 | RAM | 141 KB | **50 KB** | ~100 KB |
 | License | **MIT** | **MIT** | LGPL v2 |
 
-glint default (-q normal) achieves 11 dB speech SNR at 72x realtime,
-MIT licensed, 50 KB RAM. Whisper ASR round-trip: 91% word similarity.
+MIT licensed, 50 KB RAM in fixed-point mode. Whisper ASR round-trip:
+91% word similarity.
 
 ## Building
 
@@ -162,12 +153,15 @@ PCM input → Subband Analysis → MDCT → Alias Reduction → Quantization
 ```
 
 - **Subband**: 512-point polyphase filter bank (AVX/SSE2/NEON vectorized)
-- **MDCT**: 36-point (long) or 12-point (short) with sine window, /288
-  normalization, transposed cosine table for SIMD
-- **Quantization**: pow34 table lookup, anti-clipping gain floor, binary
-  search (CBR) or target gain (VBR), masking-based scalefactors
+- **MDCT**: 36-point (long) with sine window, /288 normalization, transposed
+  cosine table for SIMD (12-point short blocks implemented but gated off — see
+  roadmap)
+- **Quantization**: pow34 table lookup, anti-clipping gain floor, binary-search
+  gain to the bit budget (`quantize_base`), wrapped in a per-granule input-scale
+  search that minimizes decoder-reconstruction MSE (`quantize_granule`)
 - **Huffman**: O(1) max-value table selection, 34 ISO tables, SCFSI
-- **Bitstream**: 32-bit accumulator, bit reservoir with `main_data_begin`
+- **Bitstream**: 32-bit accumulator; each frame self-contained (bit reservoir
+  mechanism on the `feature/bit-reservoir` branch, off by default — see roadmap)
 
 ## Project structure
 
@@ -198,84 +192,39 @@ Pre-built binaries at
 
 ## Roadmap
 
-### Diagnosed quality issues (priority — start here)
+### Recently fixed: level / HF / dulling (per-granule scale search)
 
-These were measured on a 1-minute 256 kbps stereo speech clip with
-`tests/measure_audio.py REF FILE...` (decodes via ffmpeg, reports dynamics,
-spectral shape, band SNR, and where quantization noise sits). The `double`
-and `fixed` paths are bit-identical on every metric, so these are encoder
-(quantizer/MDCT) issues, not path issues. Observed vs. the original:
+`-q speed` and `-q normal` used to lose the top of the spectrum and reconstruct
+several dB too quiet (audible as dull, "normalized" sound). Root cause: the
+quantizer `is = int(|xr|^0.75 * step + 0.4054)` rounds any coefficient below a
+~0.6 dead-zone to zero, so small (mostly high-frequency) coefficients were lost.
+A single global gain can't fix this — the right input pre-scale depends on each
+granule's spectral shape. `-q best` worked only because it brute-force searched
+that scale.
 
-| metric          | original | `-q speed` | `-q normal` | `-q best` |
-|-----------------|----------|------------|-------------|-----------|
-| RMS level (dB)  | −19.5    | −25.9      | −21.4       | −19.7     |
-| 95% spectral rolloff | 5414 Hz | **1031 Hz** | **1031 Hz** | 4359 Hz |
-| overall SNR     | —        | 5.1 dB     | 10.1 dB     | 15.0 dB   |
-| seg-SNR         | —        | 3.4 dB     | 6.8 dB      | 13.4 dB   |
+Fixed by unifying all tiers around a **per-granule scale search**
+(`quantize_granule` in `src/quantize.cpp`): try several input scale factors, run
+the base quantizer (`quantize_base`), and keep the one whose decoder
+reconstruction minimizes MSE (`granule_mse`). Search width sets the tier:
+speed = 2 factors, normal = 6, best = 12 + a fine refinement. This removed the
+old fixed `288/194` gain hack and the (measured no-op) headroom and pruning
+passes. Measured on a 1-min 256 kbps stereo speech clip (`double`==`fixed`):
 
-All three issues below share one root cause; fix #1 first, the others should
-largely fall out of it.
+| metric (vs source)   | before (spd/nrm/best) | after (spd/nrm/best) |
+|----------------------|-----------------------|----------------------|
+| RMS level            | −25.9 / −21.4 / −19.7 | within ~0.3 dB of source, all tiers |
+| 95% rolloff          | 1031 / 1031 / 4359 Hz | 3398 / 4383 / 4453 Hz |
+| overall SNR          | 5.1 / 10.1 / 15.0 dB  | 12.5 / 14.3 / 14.9 dB |
+| encode speed         | —                     | ~86× / 33× / 13× realtime |
 
-**1. MDCT gain / normalization mismatch (root cause).**
-The forward MDCT divides every coefficient by 288 (`src/mdct.cpp` long-block
-paths ~lines 88/102/114/125, fixed-point 252/261, float 338/350/364; 12-point
-short uses /96 at 187). That leaves coefficients at a scale where the quantizer
-rounds small ones to zero: `quantize_and_count()` computes
-`qval = pow34(|xr|)*base_step*sf + 0.4054` and truncates to int
-(`src/quantize.cpp:81,97`), with `base_step = 2^(-3*(global_gain-210)/16)`. With
-the /288 scale the natural `global_gain` lands too coarse, so anything but the
-loudest (low-frequency) coefficients truncate to 0.
-The codebase currently *papers over* this with two hacks:
- - `-q normal`: a fixed `kGainCorrection = 288.0/194.0 ≈ 1.485` multiply of the
-   MDCT input (`src/quantize.cpp:316-325`).
- - `-q best`: a 0.70–2.20 *factor search* (`src/quantize.cpp:242-275`) that
-   picks the multiplier minimizing decoder-reconstruction MSE
-   (`mse_vs_original`, `src/quantize.cpp:213-232`). This is why `best` works and
-   matches the original level (−19.7 vs −19.5 dB) — it effectively searches for
-   the missing normalization. `speed` applies no correction (hence −25.9 dB,
-   6.4 dB quiet) and `normal`'s fixed 1.485 is not enough.
- *Fix:* make the forward MDCT scale so the standard decode
- (`xr = ix^(4/3) * 2^(0.25*(global_gain-210)) * sf_dec`) reconstructs the input
- 1:1 at a mid-range `global_gain`, then delete `kGainCorrection` and re-center
- the `-q best` factor search tightly around 1.0. Derive the constant from a
- sine round-trip (encode → decode formula → compare magnitude) rather than
- guessing; the `mse_vs_original` lambda already encodes the exact decode math to
- check against. Verify the optimal `global_gain` is no longer pinned near
- `min_gain` (the anti-clip floor at `src/quantize.cpp:332-353`).
+Verify with `python tests/measure_audio.py original.wav out.mp3` (want RMS
+within ~0.5 dB of source, rolloff near source, `double`==`fixed`) and
+`ffmpeg -v error -i out.mp3 -f null -` (zero "invalid new backstep").
 
-**2. High-frequency hard-cut at ~1 kHz (`-q speed`, `-q normal`).**
-Both modes throw away nearly everything above ~1 kHz (95% rolloff 1031 Hz vs
-the source's 5414 Hz) — audible as dull / "normalized" sound. Two contributors:
-(a) the gain mismatch in #1 (coarse gain ⇒ small HF coefficients round to 0),
-and (b) `compute_headroom_scalefactors()` (`src/quantize.cpp:154-199`) assigns
-`sf = 0` to HF bands it judges masked or "far above mask," removing the
-precision those bands need to survive quantization. `-q best` avoids this
-because its MSE-driven factor/prune search keeps HF (rolloff 4359 Hz).
- *Fix:* after #1, re-check rolloff; then stop the headroom model from zeroing
- bands that carry real energy (floor `sf` for audible HF bands, or gate the
- masking decision on absolute band energy / ATH instead of relative SMR).
- Target: rolloff within ~1 kHz of the source at 256 kbps.
-
-**3. Coarse quantization / dynamics flattening (`-q speed`, `-q normal`).**
-At 256 kbps the frames are *not* bit-limited (the bit reservoir is transparent
-there), yet `speed`/`normal` quantize coarsely: noise concentrates below 1 kHz
-(78% of error power for `speed`) and short-term dynamic range inflates (DR 38 dB
-vs the source's 27 dB) because coarse steps deepen quiet passages. The binary
-gain search (`src/quantize.cpp:360-370`) already seeks the finest gain that fits
-the budget, so spare bits exist but aren't used — likely because `min_gain`
-(anti-clip) or the headroom `sf` assignment prevents going finer.
- *Fix:* falls out of #1 + #2 (correct scale ⇒ finer natural gain ⇒ spare bits
- spent on precision). If a gap remains, add the existing roadmap item
- *Iterative SF amplification* to spend leftover bits on the worst bands.
-
-**How to verify any change here**
- - Quality: `python tests/measure_audio.py original.wav out_*.mp3` — want RMS
-   within ~0.5 dB of source, rolloff near source, seg-SNR up for speed/normal,
-   and `double`==`fixed` parity preserved.
- - Correctness (do not regress): `ffmpeg -v error -i out.mp3 -f null -` must
-   report **zero** "invalid new backstep"; `ctest` / `glint_test` must pass.
- - Note `-q best`'s factor/prune search is slow (~6× realtime); once #1 lands,
-   much of it can be removed, which also speeds `best` up.
+Remaining headroom: the scale search is a coarse stand-in for a real
+rate-distortion loop. A proper per-band noise-shaping outer loop (see
+*Iterative SF amplification* below) should close the last ~1 kHz of rolloff and
+push SNR further, especially at low bitrate.
 
 ### Quality (longer-term)
 - **Bark-band psychoacoustic masking** (`-q best`) — zero masked MDCT

@@ -8,6 +8,7 @@
 #include <cmath>
 #include <algorithm>
 #include <cstring>
+#include <cstdio>
 
 namespace glint {
 
@@ -202,131 +203,91 @@ static bool compute_headroom_scalefactors(int scalefac[21],
     return any;
 }
 
+// Decoder-reconstruction MSE for a quantized granule vs the original MDCT.
+// Used to pick the per-granule input scale ("factor") that best preserves the
+// spectrum through the quantizer dead-zone.
+static double granule_mse(const GranuleInfo& gi, const double* mdct_in,
+                          int sr_index) {
+    const int* sfb = tables::get_sfb_long_by_unified(sr_index);
+    double decoder_gain = std::pow(2.0, 0.25 * (gi.global_gain - 210));
+    double noise = 0.0;
+    int b = 0;
+    for (int i = 0; i < 576; i++) {
+        while (b < 20 && i >= sfb[b + 1]) b++;
+        int sf = gi.scalefac[b];
+        if (gi.preflag && b < 22) sf += tables::preemphasis[b];
+        double sf_d = std::pow(2.0, -0.5 * sf * (1 + gi.scalefac_scale));
+        double xr_hat = 0.0;
+        if (gi.ix[i] != 0) {
+            double a = std::abs(static_cast<double>(gi.ix[i]));
+            xr_hat = std::copysign(std::pow(a, 4.0/3.0) * decoder_gain * sf_d,
+                                   mdct_in[i]);
+        }
+        double err = mdct_in[i] - xr_hat;
+        noise += err * err;
+    }
+    return noise;
+}
+
+// Base quantizer: gain search to the bit budget + energy-based scalefactors.
+// Operates on already-scaled input; the public quantize_granule wraps this in
+// the per-granule scale search.
+static GranuleInfo quantize_base(const double* mdct_in, int available_bits,
+                                 int sr_index, bool short_block);
+
+// Per-granule scale search (all quality tiers).
+//
+// The quantizer is is = int(|xr|^0.75 * step + 0.4054); coefficients whose
+// scaled magnitude is below the ~0.6 dead-zone round to zero. Small (mostly
+// high-frequency) coefficients are lost, which both dulls the signal and drops
+// its level. A single global gain cannot fix this because the right pre-scale
+// depends on each granule's spectral shape — so we search input scale factors
+// and keep the one whose decoder reconstruction best matches the original (min
+// MSE). This replaces the older fixed 288/194 "gain correction" and the
+// (measurably no-op) headroom/pruning passes. Wider search = higher quality and
+// more CPU: speed=2 factors, normal=6, best=12 + a fine refinement.
 GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
                               int sr_index, int quality_mode, bool short_block) {
-    // Quality mode 2 (best): wide gain correction search with refinement.
-    //
-    // The /288 MDCT normalization causes quantization at a sub-optimal
-    // gain level. We search a wide range of multiplicative correction
-    // factors and pick the one that minimizes decoder-side MSE.
-    if (quality_mode >= 2) {
-        init_quant_tables();
-        const int* sfb_q2 = tables::get_sfb_long_by_unified(sr_index);
+    init_quant_tables();
+    static const double kSpeed[]  = { 1.7, 2.4 };
+    static const double kNormal[] = { 1.3, 1.7, 2.1, 2.6, 3.2, 4.0 };
+    static const double kBest[]   = {
+        1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 2.2, 2.5, 2.8, 3.2, 3.6, 4.2 };
+    const double* factors; int nf;
+    if (quality_mode >= 2)      { factors = kBest;   nf = 12; }
+    else if (quality_mode == 1) { factors = kNormal; nf = 6; }
+    else                        { factors = kSpeed;  nf = 2; }
 
-        // MSE metric: simulate decoder reconstruction, compare to original
-        auto mse_vs_original = [&](const GranuleInfo& gi) -> double {
-            double decoder_gain = std::pow(2.0, 0.25 * (gi.global_gain - 210));
-            double noise = 0.0;
-            int b2 = 0;
-            for (int i = 0; i < 576; i++) {
-                while (b2 < 20 && i >= sfb_q2[b2 + 1]) b2++;
-                int sf = gi.scalefac[b2];
-                if (gi.preflag && b2 < 22) sf += tables::preemphasis[b2];
-                double sf_d = std::pow(2.0, -0.5 * sf * (1 + gi.scalefac_scale));
-                double xr_hat = 0.0;
-                if (gi.ix[i] != 0) {
-                    double a = std::abs(static_cast<double>(gi.ix[i]));
-                    xr_hat = std::copysign(std::pow(a, 4.0/3.0) * decoder_gain * sf_d,
-                                           mdct_in[i]);
-                }
-                double err = mdct_in[i] - xr_hat;
-                noise += err * err;
-            }
-            return noise;
-        };
-
-        GranuleInfo best_result{};
-        double best_mse = 1e30;
-
-        // Two-phase gain correction search:
-        // Phase 1: 16-point coarse scan over [0.70, 2.20]
-        // Phase 2: Fine refinement with +-0.025 steps around the winner
-        // With mode=1's baseline 288/194 correction, the effective factor
-        // range is [1.04, 3.27] which covers the entire useful space.
-        static constexpr double kCoarseFactors[] = {
-            0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 1.00, 1.05,
-            1.10, 1.20, 1.30, 1.40, 1.50, 1.70, 2.00, 2.20
-        };
-
-        double best_factor = 1.0;
-        for (double factor : kCoarseFactors) {
-            double mdct_scaled[576];
-            for (int i = 0; i < 576; i++)
-                mdct_scaled[i] = mdct_in[i] * factor;
-            GranuleInfo gi = quantize_granule(mdct_scaled, available_bits, sr_index, 1, short_block);
-            double d = mse_vs_original(gi);
-            if (d < best_mse) {
-                best_mse = d;
-                best_result = gi;
-                best_factor = factor;
-            }
-        }
-
-        // Phase 2: Fine refinement with 0.025 steps around the winner
-        for (int step = -3; step <= 3; step++) {
-            if (step == 0) continue;
-            double factor = best_factor + step * 0.025;
-            if (factor < 0.5) continue;
-            double mdct_scaled[576];
-            for (int i = 0; i < 576; i++)
-                mdct_scaled[i] = mdct_in[i] * factor;
-            GranuleInfo gi = quantize_granule(mdct_scaled, available_bits, sr_index, 1, short_block);
-            double d = mse_vs_original(gi);
-            if (d < best_mse) {
-                best_mse = d;
-                best_result = gi;
-            }
-        }
-
-        // Phase 3: Psychoacoustic coefficient pruning.
-        // Zero out coefficients below masking threshold, freeing bits for
-        // more precise quantization of perceptually important coefficients.
-        {
-            double masking_threshold[576];
-            s_psycho.compute_masking(mdct_in, masking_threshold, sr_index);
-
-            static constexpr double kPruneScales[] = { 1.0, 4.0, 16.0 };
-            for (double prune_scale : kPruneScales) {
-                double mdct_pruned[576];
-                for (int i = 0; i < 576; i++) {
-                    if (mdct_in[i] * mdct_in[i] < prune_scale * masking_threshold[i])
-                        mdct_pruned[i] = 0.0;
-                    else
-                        mdct_pruned[i] = mdct_in[i];
-                }
-                // Try a few gain factors with the pruned signal
-                static constexpr double kPruneFactors[] = { 0.85, 1.00, 1.20 };
-                for (double factor : kPruneFactors) {
-                    double mdct_scaled[576];
-                    for (int i = 0; i < 576; i++)
-                        mdct_scaled[i] = mdct_pruned[i] * factor;
-                    GranuleInfo gi = quantize_granule(mdct_scaled, available_bits, sr_index, 1, short_block);
-                    double d = mse_vs_original(gi);
-                    if (d < best_mse) {
-                        best_mse = d;
-                        best_result = gi;
-                    }
-                }
-            }
-        }
-
-        return best_result;
+    GranuleInfo best_result{};
+    double best_mse = 1e30;
+    double best_factor = 1.0;
+    double scaled[576];
+    for (int fi = 0; fi < nf; fi++) {
+        double f = factors[fi];
+        for (int i = 0; i < 576; i++) scaled[i] = mdct_in[i] * f;
+        GranuleInfo gi = quantize_base(scaled, available_bits, sr_index, short_block);
+        double d = granule_mse(gi, mdct_in, sr_index);
+        if (d < best_mse) { best_mse = d; best_result = gi; best_factor = f; }
     }
+    if (quality_mode >= 2) {
+        for (int step = -2; step <= 2; step++) {
+            if (step == 0) continue;
+            double f = best_factor + step * 0.12;
+            if (f < 0.5) continue;
+            for (int i = 0; i < 576; i++) scaled[i] = mdct_in[i] * f;
+            GranuleInfo gi = quantize_base(scaled, available_bits, sr_index, short_block);
+            double d = granule_mse(gi, mdct_in, sr_index);
+            if (d < best_mse) { best_mse = d; best_result = gi; }
+        }
+    }
+    return best_result;
+}
 
+static GranuleInfo quantize_base(const double* mdct_in, int available_bits,
+                                 int sr_index, bool short_block) {
     GranuleInfo info{};
     std::memset(&info, 0, sizeof(info));
     init_quant_tables();
-
-    // For quality_mode >= 1: apply single-shot gain correction (288/194 ≈ 1.485)
-    // to compensate the systematic MDCT normalization mismatch.
-    // This is free (just scales the input) and gives +3.8 dB on speech.
-    double mdct_corrected[576];
-    if (quality_mode == 1) {  // only for normal, best has its own gain search
-        static constexpr double kGainCorrection = 288.0 / 194.0;
-        for (int i = 0; i < 576; i++)
-            mdct_corrected[i] = mdct_in[i] * kGainCorrection;
-        mdct_in = mdct_corrected;
-    }
 
     int slen1 = 0, slen2 = 0;
     info.scalefac_compress = 0;
@@ -439,39 +400,10 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
             info.global_gain = best_gain;
         };
 
-        if (quality_mode >= 1 && max_energy > 0.0 && active_bands >= 3) {
-            // Headroom-based scalefactor assignment (Vorbis/Opus/FLAC insight):
-            // High-energy bands are LEAST sensitive to noise (self-masking).
-            // Low-energy bands near masking threshold are MOST sensitive.
-            // SF inversely proportional to headroom above masking threshold.
-            bool any = compute_headroom_scalefactors(info.scalefac, band_energy,
-                                                      active_bands);
-            if (any) {
-                recompute_scalefac_encoding();
-            }
-
-            // Post-binary-search gain refinement (FLAC insight):
-            // Try finer gains (lower value = more precision) if bits remain
-            {
-                int actual_bits = quantize_and_count(mdct_in, info.ix, best_gain,
-                    info.scalefac, info.scalefac_scale, info.preflag, sr_index,
-                    nullptr, nullptr, short_block);
-                for (int delta = 1; delta <= 2 && best_gain - delta >= min_gain; delta++) {
-                    int test_gain = best_gain - delta;
-                    int test_bits = quantize_and_count(mdct_in, info.ix, test_gain,
-                        info.scalefac, info.scalefac_scale, info.preflag, sr_index,
-                        nullptr, nullptr, short_block);
-                    if (test_bits <= target_bits) {
-                        best_gain = test_gain;
-                        info.global_gain = best_gain;
-                        actual_bits = test_bits;
-                    } else {
-                        break;
-                    }
-                }
-            }
-        } else if (max_energy > 0.0 && active_bands >= 3) {
-            // Speed mode: simple energy-based scalefactor assignment
+        if (max_energy > 0.0 && active_bands >= 3) {
+            // Energy-based scalefactor assignment: give a little extra precision
+            // to higher-energy bands. Modes 1/2 get their per-granule fidelity
+            // from the scale search that wraps this base quantizer.
             bool any = false;
             for (int band = 0; band < 21; band++) {
                 double ratio = band_energy[band] / max_energy;
