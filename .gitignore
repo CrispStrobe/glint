@@ -4,6 +4,7 @@ build/
 *.so
 .claude/
 HANDOVER.md
+CLAUDE.md
 build*/
 *.o
 *.a
