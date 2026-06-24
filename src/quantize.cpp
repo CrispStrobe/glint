@@ -42,7 +42,8 @@ static double fast_pow34(double x) {
 static int quantize_and_count(const double* mdct_in, int* ix,
                                int global_gain, const int scalefac[21],
                                int scalefac_scale, int preflag,
-                               int sr_index) {
+                               int sr_index,
+                               HuffRegions* out_regions = nullptr) {
     init_quant_tables();
     const int* sfb = tables::get_sfb_long_by_unified(sr_index);
     double base_step = gain_table[global_gain];
@@ -62,6 +63,7 @@ static int quantize_and_count(const double* mdct_in, int* ix,
     }
 
     HuffRegions regions = huffman_determine_regions(ix, sr_index);
+    if (out_regions) *out_regions = regions;
     return huffman_count_bits(ix, regions, sr_index);
 }
 
@@ -140,7 +142,7 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
     // Lower bound is min_gain to prevent 8191 clipping.
     int lo = min_gain, hi = 255, best_gain = 255;
 
-    for (int iter = 0; iter < 20 && lo <= hi; iter++) {
+    for (int iter = 0; iter < 8 && lo <= hi; iter++) {
         int gain = (lo + hi) / 2;
         int bits = quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
                                        info.scalefac_scale, info.preflag, sr_index);
@@ -149,10 +151,8 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
     }
 
     info.global_gain = best_gain;
-    quantize_and_count(mdct_in, info.ix, best_gain, info.scalefac,
-                       info.scalefac_scale, info.preflag, sr_index);
 
-    // Energy-based scalefactor adjustment
+    // Scalefactor adjustment
     {
         const int* sfb = tables::get_sfb_long_by_unified(sr_index);
         double band_energy[21], max_energy = 0.0;
@@ -164,70 +164,33 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
             if (e > max_energy) max_energy = e;
         }
 
-        // Count active bands - only apply scalefactors when enough spectral
-        // diversity exists to benefit from noise shaping
+        // Count active bands
         int active_bands = 0;
         if (max_energy > 0.0) {
             for (int band = 0; band < 21; band++)
                 if (band_energy[band] / max_energy > 0.01) active_bands++;
         }
 
-        bool any = false;
-        if (quality_mode == 1 && max_energy > 0.0) {
-            // Spreading function: each band masks neighbors at ~8 dB/band distance
-            double masking[21] = {};
-            for (int i = 0; i < 21; i++) {
-                for (int j = 0; j < 21; j++) {
-                    double spread = std::pow(10.0, -std::abs(i - j) * 0.8);
-                    masking[i] += band_energy[j] * spread;
-                }
-            }
-
-            // Scalefactor = inverse of signal-to-mask ratio
-            for (int band = 0; band < 21; band++) {
-                if (masking[band] > 0 && band_energy[band] > 0) {
-                    double smr = band_energy[band] / masking[band];
-                    int sf = 7 - static_cast<int>(std::log2(std::max(smr, 0.001)) * 1.5);
-                    if (sf < 0) sf = 0;
-                    if (sf > 7) sf = 7;
-                    info.scalefac[band] = sf;
-                    if (sf > 0) any = true;
-                }
-            }
-        } else if (max_energy > 0.0 && active_bands >= 3) {
-            for (int band = 0; band < 21; band++) {
-                double ratio = band_energy[band] / max_energy;
-                if (ratio > 0.01) {
-                    int sf = static_cast<int>(ratio * 4.0 + 0.5);
-                    if (sf > 7) sf = 7;
-                    if (sf > 0) { info.scalefac[band] = sf; any = true; }
-                }
-            }
-        }
-
-        if (any) {
+        // Helper lambda to compute slen/part2 and re-search gain
+        auto recompute_scalefac_encoding = [&]() {
             bool is_mpeg2 = (sr_index >= 3);
 
             if (is_mpeg2) {
-                // MPEG-2/2.5: 4 band groups [6, 5, 5, 5] = 21 bands
-                // Group 0: bands 0-5, Group 1: bands 6-10,
-                // Group 2: bands 11-15, Group 3: bands 16-20
                 int max_sf[4] = {};
                 for (int b = 0; b < 6; b++) max_sf[0] = std::max(max_sf[0], info.scalefac[b]);
                 for (int b = 6; b < 11; b++) max_sf[1] = std::max(max_sf[1], info.scalefac[b]);
                 for (int b = 11; b < 16; b++) max_sf[2] = std::max(max_sf[2], info.scalefac[b]);
                 for (int b = 16; b < 21; b++) max_sf[3] = std::max(max_sf[3], info.scalefac[b]);
-                int slen[4];
+                int sl[4];
                 for (int g = 0; g < 4; g++) {
-                    slen[g] = 0;
-                    while ((1 << slen[g]) <= max_sf[g]) slen[g]++;
-                    if (slen[g] > 4) slen[g] = 4;
+                    sl[g] = 0;
+                    while ((1 << sl[g]) <= max_sf[g]) sl[g]++;
+                    if (sl[g] > 4) sl[g] = 4;
                 }
                 info.scalefac_compress = encode_scalefac_compress_m2(
-                    slen[0], slen[1], slen[2], slen[3]);
-                info.part2_length = slen[0]*6 + slen[1]*5 + slen[2]*5 + slen[3]*5;
+                    sl[0], sl[1], sl[2], sl[3]);
+                info.part2_length = sl[0]*6 + sl[1]*5 + sl[2]*5 + sl[3]*5;
             } else {
-                // MPEG-1: 2 band groups [11, 10] = 21 bands
                 int max_sf1 = 0, max_sf2 = 0;
                 for (int b = 0; b < 11; b++) max_sf1 = std::max(max_sf1, info.scalefac[b]);
                 for (int b = 11; b < 21; b++) max_sf2 = std::max(max_sf2, info.scalefac[b]);
@@ -242,20 +205,112 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
             if (target_bits < 0) target_bits = 0;
 
             lo = min_gain; hi = 255; best_gain = 255;
-            for (int iter = 0; iter < 16 && lo <= hi; iter++) {
+            for (int iter = 0; iter < 8 && lo <= hi; iter++) {
                 int gain = (lo + hi) / 2;
                 int bits = quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
                                            info.scalefac_scale, info.preflag, sr_index);
-                if (bits <= target_bits) { hi = gain; best_gain = gain; }
+                if (bits <= target_bits) { hi = gain - 1; best_gain = gain; }
                 else { lo = gain + 1; }
             }
             info.global_gain = best_gain;
+        };
+
+        // Helper lambda to measure per-band distortion
+        auto measure_distortion = [&](double* distortion) {
             quantize_and_count(mdct_in, info.ix, best_gain, info.scalefac,
                                info.scalefac_scale, info.preflag, sr_index);
+            double decoder_gain = std::pow(2.0, 0.25 * (best_gain - 210));
+            for (int band = 0; band < 21; band++) {
+                int sf = info.scalefac[band];
+                if (info.preflag && band < 22) sf += tables::preemphasis[band];
+                double sf_decode = std::pow(2.0, -0.5 * sf * (1 + info.scalefac_scale));
+                double noise = 0.0;
+                for (int i = sfb[band]; i < sfb[band+1] && i < 576; i++) {
+                    double xr_hat = 0.0;
+                    if (info.ix[i] != 0) {
+                        double abs_ix = std::abs((double)info.ix[i]);
+                        xr_hat = std::copysign(
+                            std::pow(abs_ix, 4.0/3.0) * decoder_gain * sf_decode,
+                            mdct_in[i]);
+                    }
+                    double err = mdct_in[i] - xr_hat;
+                    noise += err * err;
+                }
+                distortion[band] = noise;
+            }
+        };
+
+        if (quality_mode >= 1 && max_energy > 0.0) {
+            // Distortion-controlled outer loop:
+            // Start with SF=0, measure distortion, selectively boost bands
+            // that have above-average noise-to-signal ratio.
+            for (int outer = 0; outer < 5; outer++) {
+                double distortion[21];
+                measure_distortion(distortion);
+
+                // Compute average NSR across active bands
+                double avg_nsr = 0.0;
+                int nsr_count = 0;
+                for (int band = 0; band < 21; band++) {
+                    if (band_energy[band] > 1e-10) {
+                        avg_nsr += distortion[band] / band_energy[band];
+                        nsr_count++;
+                    }
+                }
+                if (nsr_count > 0) avg_nsr /= nsr_count;
+
+                // Increase SF for bands with NSR significantly above average
+                bool changed = false;
+                for (int band = 0; band < 21; band++) {
+                    if (band_energy[band] > 1e-10) {
+                        double nsr = distortion[band] / band_energy[band];
+                        // Boost SF if this band's NSR is > 1.5x the average
+                        // and the NSR is above the -10 dB threshold
+                        if (nsr > avg_nsr * 1.5 && nsr > 0.1) {
+                            if (info.scalefac[band] < 7) {
+                                info.scalefac[band]++;
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+
+                if (!changed) break;
+
+                // Recompute scalefac encoding and re-search gain
+                recompute_scalefac_encoding();
+            }
+
+            // Check if any SFs are nonzero
+            bool any = false;
+            for (int b = 0; b < 21; b++) {
+                if (info.scalefac[b] > 0) { any = true; break; }
+            }
+            if (any) {
+                recompute_scalefac_encoding();
+            }
+        } else if (max_energy > 0.0 && active_bands >= 3) {
+            // Speed mode: simple energy-based scalefactor assignment
+            bool any = false;
+            for (int band = 0; band < 21; band++) {
+                double ratio = band_energy[band] / max_energy;
+                if (ratio > 0.01) {
+                    int sf = static_cast<int>(ratio * 4.0 + 0.5);
+                    if (sf > 7) sf = 7;
+                    if (sf > 0) { info.scalefac[band] = sf; any = true; }
+                }
+            }
+            if (any) {
+                recompute_scalefac_encoding();
+            }
         }
     }
 
-    info.regions = huffman_determine_regions(info.ix, sr_index);
+    // Final quantize to populate ix[] with the chosen gain and scalefactors,
+    // and cache the regions to avoid redundant huffman_determine_regions call
+    quantize_and_count(mdct_in, info.ix, best_gain, info.scalefac,
+                       info.scalefac_scale, info.preflag, sr_index,
+                       &info.regions);
     info.part2_3_length = info.part2_length +
                           huffman_count_bits(info.ix, info.regions, sr_index);
     return info;
@@ -307,7 +362,7 @@ GranuleInfo quantize_granule_vbr(const double* mdct_in, int sr_index,
     quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
                        info.scalefac_scale, info.preflag, sr_index);
 
-    // Energy-based scalefactor adjustment (same logic as CBR)
+    // Energy-based scalefactor adjustment
     {
         const int* sfb = tables::get_sfb_long_by_unified(sr_index);
         double band_energy[21], max_energy = 0.0;
@@ -325,26 +380,104 @@ GranuleInfo quantize_granule_vbr(const double* mdct_in, int sr_index,
                 if (band_energy[band] / max_energy > 0.01) active_bands++;
         }
 
-        bool any = false;
-        if (quality_mode == 1 && max_energy > 0.0) {
-            double masking[21] = {};
-            for (int i = 0; i < 21; i++) {
-                for (int j = 0; j < 21; j++) {
-                    double spread = std::pow(10.0, -std::abs(i - j) * 0.8);
-                    masking[i] += band_energy[j] * spread;
+        // Helper lambda to recompute scalefac encoding for VBR
+        auto recompute_scalefac_encoding_vbr = [&]() {
+            bool is_mpeg2 = (sr_index >= 3);
+            if (is_mpeg2) {
+                int max_sf[4] = {};
+                for (int b = 0; b < 6; b++) max_sf[0] = std::max(max_sf[0], info.scalefac[b]);
+                for (int b = 6; b < 11; b++) max_sf[1] = std::max(max_sf[1], info.scalefac[b]);
+                for (int b = 11; b < 16; b++) max_sf[2] = std::max(max_sf[2], info.scalefac[b]);
+                for (int b = 16; b < 21; b++) max_sf[3] = std::max(max_sf[3], info.scalefac[b]);
+                int sl[4];
+                for (int g = 0; g < 4; g++) {
+                    sl[g] = 0;
+                    while ((1 << sl[g]) <= max_sf[g]) sl[g]++;
+                    if (sl[g] > 4) sl[g] = 4;
                 }
+                info.scalefac_compress = encode_scalefac_compress_m2(
+                    sl[0], sl[1], sl[2], sl[3]);
+                info.part2_length = sl[0]*6 + sl[1]*5 + sl[2]*5 + sl[3]*5;
+            } else {
+                int max_sf1 = 0, max_sf2 = 0;
+                for (int b = 0; b < 11; b++) max_sf1 = std::max(max_sf1, info.scalefac[b]);
+                for (int b = 11; b < 21; b++) max_sf2 = std::max(max_sf2, info.scalefac[b]);
+                int sl1 = 0; while ((1 << sl1) <= max_sf1) sl1++;
+                int sl2 = 0; while ((1 << sl2) <= max_sf2) sl2++;
+                if (sl1 > 4) sl1 = 4;
+                if (sl2 > 3) sl2 = 3;
+                info.scalefac_compress = encode_scalefac_compress(sl1, sl2);
+                info.part2_length = sl1 * 11 + sl2 * 10;
             }
+        };
+
+        // Helper lambda to measure per-band distortion
+        auto measure_distortion = [&](double* distortion) {
+            quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
+                               info.scalefac_scale, info.preflag, sr_index);
+            double decoder_gain = std::pow(2.0, 0.25 * (gain - 210));
             for (int band = 0; band < 21; band++) {
-                if (masking[band] > 0 && band_energy[band] > 0) {
-                    double smr = band_energy[band] / masking[band];
-                    int sf = 7 - static_cast<int>(std::log2(std::max(smr, 0.001)) * 1.5);
-                    if (sf < 0) sf = 0;
-                    if (sf > 7) sf = 7;
-                    info.scalefac[band] = sf;
-                    if (sf > 0) any = true;
+                int sf = info.scalefac[band];
+                if (info.preflag && band < 22) sf += tables::preemphasis[band];
+                double sf_decode = std::pow(2.0, -0.5 * sf * (1 + info.scalefac_scale));
+                double noise = 0.0;
+                for (int i = sfb[band]; i < sfb[band+1] && i < 576; i++) {
+                    double xr_hat = 0.0;
+                    if (info.ix[i] != 0) {
+                        double abs_ix = std::abs((double)info.ix[i]);
+                        xr_hat = std::copysign(
+                            std::pow(abs_ix, 4.0/3.0) * decoder_gain * sf_decode,
+                            mdct_in[i]);
+                    }
+                    double err = mdct_in[i] - xr_hat;
+                    noise += err * err;
                 }
+                distortion[band] = noise;
+            }
+        };
+
+        if (quality_mode >= 1 && max_energy > 0.0) {
+            // Distortion-controlled outer loop for VBR
+            for (int outer = 0; outer < 5; outer++) {
+                double distortion[21];
+                measure_distortion(distortion);
+
+                double avg_nsr = 0.0;
+                int nsr_count = 0;
+                for (int band = 0; band < 21; band++) {
+                    if (band_energy[band] > 1e-10) {
+                        avg_nsr += distortion[band] / band_energy[band];
+                        nsr_count++;
+                    }
+                }
+                if (nsr_count > 0) avg_nsr /= nsr_count;
+
+                bool changed = false;
+                for (int band = 0; band < 21; band++) {
+                    if (band_energy[band] > 1e-10) {
+                        double nsr = distortion[band] / band_energy[band];
+                        if (nsr > avg_nsr * 1.5 && nsr > 0.1) {
+                            if (info.scalefac[band] < 7) {
+                                info.scalefac[band]++;
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+
+                if (!changed) break;
+                recompute_scalefac_encoding_vbr();
+            }
+
+            bool any = false;
+            for (int b = 0; b < 21; b++) {
+                if (info.scalefac[b] > 0) { any = true; break; }
+            }
+            if (any) {
+                recompute_scalefac_encoding_vbr();
             }
         } else if (max_energy > 0.0 && active_bands >= 3) {
+            bool any = false;
             for (int band = 0; band < 21; band++) {
                 double ratio = band_energy[band] / max_energy;
                 if (ratio > 0.01) {
@@ -353,44 +486,18 @@ GranuleInfo quantize_granule_vbr(const double* mdct_in, int sr_index,
                     if (sf > 0) { info.scalefac[band] = sf; any = true; }
                 }
             }
-        }
-
-        if (any) {
-            bool is_mpeg2 = (sr_index >= 3);
-            if (is_mpeg2) {
-                int max_sf[4] = {};
-                for (int b = 0; b < 6; b++) max_sf[0] = std::max(max_sf[0], info.scalefac[b]);
-                for (int b = 6; b < 11; b++) max_sf[1] = std::max(max_sf[1], info.scalefac[b]);
-                for (int b = 11; b < 16; b++) max_sf[2] = std::max(max_sf[2], info.scalefac[b]);
-                for (int b = 16; b < 21; b++) max_sf[3] = std::max(max_sf[3], info.scalefac[b]);
-                int slen[4];
-                for (int g = 0; g < 4; g++) {
-                    slen[g] = 0;
-                    while ((1 << slen[g]) <= max_sf[g]) slen[g]++;
-                    if (slen[g] > 4) slen[g] = 4;
-                }
-                info.scalefac_compress = encode_scalefac_compress_m2(
-                    slen[0], slen[1], slen[2], slen[3]);
-                info.part2_length = slen[0]*6 + slen[1]*5 + slen[2]*5 + slen[3]*5;
-            } else {
-                int max_sf1 = 0, max_sf2 = 0;
-                for (int b = 0; b < 11; b++) max_sf1 = std::max(max_sf1, info.scalefac[b]);
-                for (int b = 11; b < 21; b++) max_sf2 = std::max(max_sf2, info.scalefac[b]);
-                int slen1 = 0; while ((1 << slen1) <= max_sf1) slen1++;
-                int slen2 = 0; while ((1 << slen2) <= max_sf2) slen2++;
-                if (slen1 > 4) slen1 = 4;
-                if (slen2 > 3) slen2 = 3;
-                info.scalefac_compress = encode_scalefac_compress(slen1, slen2);
-                info.part2_length = slen1 * 11 + slen2 * 10;
+            if (any) {
+                recompute_scalefac_encoding_vbr();
+                quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
+                                   info.scalefac_scale, info.preflag, sr_index);
             }
-
-            // Re-quantize with scalefactors applied
-            quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
-                               info.scalefac_scale, info.preflag, sr_index);
         }
     }
 
-    info.regions = huffman_determine_regions(info.ix, sr_index);
+    // Final quantize and cache regions
+    quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
+                       info.scalefac_scale, info.preflag, sr_index,
+                       &info.regions);
     info.part2_3_length = info.part2_length +
                           huffman_count_bits(info.ix, info.regions, sr_index);
     return info;
