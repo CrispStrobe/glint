@@ -27,29 +27,40 @@ path needs only 50 KB RAM and no FPU.
 - **Bindings**: Python (ctypes), Rust (FFI + safe), Dart (Flutter FFI)
 - **Embedded**: 50 KB RAM (fixed-point), fits ESP32/RP2040/STM32F4
 
-## Quality
+## Benchmarks vs Shine vs LAME
 
-At 128 kbps mono, 44100 Hz:
+128 kbps mono, 44100 Hz, Intel Xeon Skylake:
 
-| Signal | Correlation | SNR |
-|---|---|---|
-| 1 kHz sine | 0.9955 | 18.6 dB |
-| Speech (JFK) | 0.9408 | 4.6 dB |
-| Multi-tone (6 freq) | 0.9930 | 5.9 dB |
+**Speed** (x-realtime, higher = better):
 
-Whisper ASR round-trip: 91% word similarity. With `-q normal`
-(psychoacoustic model): speech correlation 0.967 (+2.6%).
+| Signal | glint double | glint fixed | Shine | LAME |
+|---|---|---|---|---|
+| Sine | **148x** | 94x | 126x | 48x |
+| Complex | 34x | 34x | 98x | 38x |
+| Noise | 37x | 35x | 101x | 40x |
+| VBR (-V 5) | **240x** | — | — | — |
 
-## Speed
+**Quality** (correlation / SNR):
 
-Encoding speed on Intel Xeon Skylake, single-threaded:
+| Signal | glint | Shine | LAME |
+|---|---|---|---|
+| Sine | +0.995 / 19 dB | +0.333 / -1 dB | +1.000 / 26 dB |
+| Multi-tone | +0.993 / 6 dB | +1.000 / 18 dB | +1.000 / 26 dB |
+| Speech | +0.941 / 5 dB | +1.000 / 18 dB | +1.000 / 26 dB |
 
-| Mode | Speed | Notes |
-|---|---|---|
-| CBR sine | 144x realtime | 3.6x faster than LAME |
-| CBR speech | ~80x realtime | 2x faster than LAME |
-| CBR noise | 38x realtime | comparable to LAME |
-| VBR (-V 5) | 240x realtime | no binary search needed |
+**Footprint**:
+
+| | glint double | glint fixed | Shine |
+|---|---|---|---|
+| Library | 158 KB | 127 KB | 225 KB |
+| RAM | 141 KB | **50 KB** | ~100 KB |
+| License | **MIT** | **MIT** | LGPL v2 |
+
+glint is faster than LAME on simple signals (3x on sine), comparable
+on complex signals, and smaller + MIT-licensed vs Shine's LGPL.
+Shine has better complex-signal quality; LAME is best overall quality.
+glint double and fixed produce identical quality. Whisper ASR
+round-trip: 91% word similarity.
 
 ## Building
 
