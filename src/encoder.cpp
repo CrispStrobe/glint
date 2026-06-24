@@ -354,7 +354,7 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                     // afterwards, leaving part2_3_length far over budget and
                     // overflowing the 12-bit side-info field.)
                     if (enc->vbr_mode) {
-                        granule_info[gr][ch] = quantize_granule_vbr(mdct_flat,
+                        granule_info[gr][ch] = quantize_granule_vbr(mdct_flat, gr_bits,
                             enc->sr_index, enc->quality_mode, enc->vbr_quality,
                             /*short_block=*/true);
                     } else {
@@ -375,7 +375,7 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                             mdct_flat[sb * 18 + k] = mdct_out[sb][k];
 
                     if (enc->vbr_mode) {
-                        granule_info[gr][ch] = quantize_granule_vbr(mdct_flat,
+                        granule_info[gr][ch] = quantize_granule_vbr(mdct_flat, gr_bits,
                             enc->sr_index, enc->quality_mode, enc->vbr_quality);
                     } else {
                         granule_info[gr][ch] = quantize_granule(mdct_flat, gr_bits,
@@ -430,7 +430,7 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                 enc->mdct_fp[ch].process_and_convert(sub_gr, mdct_flat);
 
                 if (enc->vbr_mode) {
-                    granule_info[gr][ch] = quantize_granule_vbr(mdct_flat,
+                    granule_info[gr][ch] = quantize_granule_vbr(mdct_flat, bits_per_granule,
                         enc->sr_index, enc->quality_mode, enc->vbr_quality);
                 } else {
                     granule_info[gr][ch] = quantize_granule(mdct_flat, bits_per_granule,
@@ -736,7 +736,7 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
                 // Short-block quantization with the matching region layout
                 // (see glint_encode for the rationale).
                 if (enc->vbr_mode) {
-                    granule_info[gr][ch] = quantize_granule_vbr(mdct_flat,
+                    granule_info[gr][ch] = quantize_granule_vbr(mdct_flat, bits_per_granule,
                         enc->sr_index, enc->quality_mode, enc->vbr_quality,
                         /*short_block=*/true);
                 } else {
@@ -756,7 +756,7 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
                         mdct_flat[sb * 18 + k] = mdct_out[sb][k];
 
                 if (enc->vbr_mode) {
-                    granule_info[gr][ch] = quantize_granule_vbr(mdct_flat,
+                    granule_info[gr][ch] = quantize_granule_vbr(mdct_flat, bits_per_granule,
                         enc->sr_index, enc->quality_mode, enc->vbr_quality);
                 } else {
                     granule_info[gr][ch] = quantize_granule(mdct_flat, bits_per_granule,

@@ -524,8 +524,8 @@ static const int vbr_target_gain[10] = {
     150, 155, 162, 170, 178, 186, 194, 204, 216, 230
 };
 
-GranuleInfo quantize_granule_vbr(const double* mdct_in, int sr_index,
-                                  int quality_mode, int vbr_quality,
+GranuleInfo quantize_granule_vbr(const double* mdct_in, int available_bits,
+                                  int sr_index, int quality_mode, int vbr_quality,
                                   bool short_block) {
     if (quality_mode >= 2) {
         double masking_threshold[576];
@@ -539,7 +539,8 @@ GranuleInfo quantize_granule_vbr(const double* mdct_in, int sr_index,
                 mdct_masked[i] = mdct_in[i];
         }
 
-        return quantize_granule_vbr(mdct_masked, sr_index, 1, vbr_quality, short_block);
+        return quantize_granule_vbr(mdct_masked, available_bits, sr_index, 1,
+                                    vbr_quality, short_block);
     }
 
     GranuleInfo info{};
@@ -661,10 +662,14 @@ GranuleInfo quantize_granule_vbr(const double* mdct_in, int sr_index,
     info.part2_3_length = info.part2_length +
                           huffman_count_bits(info.ix, info.regions, sr_index);
 
-    // Budget guarantee: part2_3_length is written into a 12-bit side-info
-    // field (max 4095). VBR has no bit budget, but a fine target gain on a
-    // dense short block can still exceed the field. Coarsen until it fits.
-    while (info.part2_3_length > 4095 && gain < 255) {
+    // Budget guarantee: with the reservoir disabled, each granule must fit its
+    // share of the frame, and part2_3_length must also fit the 12-bit side-info
+    // field (max 4095). A fine target gain on a loud granule can exceed either,
+    // so coarsen global_gain until it fits. available_bits <= 0 means "no frame
+    // budget given" — fall back to just the field limit.
+    int limit = (available_bits > 0) ? available_bits : 4095;
+    if (limit > 4095) limit = 4095;
+    while (info.part2_3_length > limit && gain < 255) {
         gain++;
         info.global_gain = gain;
         quantize_and_count(mdct_in, info.ix, gain, info.scalefac,

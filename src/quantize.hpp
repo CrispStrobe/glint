@@ -26,10 +26,14 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
                               int sr_index, int quality_mode = 0,
                               bool short_block = false);
 
-// VBR quantization: uses a fixed target gain instead of binary-searching
-// for a bit budget.  vbr_quality is 0 (best) to 9 (worst).
-GranuleInfo quantize_granule_vbr(const double* mdct_in, int sr_index,
-                                  int quality_mode, int vbr_quality,
+// VBR quantization: starts from a fixed target gain (vbr_quality 0=best to
+// 9=worst) for variable quality, but never exceeds available_bits per
+// granule. With the bit reservoir disabled every frame must be
+// self-contained, so a loud granule at a fine target gain is coarsened until
+// it fits its share of the frame; otherwise the frame's main data overflows
+// and the decoder desyncs ("invalid backstep").
+GranuleInfo quantize_granule_vbr(const double* mdct_in, int available_bits,
+                                  int sr_index, int quality_mode, int vbr_quality,
                                   bool short_block = false);
 
 } // namespace glint
