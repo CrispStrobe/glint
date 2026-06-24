@@ -39,7 +39,9 @@ with `tests/measure_audio.py`; `double` and `fixed` paths are identical):
 Reference (source) rolloff on this clip is 5.4 kHz. All three tiers reconstruct
 at the source's level and bandwidth; the tiers trade encode time for the last
 ~2 dB of SNR (see the per-granule scale search in the roadmap). Apple Silicon,
-256 kbps stereo; speeds are relative, not absolute.
+256 kbps stereo; speeds are relative, not absolute. For a deterministic local
+speed/quality run without external audio, use `python tests/benchmark_encoder.py
+build/glint_cli`.
 
 **Footprint**:
 
