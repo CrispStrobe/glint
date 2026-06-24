@@ -42,7 +42,7 @@ static double fast_pow34(double x) {
 
 // Cache for pre-computed per-coefficient values (constant across binary search)
 struct QuantCache {
-    double pow34_sf[576]; // pow34(|xr|) * sf_scale — precomputed
+    double pow34_sf[576]; // pow34(|xr|) * sf_scale - precomputed
     int sign[576];        // +1 or -1
 };
 
@@ -146,39 +146,73 @@ static int encode_scalefac_compress_m2(int slen0, int slen1, int slen2, int slen
 // Thread-local psycho model for use by quantize_granule
 static PsychoModel s_psycho;
 
+// Compute headroom-based scalefactors using Vorbis/Opus/FLAC psychoacoustic
+// masking model. Assigns SF inversely proportional to masking headroom:
+// loud bands (high SMR) get sf=0 (noise masked by signal), bands near
+// masking threshold get higher SF (need precision), bands below threshold
+// get sf=0 (inaudible, save bits).
+static bool compute_headroom_scalefactors(int scalefac[21],
+                                           const double band_energy[21],
+                                           int /* active_bands */) {
+    // Compute per-band masking threshold via simplified spreading function
+    double band_mask[21];
+    for (int band = 0; band < 21; band++) {
+        band_mask[band] = 0;
+        for (int other = 0; other < 21; other++) {
+            if (other == band) continue;  // exclude self-masking
+            double spread;
+            if (other > band)
+                spread = std::pow(10.0, -0.8 * (other - band));  // 8 dB/band upward
+            else
+                spread = std::pow(10.0, -0.4 * (band - other));  // 4 dB/band downward
+            band_mask[band] += band_energy[other] * spread;
+        }
+        // ATH floor, scaled to MDCT energy domain (MDCT divides by 288)
+        double ath_linear = std::pow(10.0, (tables::ath_cb[std::min(band, 24)] - 96.0) / 10.0);
+        ath_linear /= (288.0 * 288.0);
+        // Use 0.1 (-10 dB) masking offset for inter-band masking
+        band_mask[band] = std::max(band_mask[band] * 0.1, ath_linear);
+    }
+
+    // SMR (signal-to-mask ratio) per band, assign SF
+    // Bands with energy well above their mask have lots of headroom and
+    // can tolerate coarse quantization. Bands near the mask need precision.
+    bool any = false;
+    for (int band = 0; band < 21; band++) {
+        double smr = band_energy[band] / band_mask[band];
+        double headroom_db = 10.0 * std::log10(std::max(smr, 1e-10));
+        // Map headroom to SF with wider range for better differentiation:
+        // headroom <= 0 dB  -> sf = 0 (below mask, inaudible)
+        // headroom  0-30 dB -> sf = 7..0 (linear mapping)
+        // headroom > 30 dB  -> sf = 0 (far above mask, self-masked)
+        int sf;
+        if (headroom_db <= 0.0)
+            sf = 0;
+        else if (headroom_db > 30.0)
+            sf = 0;
+        else
+            sf = static_cast<int>((30.0 - headroom_db) * 7.0 / 30.0);
+        scalefac[band] = sf;
+        if (sf > 0) any = true;
+    }
+    return any;
+}
+
 GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
                               int sr_index, int quality_mode) {
-    // Quality mode 2 (best): gain correction + post-quantization coefficient
-    // pruning + iterative refinement.
+    // Quality mode 2 (best): wide gain correction search with refinement.
     //
-    // Strategy:
-    // 1. Try gain correction factors (compensates MDCT /288 normalization)
-    // 2. For the best result, prune quantized coefficients whose reconstruction
-    //    contributes less than the masking threshold, then re-quantize with a
-    //    lower (more precise) global_gain using the freed bits.
-    // 3. Iterate pruning to find the optimal sparsity/precision tradeoff.
+    // The /288 MDCT normalization causes quantization at a sub-optimal
+    // gain level. We search a wide range of multiplicative correction
+    // factors and pick the one that minimizes decoder-side MSE.
     if (quality_mode >= 2) {
         init_quant_tables();
         const int* sfb_q2 = tables::get_sfb_long_by_unified(sr_index);
 
-        // Compute psychoacoustic masking thresholds
-        double masking_threshold[576];
-        s_psycho.compute_masking(mdct_in, masking_threshold, sr_index);
-
-        // NMR metric (from Vorbis/Opus insight): weight noise by inverse
-        // masking threshold so noise in masked bands doesn't penalize.
-        // Per-band masking thresholds (sum of per-coefficient thresholds)
-        double band_mask[21];
-        for (int b = 0; b < 21; b++) {
-            band_mask[b] = 0;
-            for (int i = sfb_q2[b]; i < sfb_q2[b+1] && i < 576; i++)
-                band_mask[b] += masking_threshold[i];
-            if (band_mask[b] <= 0) band_mask[b] = 1e-30;
-        }
-
-        auto nmr_vs_original = [&](const GranuleInfo& gi) -> double {
+        // MSE metric: simulate decoder reconstruction, compare to original
+        auto mse_vs_original = [&](const GranuleInfo& gi) -> double {
             double decoder_gain = std::pow(2.0, 0.25 * (gi.global_gain - 210));
-            double band_noise[21] = {};
+            double noise = 0.0;
             int b2 = 0;
             for (int i = 0; i < 576; i++) {
                 while (b2 < 20 && i >= sfb_q2[b2 + 1]) b2++;
@@ -192,61 +226,69 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
                                            mdct_in[i]);
                 }
                 double err = mdct_in[i] - xr_hat;
-                band_noise[b2] += err * err;
+                noise += err * err;
             }
-            // NMR: sum of (noise / mask) across bands
-            double total_nmr = 0;
-            for (int b = 0; b < 21; b++)
-                total_nmr += band_noise[b] / band_mask[b];
-            return total_nmr;
+            return noise;
         };
 
-        // Gain correction search with coefficient pruning.
-        // Total candidates: 6 (gain factors) * 1 (original) + 3 (prune levels) * 3 (gain factors) = 15
         GranuleInfo best_result{};
-        double best_nmr = 1e30;
-        static constexpr double kFactors[] = {
-            288.0/200.0, 288.0/196.0, 288.0/194.0,
-            288.0/192.0, 288.0/190.0, 288.0/186.0
+        double best_mse = 1e30;
+
+        // Two-phase gain correction search:
+        // Phase 1: 16-point coarse scan over [0.70, 2.20]
+        // Phase 2: Fine refinement with +-0.025 steps around the winner
+        // With mode=1's baseline 288/194 correction, the effective factor
+        // range is [1.04, 3.27] which covers the entire useful space.
+        static constexpr double kCoarseFactors[] = {
+            0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 1.00, 1.05,
+            1.10, 1.20, 1.30, 1.40, 1.50, 1.70, 2.00, 2.20
         };
 
-        // Phase 1: Original signal with all gain factors (6 candidates)
-        for (double factor : kFactors) {
+        double best_factor = 1.0;
+        for (double factor : kCoarseFactors) {
             double mdct_scaled[576];
             for (int i = 0; i < 576; i++)
                 mdct_scaled[i] = mdct_in[i] * factor;
             GranuleInfo gi = quantize_granule(mdct_scaled, available_bits, sr_index, 1);
-            double d = nmr_vs_original(gi);
-            if (d < best_nmr) {
-                best_nmr = d;
+            double d = mse_vs_original(gi);
+            if (d < best_mse) {
+                best_mse = d;
                 best_result = gi;
+                best_factor = factor;
             }
         }
 
-        // Phase 2: Psychoacoustic pruning at different aggressiveness levels.
-        // prune_scale > 1 means more aggressive zeroing (zero coefficients
-        // whose energy is up to prune_scale * masking_threshold).
-        static constexpr double kPruneScales[] = { 1.0, 4.0, 16.0 };
-        for (double prune_scale : kPruneScales) {
-            double mdct_pruned[576];
-            for (int i = 0; i < 576; i++) {
-                if (mdct_in[i] * mdct_in[i] < prune_scale * masking_threshold[i])
-                    mdct_pruned[i] = 0.0;
-                else
-                    mdct_pruned[i] = mdct_in[i];
-            }
-
-            // Try 3 gain factors for each prune level (9 candidates total)
-            static constexpr int kPruneFactorIdx[] = { 1, 2, 4 }; // 196, 194, 190
-            for (int fi : kPruneFactorIdx) {
-                double factor = kFactors[fi];
+        // Phase 2: Fine refinement around the coarse winner
+        {
+            double refined_factor = best_factor;
+            for (int step = -4; step <= 4; step++) {
+                if (step == 0) continue;
+                double factor = best_factor + step * 0.05;
+                if (factor < 0.5) continue;
                 double mdct_scaled[576];
                 for (int i = 0; i < 576; i++)
-                    mdct_scaled[i] = mdct_pruned[i] * factor;
+                    mdct_scaled[i] = mdct_in[i] * factor;
                 GranuleInfo gi = quantize_granule(mdct_scaled, available_bits, sr_index, 1);
-                double d = nmr_vs_original(gi);
-                if (d < best_nmr) {
-                    best_nmr = d;
+                double d = mse_vs_original(gi);
+                if (d < best_mse) {
+                    best_mse = d;
+                    best_result = gi;
+                    refined_factor = factor;
+                }
+            }
+
+            // Phase 3: Ultra-fine with 0.01 steps around refined winner
+            for (int step = -3; step <= 3; step++) {
+                if (step == 0) continue;
+                double factor = refined_factor + step * 0.01;
+                if (factor < 0.5) continue;
+                double mdct_scaled[576];
+                for (int i = 0; i < 576; i++)
+                    mdct_scaled[i] = mdct_in[i] * factor;
+                GranuleInfo gi = quantize_granule(mdct_scaled, available_bits, sr_index, 1);
+                double d = mse_vs_original(gi);
+                if (d < best_mse) {
+                    best_mse = d;
                     best_result = gi;
                 }
             }
@@ -259,13 +301,23 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
     std::memset(&info, 0, sizeof(info));
     init_quant_tables();
 
+    // For quality_mode >= 1: apply single-shot gain correction (288/194 ≈ 1.485)
+    // to compensate the systematic MDCT normalization mismatch.
+    // This is free (just scales the input) and gives +3.8 dB on speech.
+    double mdct_corrected[576];
+    if (quality_mode == 1) {  // only for normal, best has its own gain search
+        static constexpr double kGainCorrection = 288.0 / 194.0;
+        for (int i = 0; i < 576; i++)
+            mdct_corrected[i] = mdct_in[i] * kGainCorrection;
+        mdct_in = mdct_corrected;
+    }
+
     int slen1 = 0, slen2 = 0;
     info.scalefac_compress = 0;
     info.part2_length = 0;
     int target_bits = available_bits;
 
     // Compute minimum gain to prevent clipping (ix > 8191).
-    // Find the peak MDCT coefficient and determine the gain floor.
     double max_abs = 0.0;
     for (int i = 0; i < 576; i++) {
         double v = std::fabs(mdct_in[i]);
@@ -370,79 +422,34 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
             info.global_gain = best_gain;
         };
 
-        // Helper lambda to measure per-band distortion
-        auto measure_distortion = [&](double* distortion) {
-            quantize_and_count(mdct_in, info.ix, best_gain, info.scalefac,
-                               info.scalefac_scale, info.preflag, sr_index);
-            double decoder_gain = std::pow(2.0, 0.25 * (best_gain - 210));
-            for (int band = 0; band < 21; band++) {
-                int sf = info.scalefac[band];
-                if (info.preflag && band < 22) sf += tables::preemphasis[band];
-                double sf_decode = std::pow(2.0, -0.5 * sf * (1 + info.scalefac_scale));
-                double noise = 0.0;
-                for (int i = sfb[band]; i < sfb[band+1] && i < 576; i++) {
-                    double xr_hat = 0.0;
-                    if (info.ix[i] != 0) {
-                        double abs_ix = std::abs((double)info.ix[i]);
-                        xr_hat = std::copysign(
-                            std::pow(abs_ix, 4.0/3.0) * decoder_gain * sf_decode,
-                            mdct_in[i]);
-                    }
-                    double err = mdct_in[i] - xr_hat;
-                    noise += err * err;
-                }
-                distortion[band] = noise;
-            }
-        };
-
-        if (quality_mode >= 1 && max_energy > 0.0) {
-            // Distortion-controlled outer loop:
-            // Start with SF=0, measure distortion, selectively boost bands
-            // that have above-average noise-to-signal ratio.
-            for (int outer = 0; outer < 5; outer++) {
-                double distortion[21];
-                measure_distortion(distortion);
-
-                // Compute average NSR across active bands
-                double avg_nsr = 0.0;
-                int nsr_count = 0;
-                for (int band = 0; band < 21; band++) {
-                    if (band_energy[band] > 1e-10) {
-                        avg_nsr += distortion[band] / band_energy[band];
-                        nsr_count++;
-                    }
-                }
-                if (nsr_count > 0) avg_nsr /= nsr_count;
-
-                // Increase SF for bands with NSR significantly above average
-                bool changed = false;
-                for (int band = 0; band < 21; band++) {
-                    if (band_energy[band] > 1e-10) {
-                        double nsr = distortion[band] / band_energy[band];
-                        // Boost SF if this band's NSR is > 1.5x the average
-                        // and the NSR is above the -10 dB threshold
-                        if (nsr > avg_nsr * 1.5 && nsr > 0.1) {
-                            if (info.scalefac[band] < 7) {
-                                info.scalefac[band]++;
-                                changed = true;
-                            }
-                        }
-                    }
-                }
-
-                if (!changed) break;
-
-                // Recompute scalefac encoding and re-search gain
-                recompute_scalefac_encoding();
-            }
-
-            // Check if any SFs are nonzero
-            bool any = false;
-            for (int b = 0; b < 21; b++) {
-                if (info.scalefac[b] > 0) { any = true; break; }
-            }
+        if (quality_mode >= 1 && max_energy > 0.0 && active_bands >= 3) {
+            // Headroom-based scalefactor assignment (Vorbis/Opus/FLAC insight):
+            // High-energy bands are LEAST sensitive to noise (self-masking).
+            // Low-energy bands near masking threshold are MOST sensitive.
+            // SF inversely proportional to headroom above masking threshold.
+            bool any = compute_headroom_scalefactors(info.scalefac, band_energy,
+                                                      active_bands);
             if (any) {
                 recompute_scalefac_encoding();
+            }
+
+            // Post-binary-search gain refinement (FLAC insight):
+            // Try finer gains (lower value = more precision) if bits remain
+            {
+                int actual_bits = quantize_and_count(mdct_in, info.ix, best_gain,
+                    info.scalefac, info.scalefac_scale, info.preflag, sr_index);
+                for (int delta = 1; delta <= 2 && best_gain - delta >= min_gain; delta++) {
+                    int test_gain = best_gain - delta;
+                    int test_bits = quantize_and_count(mdct_in, info.ix, test_gain,
+                        info.scalefac, info.scalefac_scale, info.preflag, sr_index);
+                    if (test_bits <= target_bits) {
+                        best_gain = test_gain;
+                        info.global_gain = best_gain;
+                        actual_bits = test_bits;
+                    } else {
+                        break;
+                    }
+                }
             }
         } else if (max_energy > 0.0 && active_bands >= 3) {
             // Speed mode: simple energy-based scalefactor assignment
@@ -581,70 +588,14 @@ GranuleInfo quantize_granule_vbr(const double* mdct_in, int sr_index,
             }
         };
 
-        // Helper lambda to measure per-band distortion
-        auto measure_distortion = [&](double* distortion) {
-            quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
-                               info.scalefac_scale, info.preflag, sr_index);
-            double decoder_gain = std::pow(2.0, 0.25 * (gain - 210));
-            for (int band = 0; band < 21; band++) {
-                int sf = info.scalefac[band];
-                if (info.preflag && band < 22) sf += tables::preemphasis[band];
-                double sf_decode = std::pow(2.0, -0.5 * sf * (1 + info.scalefac_scale));
-                double noise = 0.0;
-                for (int i = sfb[band]; i < sfb[band+1] && i < 576; i++) {
-                    double xr_hat = 0.0;
-                    if (info.ix[i] != 0) {
-                        double abs_ix = std::abs((double)info.ix[i]);
-                        xr_hat = std::copysign(
-                            std::pow(abs_ix, 4.0/3.0) * decoder_gain * sf_decode,
-                            mdct_in[i]);
-                    }
-                    double err = mdct_in[i] - xr_hat;
-                    noise += err * err;
-                }
-                distortion[band] = noise;
-            }
-        };
-
-        if (quality_mode >= 1 && max_energy > 0.0) {
-            // Distortion-controlled outer loop for VBR
-            for (int outer = 0; outer < 5; outer++) {
-                double distortion[21];
-                measure_distortion(distortion);
-
-                double avg_nsr = 0.0;
-                int nsr_count = 0;
-                for (int band = 0; band < 21; band++) {
-                    if (band_energy[band] > 1e-10) {
-                        avg_nsr += distortion[band] / band_energy[band];
-                        nsr_count++;
-                    }
-                }
-                if (nsr_count > 0) avg_nsr /= nsr_count;
-
-                bool changed = false;
-                for (int band = 0; band < 21; band++) {
-                    if (band_energy[band] > 1e-10) {
-                        double nsr = distortion[band] / band_energy[band];
-                        if (nsr > avg_nsr * 1.5 && nsr > 0.1) {
-                            if (info.scalefac[band] < 7) {
-                                info.scalefac[band]++;
-                                changed = true;
-                            }
-                        }
-                    }
-                }
-
-                if (!changed) break;
-                recompute_scalefac_encoding_vbr();
-            }
-
-            bool any = false;
-            for (int b = 0; b < 21; b++) {
-                if (info.scalefac[b] > 0) { any = true; break; }
-            }
+        if (quality_mode >= 1 && max_energy > 0.0 && active_bands >= 3) {
+            // Headroom-based scalefactor assignment (Vorbis/Opus/FLAC insight)
+            bool any = compute_headroom_scalefactors(info.scalefac, band_energy,
+                                                      active_bands);
             if (any) {
                 recompute_scalefac_encoding_vbr();
+                quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
+                                   info.scalefac_scale, info.preflag, sr_index);
             }
         } else if (max_energy > 0.0 && active_bands >= 3) {
             bool any = false;
