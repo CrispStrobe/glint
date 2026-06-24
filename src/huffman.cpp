@@ -174,10 +174,12 @@ HuffRegions huffman_determine_regions_short(const int* ix, int sr_index) {
         ix, sr_index, rzero, find_count1_start(ix, rzero));
 }
 
-int huffman_count_bits(const int* ix, const HuffRegions& regions, int sr_index) {
+int huffman_count_bits_limited(const int* ix, const HuffRegions& regions,
+                               int sr_index, int bit_limit) {
     const int* sfb = tables::get_sfb_long_by_unified(sr_index);
     int big_values_end = regions.big_values * 2;
     int total = 0;
+    const bool use_limit = bit_limit >= 0;
 
     // Big values region
     if (big_values_end > 0) {
@@ -191,16 +193,19 @@ int huffman_count_bits(const int* ix, const HuffRegions& regions, int sr_index) 
         for (int i = 0; i < region0_end; i += 2) {
             int y = (i + 1 < region0_end) ? ix[i + 1] : 0;
             total += tables::huff_code_length(regions.table_select[0], ix[i], y);
+            if (use_limit && total > bit_limit) return total;
         }
         // Region 1
         for (int i = region0_end; i < region1_end; i += 2) {
             int y = (i + 1 < region1_end) ? ix[i + 1] : 0;
             total += tables::huff_code_length(regions.table_select[1], ix[i], y);
+            if (use_limit && total > bit_limit) return total;
         }
         // Region 2
         for (int i = region1_end; i < big_values_end; i += 2) {
             int y = (i + 1 < big_values_end) ? ix[i + 1] : 0;
             total += tables::huff_code_length(regions.table_select[2], ix[i], y);
+            if (use_limit && total > bit_limit) return total;
         }
     }
 
@@ -210,9 +215,14 @@ int huffman_count_bits(const int* ix, const HuffRegions& regions, int sr_index) 
     int ct = regions.count1table ? 33 : 32;
     for (int i = count1_start; i + 3 < count1_end && i + 3 < 576; i += 4) {
         total += tables::count1_code_length(ct, ix[i], ix[i+1], ix[i+2], ix[i+3]);
+        if (use_limit && total > bit_limit) return total;
     }
 
     return total;
+}
+
+int huffman_count_bits(const int* ix, const HuffRegions& regions, int sr_index) {
+    return huffman_count_bits_limited(ix, regions, sr_index, -1);
 }
 
 // Get the Huffman code for a pair of values, and write to bitstream

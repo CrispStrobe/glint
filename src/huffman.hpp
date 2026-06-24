@@ -29,6 +29,11 @@ struct HuffRegions {
 int huffman_count_bits(const int* ix, const HuffRegions& regions,
                        int sr_index);
 
+// Count bits with early exit. Returns a value greater than bit_limit as soon as
+// the partial count exceeds bit_limit; otherwise returns the exact count.
+int huffman_count_bits_limited(const int* ix, const HuffRegions& regions,
+                               int sr_index, int bit_limit);
+
 // Encode the quantized spectrum into the bitstream
 // ix: quantized spectrum (576 values, signed)
 // regions: region info

@@ -88,7 +88,8 @@ static int quantize_and_count(const double* mdct_in, int* ix,
                                int sr_index,
                                HuffRegions* out_regions = nullptr,
                                const QuantCache* cache = nullptr,
-                               bool short_block = false) {
+                               bool short_block = false,
+                               int bit_limit = -1) {
     init_quant_tables();
     double base_step = gain_table[global_gain];
 
@@ -128,7 +129,9 @@ static int quantize_and_count(const double* mdct_in, int* ix,
         : huffman_determine_regions_from_bounds(ix, sr_index, rzero,
                                                 count1_start);
     if (out_regions) *out_regions = regions;
-    return huffman_count_bits(ix, regions, sr_index);
+    return bit_limit >= 0 ? huffman_count_bits_limited(ix, regions, sr_index,
+                                                       bit_limit)
+                          : huffman_count_bits(ix, regions, sr_index);
 }
 
 static int encode_scalefac_compress(int slen1, int slen2) {
@@ -347,7 +350,7 @@ static GranuleInfo quantize_base(const double* mdct_in, int available_bits,
         int gain = (lo + hi) / 2;
         int bits = quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
                                        info.scalefac_scale, info.preflag, sr_index,
-                                       nullptr, &cache, short_block);
+                                       nullptr, &cache, short_block, target_bits);
         if (bits <= target_bits) { hi = gain - 1; best_gain = gain; }
         else { lo = gain + 1; }
     }
@@ -415,7 +418,8 @@ static GranuleInfo quantize_base(const double* mdct_in, int available_bits,
                 int gain = (lo + hi) / 2;
                 int bits = quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
                                            info.scalefac_scale, info.preflag, sr_index,
-                                           nullptr, &sf_cache, short_block);
+                                           nullptr, &sf_cache, short_block,
+                                           target_bits);
                 if (bits <= target_bits) { hi = gain - 1; best_gain = gain; }
                 else { lo = gain + 1; }
             }
@@ -532,10 +536,6 @@ GranuleInfo quantize_granule_vbr(const double* mdct_in, int available_bits,
     int gain = std::max(target_gain, min_gain);
     info.global_gain = gain;
 
-    // Quantize with the chosen gain
-    quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
-                       info.scalefac_scale, info.preflag, sr_index);
-
     // Energy-based scalefactor adjustment
     {
         const int* sfb = tables::get_sfb_long_by_unified(sr_index);
@@ -591,12 +591,6 @@ GranuleInfo quantize_granule_vbr(const double* mdct_in, int available_bits,
                                                       active_bands);
             if (any) {
                 recompute_scalefac_encoding_vbr();
-                QuantCache sf_cache;
-                fill_quant_cache(sf_cache, mdct_in, info.scalefac,
-                                 info.scalefac_scale, info.preflag, sr_index);
-                quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
-                                   info.scalefac_scale, info.preflag, sr_index,
-                                   nullptr, &sf_cache);
             }
         } else if (max_energy > 0.0 && active_bands >= 3) {
             bool any = false;
@@ -610,12 +604,6 @@ GranuleInfo quantize_granule_vbr(const double* mdct_in, int available_bits,
             }
             if (any) {
                 recompute_scalefac_encoding_vbr();
-                QuantCache sf_cache;
-                fill_quant_cache(sf_cache, mdct_in, info.scalefac,
-                                 info.scalefac_scale, info.preflag, sr_index);
-                quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
-                                   info.scalefac_scale, info.preflag, sr_index,
-                                   nullptr, &sf_cache);
             }
         }
     }
