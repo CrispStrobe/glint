@@ -47,6 +47,26 @@ struct QuantCache {
     int sign[576];        // +1 or -1
 };
 
+static int find_count1_start(const int* ix, int rzero) {
+    int count1_start = (rzero + 3) & ~3;
+    if (count1_start > rzero) count1_start = rzero;
+
+    while (count1_start >= 4) {
+        bool all_small = true;
+        for (int i = count1_start - 4; i < count1_start; i++) {
+            if (i < 576 && std::abs(ix[i]) > 1) {
+                all_small = false;
+                break;
+            }
+        }
+        if (!all_small) break;
+        count1_start -= 4;
+    }
+
+    if (count1_start & 1) count1_start++;
+    return count1_start;
+}
+
 static void fill_quant_cache(QuantCache& cache, const double* mdct_in,
                               const int scalefac[21], int scalefac_scale,
                               int preflag, int sr_index) {
@@ -74,8 +94,6 @@ static int quantize_and_count(const double* mdct_in, int* ix,
 
     // Fused quantize + region detection in a single pass
     int rzero = 0;          // last nonzero index + 1
-    int count1_start = 576; // where big values end
-    int max_val = 0;        // max |ix| across all coefficients
 
     if (cache) {
         for (int i = 0; i < 576; i++) {
@@ -83,7 +101,6 @@ static int quantize_and_count(const double* mdct_in, int* ix,
             int qval = (qval_d >= 8191.0) ? 8191 : static_cast<int>(qval_d);
             ix[i] = cache->sign[i] * qval;
             if (qval > 0) rzero = i + 1;
-            if (qval > max_val) max_val = qval;
         }
     } else {
         const int* sfb = tables::get_sfb_long_by_unified(sr_index);
@@ -99,16 +116,17 @@ static int quantize_and_count(const double* mdct_in, int* ix,
             int qval = (qval_d >= 8191.0) ? 8191 : static_cast<int>(qval_d);
             ix[i] = (mdct_in[i] < 0.0) ? -qval : qval;
             if (qval > 0) rzero = i + 1;
-            if (qval > max_val) max_val = qval;
         }
     }
 
-    // Fast path: if max_val is small, the bit count is cheap to estimate
-    // Still need full region determination for accurate counting.
     // Short blocks use a different region layout; the gain search must count
     // bits with the same layout the encoder will actually use.
-    HuffRegions regions = short_block ? huffman_determine_regions_short(ix, sr_index)
-                                      : huffman_determine_regions(ix, sr_index);
+    int count1_start = find_count1_start(ix, rzero);
+    HuffRegions regions = short_block
+        ? huffman_determine_regions_short_from_bounds(ix, sr_index, rzero,
+                                                      count1_start)
+        : huffman_determine_regions_from_bounds(ix, sr_index, rzero,
+                                                count1_start);
     if (out_regions) *out_regions = regions;
     return huffman_count_bits(ix, regions, sr_index);
 }
@@ -388,12 +406,16 @@ static GranuleInfo quantize_base(const double* mdct_in, int available_bits,
             target_bits = available_bits - info.part2_length;
             if (target_bits < 0) target_bits = 0;
 
+            QuantCache sf_cache;
+            fill_quant_cache(sf_cache, mdct_in, info.scalefac,
+                             info.scalefac_scale, info.preflag, sr_index);
+
             lo = min_gain; hi = 255; best_gain = 255;
             for (int iter = 0; iter < 8 && lo <= hi; iter++) {
                 int gain = (lo + hi) / 2;
                 int bits = quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
                                            info.scalefac_scale, info.preflag, sr_index,
-                                           nullptr, nullptr, short_block);
+                                           nullptr, &sf_cache, short_block);
                 if (bits <= target_bits) { hi = gain - 1; best_gain = gain; }
                 else { lo = gain + 1; }
             }
@@ -421,9 +443,12 @@ static GranuleInfo quantize_base(const double* mdct_in, int available_bits,
 
     // Final quantize to populate ix[] with the chosen gain and scalefactors,
     // and cache the regions to avoid redundant huffman_determine_regions call
+    QuantCache final_cache;
+    fill_quant_cache(final_cache, mdct_in, info.scalefac, info.scalefac_scale,
+                     info.preflag, sr_index);
     quantize_and_count(mdct_in, info.ix, best_gain, info.scalefac,
                        info.scalefac_scale, info.preflag, sr_index,
-                       &info.regions, nullptr, short_block);
+                       &info.regions, &final_cache, short_block);
     info.part2_3_length = info.part2_length +
                           huffman_count_bits(info.ix, info.regions, sr_index);
 
@@ -440,7 +465,7 @@ static GranuleInfo quantize_base(const double* mdct_in, int available_bits,
             info.global_gain++;
             quantize_and_count(mdct_in, info.ix, info.global_gain, info.scalefac,
                                info.scalefac_scale, info.preflag, sr_index,
-                               &info.regions, nullptr, short_block);
+                               &info.regions, &final_cache, short_block);
             info.part2_3_length = info.part2_length +
                                   huffman_count_bits(info.ix, info.regions, sr_index);
         }
@@ -566,8 +591,12 @@ GranuleInfo quantize_granule_vbr(const double* mdct_in, int available_bits,
                                                       active_bands);
             if (any) {
                 recompute_scalefac_encoding_vbr();
+                QuantCache sf_cache;
+                fill_quant_cache(sf_cache, mdct_in, info.scalefac,
+                                 info.scalefac_scale, info.preflag, sr_index);
                 quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
-                                   info.scalefac_scale, info.preflag, sr_index);
+                                   info.scalefac_scale, info.preflag, sr_index,
+                                   nullptr, &sf_cache);
             }
         } else if (max_energy > 0.0 && active_bands >= 3) {
             bool any = false;
@@ -581,16 +610,23 @@ GranuleInfo quantize_granule_vbr(const double* mdct_in, int available_bits,
             }
             if (any) {
                 recompute_scalefac_encoding_vbr();
+                QuantCache sf_cache;
+                fill_quant_cache(sf_cache, mdct_in, info.scalefac,
+                                 info.scalefac_scale, info.preflag, sr_index);
                 quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
-                                   info.scalefac_scale, info.preflag, sr_index);
+                                   info.scalefac_scale, info.preflag, sr_index,
+                                   nullptr, &sf_cache);
             }
         }
     }
 
     // Final quantize and cache regions (using the correct long/short layout)
+    QuantCache final_cache;
+    fill_quant_cache(final_cache, mdct_in, info.scalefac, info.scalefac_scale,
+                     info.preflag, sr_index);
     quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
                        info.scalefac_scale, info.preflag, sr_index,
-                       &info.regions, nullptr, short_block);
+                       &info.regions, &final_cache, short_block);
     info.part2_3_length = info.part2_length +
                           huffman_count_bits(info.ix, info.regions, sr_index);
 
@@ -606,7 +642,7 @@ GranuleInfo quantize_granule_vbr(const double* mdct_in, int available_bits,
         info.global_gain = gain;
         quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
                            info.scalefac_scale, info.preflag, sr_index,
-                           &info.regions, nullptr, short_block);
+                           &info.regions, &final_cache, short_block);
         info.part2_3_length = info.part2_length +
                               huffman_count_bits(info.ix, info.regions, sr_index);
     }

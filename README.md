@@ -32,9 +32,9 @@ with `tests/measure_audio.py`; `double` and `fixed` paths are identical):
 
 | Mode | overall SNR | seg-SNR | 95% rolloff | level vs source | encode speed |
 |---|---|---|---|---|---|
-| -q speed | 12.5 dB | 10.8 dB | 3.4 kHz | ±0.3 dB | ~86× realtime |
-| **-q normal (default)** | **14.3 dB** | **13.4 dB** | 4.4 kHz | ±0.3 dB | ~33× realtime |
-| -q best | 14.9 dB | 14.0 dB | 4.5 kHz | ±0.3 dB | ~13× realtime |
+| -q speed | 12.5 dB | 10.8 dB | 3.4 kHz | ±0.3 dB | ~94× realtime |
+| **-q normal (default)** | **14.3 dB** | **13.4 dB** | 4.4 kHz | ±0.3 dB | ~37× realtime |
+| -q best | 14.9 dB | 14.0 dB | 4.5 kHz | ±0.3 dB | ~14× realtime |
 
 Reference (source) rolloff on this clip is 5.4 kHz. All three tiers reconstruct
 at the source's level and bandwidth; the tiers trade encode time for the last
@@ -215,11 +215,13 @@ passes. Measured on a 1-min 256 kbps stereo speech clip (`double`==`fixed`):
 | RMS level            | −25.9 / −21.4 / −19.7 | within ~0.3 dB of source, all tiers |
 | 95% rolloff          | 1031 / 1031 / 4359 Hz | 3398 / 4383 / 4453 Hz |
 | overall SNR          | 5.1 / 10.1 / 15.0 dB  | 12.5 / 14.3 / 14.9 dB |
-| encode speed         | —                     | ~86× / 33× / 13× realtime |
+| encode speed         | —                     | ~94× / 37× / 14× realtime |
 
 Verify with `python tests/measure_audio.py original.wav out.mp3` (want RMS
 within ~0.5 dB of source, rolloff near source, `double`==`fixed`) and
 `ffmpeg -v error -i out.mp3 -f null -` (zero "invalid new backstep").
+The `tests/test_quality.py --fixed` path covers signal quality, bitrate range,
+stereo, MPEG-2/2.5 sample rates, and transient handling through `-p fixed`.
 
 Remaining headroom: the scale search is a coarse stand-in for a real
 rate-distortion loop. A proper per-band noise-shaping outer loop (see

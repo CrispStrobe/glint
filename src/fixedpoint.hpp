@@ -15,7 +15,11 @@ namespace glint {
 inline int32_t fpmul(int32_t a, int32_t b) {
 #if defined(__ARM_ARCH) && (__ARM_ARCH >= 6)
     int32_t result;
+#if defined(__aarch64__)
+    asm("smmul %w0, %w1, %w2" : "=r"(result) : "r"(a), "r"(b));
+#else
     asm("smmul %0, %1, %2" : "=r"(result) : "r"(a), "r"(b));
+#endif
     return result;
 #elif defined(__mips__) && !defined(__mips16)
     int32_t hi;
@@ -37,7 +41,11 @@ inline int32_t fpmul_round(int32_t a, int32_t b) {
 inline int32_t fpmul_acc(int32_t acc, int32_t a, int32_t b) {
 #if defined(__ARM_ARCH) && (__ARM_ARCH >= 6)
     int32_t result;
+#if defined(__aarch64__)
+    asm("smmla %w0, %w1, %w2, %w3" : "=r"(result) : "r"(a), "r"(b), "r"(acc));
+#else
     asm("smmla %0, %1, %2, %3" : "=r"(result) : "r"(a), "r"(b), "r"(acc));
+#endif
     return result;
 #elif defined(__mips__) && !defined(__mips16)
     int32_t hi;

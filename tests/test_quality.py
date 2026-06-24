@@ -106,7 +106,7 @@ def test_signal(enc_bin, name, pcm, min_corr, tmpdir, bitrate=128, enc_extra=Non
     return passed
 
 
-def test_bitrate_range(enc_bin, tmpdir):
+def test_bitrate_range(enc_bin, tmpdir, enc_extra=None):
     """Test that various bitrates encode without errors."""
     t = np.arange(SR) / SR
     pcm = (np.sin(2 * np.pi * 1000 * t) * 20000).astype(np.int16)
@@ -117,7 +117,7 @@ def test_bitrate_range(enc_bin, tmpdir):
     for br in [32, 64, 128, 192, 256, 320]:
         mp3 = os.path.join(tmpdir, f'br_{br}.mp3')
         try:
-            r = subprocess.run([enc_bin, wav, mp3, '-b', str(br)],
+            r = subprocess.run([enc_bin, wav, mp3, '-b', str(br)] + (enc_extra or []),
                                capture_output=True, timeout=30)
             ok = r.returncode == 0 and os.path.getsize(mp3) > 100
             errors = check_ffmpeg_errors(mp3) if ok else ['encode failed']
@@ -131,7 +131,7 @@ def test_bitrate_range(enc_bin, tmpdir):
     return passed
 
 
-def test_stereo(enc_bin, tmpdir):
+def test_stereo(enc_bin, tmpdir, enc_extra=None):
     """Test stereo encoding."""
     t = np.arange(SR * 2) / SR
     left = (np.sin(2 * np.pi * 440 * t) * 20000).astype(np.int16)
@@ -147,7 +147,8 @@ def test_stereo(enc_bin, tmpdir):
         w.setframerate(SR)
         w.writeframes(stereo.astype(np.int16).tobytes())
 
-    r = subprocess.run([enc_bin, wav, mp3, '-b', '128'], capture_output=True, timeout=30)
+    r = subprocess.run([enc_bin, wav, mp3, '-b', '128'] + (enc_extra or []),
+                       capture_output=True, timeout=30)
     ok = r.returncode == 0 and os.path.getsize(mp3) > 1000
     errors = check_ffmpeg_errors(mp3) if ok else ['encode failed']
     ok = ok and len(errors) == 0
@@ -216,12 +217,12 @@ def main():
 
         # --- Bitrate range test ---
         print("\n=== Bitrate Range ===")
-        if not test_bitrate_range(enc_bin, tmpdir):
+        if not test_bitrate_range(enc_bin, tmpdir, enc_extra=enc_extra):
             all_pass = False
 
         # --- Stereo test ---
         print("\n=== Stereo ===")
-        if not test_stereo(enc_bin, tmpdir):
+        if not test_stereo(enc_bin, tmpdir, enc_extra=enc_extra):
             all_pass = False
 
         # --- MPEG-II/2.5 sample rate tests ---

@@ -18,21 +18,10 @@ int select_best_table(const int* ix, int start, int end) {
     return tables::choose_huff_table(max_val);
 }
 
-HuffRegions huffman_determine_regions(const int* ix, int sr_index) {
-    HuffRegions r{};
-
-    // Find rzero: last nonzero value
-    int rzero = 576;
-    while (rzero > 0 && ix[rzero - 1] == 0) rzero--;
-
-    // Find count1 boundary: region where all values are -1, 0, or 1
-    // Scan backwards from rzero, grouping in quads
-    int count1_start = rzero;
-    // Align to quad boundary
-    count1_start = (count1_start + 3) & ~3;
+static int find_count1_start(const int* ix, int rzero) {
+    int count1_start = (rzero + 3) & ~3;
     if (count1_start > rzero) count1_start = rzero;
 
-    // Scan back to find where quads of {-1,0,1} begin
     while (count1_start >= 4) {
         bool all_small = true;
         for (int i = count1_start - 4; i < count1_start; i++) {
@@ -45,8 +34,14 @@ HuffRegions huffman_determine_regions(const int* ix, int sr_index) {
         count1_start -= 4;
     }
 
-    // Ensure count1_start is even (big_values counts pairs)
     if (count1_start & 1) count1_start++;
+    return count1_start;
+}
+
+HuffRegions huffman_determine_regions_from_bounds(const int* ix, int sr_index,
+                                                  int rzero,
+                                                  int count1_start) {
+    HuffRegions r{};
 
     r.big_values = count1_start / 2;
     r.count1 = (rzero - count1_start) / 4;
@@ -119,31 +114,18 @@ HuffRegions huffman_determine_regions(const int* ix, int sr_index) {
     return r;
 }
 
-HuffRegions huffman_determine_regions_short(const int* ix, int sr_index) {
-    HuffRegions r{};
-
-    // Find rzero: last nonzero value
+HuffRegions huffman_determine_regions(const int* ix, int sr_index) {
     int rzero = 576;
     while (rzero > 0 && ix[rzero - 1] == 0) rzero--;
+    return huffman_determine_regions_from_bounds(ix, sr_index, rzero,
+                                                 find_count1_start(ix, rzero));
+}
 
-    // Find count1 boundary
-    int count1_start = rzero;
-    count1_start = (count1_start + 3) & ~3;
-    if (count1_start > rzero) count1_start = rzero;
-
-    while (count1_start >= 4) {
-        bool all_small = true;
-        for (int i = count1_start - 4; i < count1_start; i++) {
-            if (i < 576 && std::abs(ix[i]) > 1) {
-                all_small = false;
-                break;
-            }
-        }
-        if (!all_small) break;
-        count1_start -= 4;
-    }
-
-    if (count1_start & 1) count1_start++;
+HuffRegions huffman_determine_regions_short_from_bounds(const int* ix,
+                                                        int sr_index,
+                                                        int rzero,
+                                                        int count1_start) {
+    HuffRegions r{};
 
     r.big_values = count1_start / 2;
     r.count1 = (rzero - count1_start) / 4;
@@ -183,6 +165,13 @@ HuffRegions huffman_determine_regions_short(const int* ix, int sr_index) {
     r.count1table = (bits_b < bits_a) ? 1 : 0;
 
     return r;
+}
+
+HuffRegions huffman_determine_regions_short(const int* ix, int sr_index) {
+    int rzero = 576;
+    while (rzero > 0 && ix[rzero - 1] == 0) rzero--;
+    return huffman_determine_regions_short_from_bounds(
+        ix, sr_index, rzero, find_count1_start(ix, rzero));
 }
 
 int huffman_count_bits(const int* ix, const HuffRegions& regions, int sr_index) {

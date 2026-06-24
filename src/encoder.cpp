@@ -408,6 +408,24 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
         for (int ch = 0; ch < nch; ch++)
             enc->subband_fp[ch].analyze(channel_data[ch], subband_out_fp[ch], num_slots);
 
+        int bits_gr[2] = { bits_per_granule, bits_per_granule };
+        if (enc->quality_mode >= 2 && num_gr == 2 && !enc->vbr_mode) {
+            double energy[2] = {0, 0};
+            for (int gr = 0; gr < 2; gr++)
+                for (int sb = 0; sb < 32; sb++)
+                    for (int ts = gr*18; ts < (gr+1)*18; ts++) {
+                        double v = static_cast<double>(subband_out_fp[0][sb][ts]);
+                        energy[gr] += v * v;
+                    }
+
+            double total = energy[0] + energy[1];
+            if (total > 0) {
+                double ratio0 = std::max(0.3, std::min(0.7, energy[0] / total));
+                bits_gr[0] = static_cast<int>(available_bits * ratio0 / nch);
+                bits_gr[1] = static_cast<int>(available_bits * (1.0 - ratio0) / nch);
+            }
+        }
+
         for (int gr = 0; gr < num_gr; gr++) {
             int t0 = gr * 18;
 
@@ -425,6 +443,8 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
             }
 
             for (int ch = 0; ch < nch; ch++) {
+                int gr_bits = bits_gr[gr];
+
                 // Frequency inversion and extract granule slice in one pass
                 int32_t sub_gr[32][18];
                 for (int sb = 0; sb < 32; sb++)
@@ -439,10 +459,10 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                 enc->mdct_fp[ch].process_and_convert(sub_gr, mdct_flat);
 
                 if (enc->vbr_mode) {
-                    granule_info[gr][ch] = quantize_granule_vbr(mdct_flat, bits_per_granule,
+                    granule_info[gr][ch] = quantize_granule_vbr(mdct_flat, gr_bits,
                         enc->sr_index, enc->quality_mode, enc->vbr_quality);
                 } else {
-                    granule_info[gr][ch] = quantize_granule(mdct_flat, bits_per_granule,
+                    granule_info[gr][ch] = quantize_granule(mdct_flat, gr_bits,
                                                              enc->sr_index, enc->quality_mode);
                 }
                 total_main_bits += granule_info[gr][ch].part2_3_length;
@@ -706,6 +726,22 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
     for (int ch = 0; ch < nch; ch++)
         enc->subband[ch].analyze_float(channel_data[ch], subband_out_d[ch], num_slots);
 
+    int bits_gr[2] = { bits_per_granule, bits_per_granule };
+    if (enc->quality_mode >= 2 && num_gr == 2 && !enc->vbr_mode) {
+        double energy[2] = {0, 0};
+        for (int gr = 0; gr < 2; gr++)
+            for (int sb = 0; sb < 32; sb++)
+                for (int ts = gr*18; ts < (gr+1)*18; ts++)
+                    energy[gr] += subband_out_d[0][sb][ts] * subband_out_d[0][sb][ts];
+
+        double total = energy[0] + energy[1];
+        if (total > 0) {
+            double ratio0 = std::max(0.3, std::min(0.7, energy[0] / total));
+            bits_gr[0] = static_cast<int>(available_bits * ratio0 / nch);
+            bits_gr[1] = static_cast<int>(available_bits * (1.0 - ratio0) / nch);
+        }
+    }
+
     for (int gr = 0; gr < num_gr; gr++) {
         int t0 = gr * 18;
 
@@ -721,6 +757,8 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
         }
 
         for (int ch = 0; ch < nch; ch++) {
+            int gr_bits = bits_gr[gr];
+
             // Transient detection on subband output
             bool transient_detected = detect_transient(
                 subband_out_d[ch], gr,
@@ -749,11 +787,11 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
                 // Short-block quantization with the matching region layout
                 // (see glint_encode for the rationale).
                 if (enc->vbr_mode) {
-                    granule_info[gr][ch] = quantize_granule_vbr(mdct_flat, bits_per_granule,
+                    granule_info[gr][ch] = quantize_granule_vbr(mdct_flat, gr_bits,
                         enc->sr_index, enc->quality_mode, enc->vbr_quality,
                         /*short_block=*/true);
                 } else {
-                    granule_info[gr][ch] = quantize_granule(mdct_flat, bits_per_granule,
+                    granule_info[gr][ch] = quantize_granule(mdct_flat, gr_bits,
                                                              enc->sr_index, enc->quality_mode,
                                                              /*short_block=*/true);
                 }
@@ -769,10 +807,10 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
                         mdct_flat[sb * 18 + k] = mdct_out[sb][k];
 
                 if (enc->vbr_mode) {
-                    granule_info[gr][ch] = quantize_granule_vbr(mdct_flat, bits_per_granule,
+                    granule_info[gr][ch] = quantize_granule_vbr(mdct_flat, gr_bits,
                         enc->sr_index, enc->quality_mode, enc->vbr_quality);
                 } else {
-                    granule_info[gr][ch] = quantize_granule(mdct_flat, bits_per_granule,
+                    granule_info[gr][ch] = quantize_granule(mdct_flat, gr_bits,
                                                              enc->sr_index, enc->quality_mode);
                 }
                 granule_info[gr][ch].block_type = 0;

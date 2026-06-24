@@ -49,6 +49,16 @@ HuffRegions huffman_determine_regions(const int* ix, int sr_index);
 // not match the bits actually written.
 HuffRegions huffman_determine_regions_short(const int* ix, int sr_index);
 
+// Determine regions when the caller already knows the nonzero/count1
+// boundaries from quantization. count1_start is the first index of the count1
+// region and rzero is the first trailing-zero index.
+HuffRegions huffman_determine_regions_from_bounds(const int* ix, int sr_index,
+                                                  int rzero, int count1_start);
+HuffRegions huffman_determine_regions_short_from_bounds(const int* ix,
+                                                        int sr_index,
+                                                        int rzero,
+                                                        int count1_start);
+
 // Select the best Huffman table for a region
 // Returns table_id that minimizes bit count
 int select_best_table(const int* ix, int start, int end);
