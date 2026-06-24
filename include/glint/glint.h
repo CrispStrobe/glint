@@ -34,9 +34,9 @@ enum glint_simd {
 };
 
 enum glint_quality {
-    GLINT_QUALITY_SPEED  = 0,  // default: no masking model
-    GLINT_QUALITY_NORMAL = 1,  // simplified energy-based masking
-    GLINT_QUALITY_BEST   = 2,  // FFT-based psychoacoustic masking
+    GLINT_QUALITY_SPEED  = 0,  // no masking, fastest
+    GLINT_QUALITY_NORMAL = 1,  // gain correction + headroom SF (default)
+    GLINT_QUALITY_BEST   = 2,  // multi-factor search + psychoacoustic masking
 };
 
 enum glint_vbr {

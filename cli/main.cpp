@@ -513,7 +513,7 @@ int main(int argc, char** argv) {
             return 1;
         }
     }
-    cfg.quality = GLINT_QUALITY_SPEED;
+    cfg.quality = GLINT_QUALITY_NORMAL;  // default: good quality at ~15% speed cost
     if (quality_str) {
         if (strcmp(quality_str, "speed") == 0) cfg.quality = GLINT_QUALITY_SPEED;
         else if (strcmp(quality_str, "normal") == 0) cfg.quality = GLINT_QUALITY_NORMAL;

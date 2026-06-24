@@ -31,22 +31,24 @@ path needs only 50 KB RAM and no FPU.
 
 128 kbps mono, 44100 Hz, Intel Xeon Skylake:
 
-**Speed** (x-realtime, higher = better):
+**Quality** (speech SNR, higher = better):
 
-| Signal | glint double | glint fixed | Shine | LAME |
-|---|---|---|---|---|
-| Sine | **148x** | 94x | 126x | 48x |
-| Complex | 34x | 34x | 98x | 38x |
-| Noise | 37x | 35x | 101x | 40x |
-| VBR (-V 5) | **240x** | — | — | — |
-
-**Quality** (correlation / SNR):
-
-| Signal | glint | Shine | LAME |
+| Mode | glint | Shine | LAME |
 |---|---|---|---|
-| Sine | +0.995 / 19 dB | +0.333 / -1 dB | +1.000 / 26 dB |
-| Multi-tone | +0.993 / 6 dB | +1.000 / 18 dB | +1.000 / 26 dB |
-| Speech | +0.941 / 5 dB | +1.000 / 18 dB | +1.000 / 26 dB |
+| -q speed | 4.6 dB | — | — |
+| **-q normal (default)** | **11.0 dB** | — | — |
+| -q best | 12.3 dB | — | — |
+| — | — | 18.1 dB | 26.0 dB |
+
+Sine: 18.6 dB (speed), 11.5 dB (normal), 21.8 dB (best).
+
+**Speed** (x-realtime, higher = faster):
+
+| Signal | -q speed | -q normal | -q best | Shine | LAME |
+|---|---|---|---|---|---|
+| Sine | 204x | 261x | 19x | 190x | 44x |
+| Noise | 76x | 56x | 3x | 146x | 37x |
+| Speech | 85x | 72x | 4x | — | — |
 
 **Footprint**:
 
@@ -56,11 +58,8 @@ path needs only 50 KB RAM and no FPU.
 | RAM | 141 KB | **50 KB** | ~100 KB |
 | License | **MIT** | **MIT** | LGPL v2 |
 
-glint is faster than LAME on simple signals (3x on sine), comparable
-on complex signals, and smaller + MIT-licensed vs Shine's LGPL.
-Shine has better complex-signal quality; LAME is best overall quality.
-glint double and fixed produce identical quality. Whisper ASR
-round-trip: 91% word similarity.
+glint default (-q normal) achieves 11 dB speech SNR at 72x realtime,
+MIT licensed, 50 KB RAM. Whisper ASR round-trip: 91% word similarity.
 
 ## Building
 
@@ -100,7 +99,7 @@ glint_cli [options] input output.mp3
   -b BITRATE        CBR bitrate in kbps (default: 128)
   -V QUALITY        VBR quality 0-9 (0=best, 9=smallest)
   -m MODE           mono|stereo|joint (default: auto)
-  -q QUALITY        speed|normal (psychoacoustic model, default: speed)
+  -q QUALITY        speed|normal|best (default: normal)
   -s SIMD           auto|avx|sse2|neon|none (default: auto)
   -p PATH           double|fixed (only in both-mode builds)
   -r RATE:CH:BITS   Raw PCM input (e.g., 44100:1:16)
