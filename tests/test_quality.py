@@ -157,6 +157,38 @@ def test_stereo(enc_bin, tmpdir, enc_extra=None):
     return ok
 
 
+def test_vbr_range(enc_bin, tmpdir, enc_extra=None):
+    """Test that representative VBR qualities encode without decode errors."""
+    t = np.arange(SR * 2) / SR
+    left = (np.sin(2 * np.pi * 440 * t) * 22000).astype(np.int16)
+    right = (np.sin(2 * np.pi * 880 * t) * 18000).astype(np.int16)
+    stereo = np.column_stack([left, right]).flatten()
+
+    wav = os.path.join(tmpdir, 'vbr.wav')
+    with wave.open(wav, 'w') as w:
+        w.setnchannels(2)
+        w.setsampwidth(2)
+        w.setframerate(SR)
+        w.writeframes(stereo.astype(np.int16).tobytes())
+
+    passed = True
+    for q in [0, 5, 9]:
+        mp3 = os.path.join(tmpdir, f'vbr_{q}.mp3')
+        try:
+            r = subprocess.run([enc_bin, wav, mp3, '-V', str(q)] + (enc_extra or []),
+                               capture_output=True, timeout=30)
+            ok = r.returncode == 0 and os.path.getsize(mp3) > 1000
+            errors = check_ffmpeg_errors(mp3) if ok else ['encode failed']
+            ok = ok and len(errors) == 0
+        except Exception:
+            ok = False
+        status = "PASS" if ok else "FAIL"
+        print(f"  {status} VBR quality {q}")
+        if not ok:
+            passed = False
+    return passed
+
+
 def main():
     parser = argparse.ArgumentParser(description='glint quality tests')
     parser.add_argument('encoder', nargs='?', default='build/glint_cli',
@@ -218,6 +250,11 @@ def main():
         # --- Bitrate range test ---
         print("\n=== Bitrate Range ===")
         if not test_bitrate_range(enc_bin, tmpdir, enc_extra=enc_extra):
+            all_pass = False
+
+        # --- VBR range test ---
+        print("\n=== VBR Range ===")
+        if not test_vbr_range(enc_bin, tmpdir, enc_extra=enc_extra):
             all_pass = False
 
         # --- Stereo test ---
