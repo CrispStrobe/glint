@@ -42,16 +42,13 @@ struct glint_context {
     glint::SubbandAnalysisFP subband_fp[2];
     glint::MDCT_FP mdct_fp[2];
 #endif
-    glint::BitReservoir reservoir;
-
-    // Bit reservoir back-buffer (circular): holds main data from previous frames
-    // so the decoder can reference main_data_begin bytes before current frame.
-    uint8_t reservoir_buf[8192];
-    int reservoir_buf_write;   // write position in circular buffer
-    int reservoir_buf_size;    // valid bytes in circular buffer (up to 8192)
+    // Bit reservoir: continuous main-data stream with deferred frame emission.
+    glint::ReservoirStream reservoir;
 
     glint::FrameAssembler frame_asm;
-    uint8_t output_buf[glint::kMaxFrameSize];
+    // Sized to hold several frames: with the reservoir, one encode call can
+    // release more than one buffered frame (and flush() drains the tail).
+    uint8_t output_buf[glint::kMaxFrameSize * 8];
     int output_size;
 
     int padding_remainder;
