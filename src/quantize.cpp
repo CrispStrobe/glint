@@ -70,12 +70,18 @@ static int quantize_and_count(const double* mdct_in, int* ix,
     init_quant_tables();
     double base_step = gain_table[global_gain];
 
+    // Fused quantize + region detection in a single pass
+    int rzero = 0;          // last nonzero index + 1
+    int count1_start = 576; // where big values end
+    int max_val = 0;        // max |ix| across all coefficients
+
     if (cache) {
-        // Fast path: only multiply by base_step (pow34*sf already cached)
         for (int i = 0; i < 576; i++) {
             double qval_d = cache->pow34_sf[i] * base_step + 0.4054;
             int qval = (qval_d >= 8191.0) ? 8191 : static_cast<int>(qval_d);
             ix[i] = cache->sign[i] * qval;
+            if (qval > 0) rzero = i + 1;
+            if (qval > max_val) max_val = qval;
         }
     } else {
         const int* sfb = tables::get_sfb_long_by_unified(sr_index);
@@ -90,9 +96,13 @@ static int quantize_and_count(const double* mdct_in, int* ix,
             double qval_d = pow34_val * base_step * sf_scale + 0.4054;
             int qval = (qval_d >= 8191.0) ? 8191 : static_cast<int>(qval_d);
             ix[i] = (mdct_in[i] < 0.0) ? -qval : qval;
+            if (qval > 0) rzero = i + 1;
+            if (qval > max_val) max_val = qval;
         }
     }
 
+    // Fast path: if max_val is small, the bit count is cheap to estimate
+    // Still need full region determination for accurate counting
     HuffRegions regions = huffman_determine_regions(ix, sr_index);
     if (out_regions) *out_regions = regions;
     return huffman_count_bits(ix, regions, sr_index);
@@ -195,8 +205,6 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
                      info.preflag, sr_index);
 
     // Binary search for global_gain.
-    // Higher gain = coarser quantization = fewer bits.
-    // Lower bound is min_gain to prevent 8191 clipping.
     int lo = min_gain, hi = 255, best_gain = 255;
 
     for (int iter = 0; iter < 8 && lo <= hi; iter++) {
