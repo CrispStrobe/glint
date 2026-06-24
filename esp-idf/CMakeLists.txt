@@ -9,7 +9,7 @@
 #
 # The encoder uses fixed-point mode with small buffers (50 KB RAM).
 
-set(GLINT_ROOT "${CMAKE_CURRENT_LIST_DIR}/..")
+get_filename_component(GLINT_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." REALPATH)
 
 idf_component_register(
     SRCS

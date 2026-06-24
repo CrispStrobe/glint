@@ -8,7 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
     if(MSVC)
         add_compile_options(/O2 /fp:fast)
-    elseif(NOT CMAKE_CROSSCOMPILING)
+    elseif(NOT CMAKE_CROSSCOMPILING AND CMAKE_SYSTEM_PROCESSOR STREQUAL CMAKE_HOST_SYSTEM_PROCESSOR)
         # -march=native only works for native builds, not cross-compilation
         add_compile_options(-march=native -ffast-math)
     else()
