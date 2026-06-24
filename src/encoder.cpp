@@ -471,14 +471,10 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                         sub_gr[sb][ts] = ((sb & 1) && (ts & 1)) ? -v : v;
                     }
 
-                int32_t mdct_out[32][18];
-                enc->mdct_fp[ch].process(sub_gr, mdct_out);
-                alias_reduce_fp(mdct_out);
-
+                // Fused MDCT + alias reduction + Q24->double conversion.
+                // Outputs flat double[576] directly for the quantizer.
                 double mdct_flat[576];
-                for (int sb = 0; sb < 32; sb++)
-                    for (int k = 0; k < 18; k++)
-                        mdct_flat[sb * 18 + k] = mdct_out[sb][k] / 16777216.0;
+                enc->mdct_fp[ch].process_and_convert(sub_gr, mdct_flat);
 
                 if (enc->vbr_mode) {
                     granule_info[gr][ch] = quantize_granule_vbr(mdct_flat,

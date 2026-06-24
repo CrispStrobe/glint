@@ -2,6 +2,7 @@
 // MIT License - Clean-room implementation
 
 #include "quantize.hpp"
+#include "psycho.hpp"
 #include "tables.hpp"
 #include <cstdlib>
 #include <cmath>
@@ -102,8 +103,31 @@ static int encode_scalefac_compress_m2(int slen0, int slen1, int slen2, int slen
     return 0;  // all zero
 }
 
+// Thread-local psycho model for use by quantize_granule
+static PsychoModel s_psycho;
+
 GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
                               int sr_index, int quality_mode) {
+    // Quality mode 2 (best): apply psychoacoustic masking to zero
+    // coefficients below the masking threshold, then quantize with
+    // the distortion-controlled outer loop (quality_mode 1).
+    if (quality_mode >= 2) {
+        double masking_threshold[576];
+        s_psycho.compute_masking(mdct_in, masking_threshold, sr_index);
+
+        double mdct_masked[576];
+        for (int i = 0; i < 576; i++) {
+            if (mdct_in[i] * mdct_in[i] < masking_threshold[i])
+                mdct_masked[i] = 0.0;
+            else
+                mdct_masked[i] = mdct_in[i];
+        }
+
+        // Recurse with quality_mode=1 (distortion-controlled outer loop)
+        // on the masked spectrum
+        return quantize_granule(mdct_masked, available_bits, sr_index, 1);
+    }
+
     GranuleInfo info{};
     std::memset(&info, 0, sizeof(info));
     init_quant_tables();
@@ -326,6 +350,22 @@ static const int vbr_target_gain[10] = {
 
 GranuleInfo quantize_granule_vbr(const double* mdct_in, int sr_index,
                                   int quality_mode, int vbr_quality) {
+    // Quality mode 2 (best): apply psychoacoustic masking before VBR quantization
+    if (quality_mode >= 2) {
+        double masking_threshold[576];
+        s_psycho.compute_masking(mdct_in, masking_threshold, sr_index);
+
+        double mdct_masked[576];
+        for (int i = 0; i < 576; i++) {
+            if (mdct_in[i] * mdct_in[i] < masking_threshold[i])
+                mdct_masked[i] = 0.0;
+            else
+                mdct_masked[i] = mdct_in[i];
+        }
+
+        return quantize_granule_vbr(mdct_masked, sr_index, 1, vbr_quality);
+    }
+
     GranuleInfo info{};
     std::memset(&info, 0, sizeof(info));
     init_quant_tables();

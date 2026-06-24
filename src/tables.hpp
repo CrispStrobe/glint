@@ -208,13 +208,11 @@ inline int32_t alias_ca[8];
 
 inline int32_t subband_matrix[32][64];
 
-#if !defined(GLINT_FIXED_POINT) || defined(GLINT_BOTH_PATHS)
-// 4c. Subband analysis matrixing table in Q15 (int16) for overflow-safe accumulation.
+// 4c. Subband analysis matrixing table in Q15 (int16) for SSE2 _mm_madd_epi16.
 inline int16_t subband_matrix_q15[32][64];
 
-// 4d. Double-precision subband matrixing table (for float analysis path).
+// 4d. Double-precision subband matrixing table (for SSE2 paths and float analysis).
 inline double subband_matrix_d[32][64];
-#endif
 
 // ---------------------------------------------------------------------------
 // 5. Scalefactor band boundaries for long blocks
@@ -988,7 +986,6 @@ inline void init_tables() {
         }
     }
 
-#if !defined(GLINT_FIXED_POINT) || defined(GLINT_BOTH_PATHS)
     // ----- Subband matrixing table Q15 -----
     for (int i = 0; i < 32; ++i) {
         for (int k = 0; k < 64; ++k) {
@@ -1007,6 +1004,7 @@ inline void init_tables() {
         }
     }
 
+#if !defined(GLINT_FIXED_POINT) || defined(GLINT_BOTH_PATHS)
     // ----- 2^(-0.25*n) table -----
     for (int n = 0; n < 64; ++n) {
         pow2_neg_quarter[n] = std::pow(2.0, -0.25 * n);

@@ -213,7 +213,28 @@ void alias_reduce_d(double mdct_out[32][18]) {
 
 // === Fixed-point (Q24) path ===
 
-MDCT_FP::MDCT_FP() { reset(); tables::init_tables(); }
+#if defined(__SSE2__) || defined(_M_X64)
+// Transposed double-precision MDCT cosine table for SSE2 fixed-point path.
+static double mdct_cos_d_fp[18][36];
+static bool mdct_cos_d_fp_init = false;
+
+static void init_mdct_cos_d_fp() {
+    if (mdct_cos_d_fp_init) return;
+    constexpr double PI = 3.14159265358979323846;
+    for (int n = 0; n < 36; n++)
+        for (int k = 0; k < 18; k++)
+            mdct_cos_d_fp[k][n] = std::cos(PI / 72.0 * (2.0*n + 19.0) * (2.0*k + 1.0));
+    mdct_cos_d_fp_init = true;
+}
+#endif
+
+MDCT_FP::MDCT_FP() {
+    reset();
+    tables::init_tables();
+#if defined(__SSE2__) || defined(_M_X64)
+    init_mdct_cos_d_fp();
+#endif
+}
 void MDCT_FP::reset() { std::memset(prev_, 0, sizeof(prev_)); }
 
 void MDCT_FP::process(const int32_t subband[32][18], int32_t mdct_out[32][18]) {
@@ -259,6 +280,118 @@ void alias_reduce_fp(int32_t mdct_out[32][18]) {
             mdct_out[sb + 1][i]  = static_cast<int32_t>((static_cast<int64_t>(b) * cs - static_cast<int64_t>(a) * ca) >> 31);
         }
     }
+}
+
+void MDCT_FP::process_and_convert(const int32_t subband[32][18], double mdct_flat[576]) {
+    // Fused MDCT + alias reduction + Q24->double conversion.
+    // Outputs flat double[576] directly for the quantizer.
+    double mdct_d[32][18];
+
+    // Pre-compute double MDCT window
+    static double mdct_win_d_fp[36];
+    static bool win_init = false;
+    if (!win_init) {
+        constexpr double PI = 3.14159265358979323846;
+        for (int n = 0; n < 36; n++)
+            mdct_win_d_fp[n] = std::sin(PI / 36.0 * (n + 0.5));
+        win_init = true;
+    }
+    const double kQ24ToDouble = 1.0 / 16777216.0;
+
+    for (int sb = 0; sb < 32; sb++) {
+#if defined(__SSE2__) || defined(_M_X64)
+        // Convert Q24 int32 to double and apply window in one pass.
+        double x[36];
+        const __m128d vq24 = _mm_set1_pd(kQ24ToDouble);
+        for (int n = 0; n < 18; n += 2) {
+            __m128i vi = _mm_loadl_epi64((__m128i*)&prev_[sb][n]);
+            __m128d vd = _mm_mul_pd(_mm_cvtepi32_pd(vi), vq24);
+            __m128d vw = _mm_loadu_pd(&mdct_win_d_fp[n]);
+            _mm_storeu_pd(&x[n], _mm_mul_pd(vd, vw));
+        }
+        for (int n = 0; n < 18; n += 2) {
+            __m128i vi = _mm_loadl_epi64((__m128i*)&subband[sb][n]);
+            __m128d vd = _mm_mul_pd(_mm_cvtepi32_pd(vi), vq24);
+            __m128d vw = _mm_loadu_pd(&mdct_win_d_fp[18 + n]);
+            _mm_storeu_pd(&x[18 + n], _mm_mul_pd(vd, vw));
+        }
+
+        // SIMD double-precision MDCT cosine transform
+        for (int k = 0; k < 18; k++) {
+#if defined(__AVX2__) || defined(__AVX__)
+            __m256d vsum0 = _mm256_setzero_pd();
+            __m256d vsum1 = _mm256_setzero_pd();
+            for (int n = 0; n < 32; n += 8) {
+                vsum0 = _mm256_add_pd(vsum0, _mm256_mul_pd(
+                    _mm256_loadu_pd(&x[n]), _mm256_loadu_pd(&mdct_cos_d_fp[k][n])));
+                vsum1 = _mm256_add_pd(vsum1, _mm256_mul_pd(
+                    _mm256_loadu_pd(&x[n + 4]), _mm256_loadu_pd(&mdct_cos_d_fp[k][n + 4])));
+            }
+            // Remaining 4 elements (n=32..35)
+            vsum0 = _mm256_add_pd(vsum0, _mm256_mul_pd(
+                _mm256_loadu_pd(&x[32]), _mm256_loadu_pd(&mdct_cos_d_fp[k][32])));
+            vsum0 = _mm256_add_pd(vsum0, vsum1);
+            __m128d lo = _mm256_castpd256_pd128(vsum0);
+            __m128d hi = _mm256_extractf128_pd(vsum0, 1);
+            lo = _mm_add_pd(lo, hi);
+            double hsum = _mm_cvtsd_f64(lo) + _mm_cvtsd_f64(_mm_unpackhi_pd(lo, lo));
+            mdct_d[sb][k] = hsum / 288.0;
+#else
+            __m128d vsum0 = _mm_setzero_pd();
+            __m128d vsum1 = _mm_setzero_pd();
+            for (int n = 0; n < 36; n += 4) {
+                vsum0 = _mm_add_pd(vsum0, _mm_mul_pd(
+                    _mm_loadu_pd(&x[n]), _mm_loadu_pd(&mdct_cos_d_fp[k][n])));
+                vsum1 = _mm_add_pd(vsum1, _mm_mul_pd(
+                    _mm_loadu_pd(&x[n + 2]), _mm_loadu_pd(&mdct_cos_d_fp[k][n + 2])));
+            }
+            vsum0 = _mm_add_pd(vsum0, vsum1);
+            double tmp[2]; _mm_storeu_pd(tmp, vsum0);
+            mdct_d[sb][k] = (tmp[0] + tmp[1]) / 288.0;
+#endif
+        }
+#else
+        // Scalar fallback: integer windowing + convert to double
+        int32_t xi[36];
+        for (int n = 0; n < 18; n++) xi[n] = prev_[sb][n];
+        for (int n = 0; n < 18; n++) xi[n + 18] = subband[sb][n];
+        for (int n = 0; n < 36; n++)
+            xi[n] = static_cast<int32_t>((static_cast<int64_t>(xi[n]) * tables::mdct_window[n]) >> 31);
+        for (int k = 0; k < 18; k++) {
+            int64_t sum = 0;
+            for (int n = 0; n < 36; n++)
+                sum += static_cast<int64_t>(xi[n] >> 2) * tables::mdct_cos[n][k];
+            mdct_d[sb][k] = static_cast<double>((sum / 288) >> 29) / 16777216.0;
+        }
+#endif
+
+        for (int n = 0; n < 18; n++) prev_[sb][n] = subband[sb][n];
+    }
+
+    // Alias reduction in double
+    static double ar_cs[8], ar_ca[8];
+    static bool ar_init = false;
+    if (!ar_init) {
+        static constexpr double c[8] = {-0.6, -0.535, -0.33, -0.185, -0.095, -0.041, -0.0142, -0.0037};
+        for (int i = 0; i < 8; i++) {
+            ar_cs[i] = 1.0 / std::sqrt(1.0 + c[i]*c[i]);
+            ar_ca[i] = c[i] / std::sqrt(1.0 + c[i]*c[i]);
+        }
+        ar_init = true;
+    }
+    for (int sb = 0; sb < 31; sb++) {
+        for (int i = 0; i < 8; i++) {
+            double a = mdct_d[sb][17 - i];
+            double b = mdct_d[sb + 1][i];
+            mdct_d[sb][17 - i] = a * ar_cs[i] + b * ar_ca[i];
+            mdct_d[sb + 1][i]  = b * ar_cs[i] - a * ar_ca[i];
+        }
+    }
+
+    // Flatten to 576-element array
+    for (int sb = 0; sb < 32; sb++)
+        for (int k = 0; k < 18; k++)
+            mdct_flat[sb * 18 + k] = mdct_d[sb][k];
 }
 
 #endif // GLINT_FIXED_POINT

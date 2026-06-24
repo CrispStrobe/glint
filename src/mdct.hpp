@@ -29,6 +29,8 @@ class MDCT_FP {
 public:
     MDCT_FP();
     void process(const int32_t subband[32][18], int32_t mdct_out[32][18]);
+    // Fused MDCT + alias reduction + Q24->double conversion.
+    void process_and_convert(const int32_t subband[32][18], double mdct_flat[576]);
     void reset();
 private:
     int32_t prev_[32][18];

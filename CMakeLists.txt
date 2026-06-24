@@ -30,6 +30,7 @@ set(GLINT_SOURCES
     src/huffman.cpp
     src/reservoir.cpp
     src/bitstream.cpp
+    src/psycho.cpp
     src/encoder.cpp
 )
 

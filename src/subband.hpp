@@ -36,7 +36,9 @@ public:
     void reset();
 
 private:
-    int32_t window_buf_[512];
+    // Window buffer stores raw int16 values as double for SSE2 compatibility.
+    // This eliminates int->double conversion in the windowing inner loop.
+    double window_buf_d_[512];
     int window_offset_;
     void process_slot(const int16_t* samples, int32_t subband_out[kNumSubbands]);
 };

@@ -331,7 +331,7 @@ static void print_usage(const char* prog) {
     fprintf(stderr, "  -p PATH          double|fixed (default: fixed)\n");
 #endif
     fprintf(stderr, "  -s SIMD          auto|avx|sse2|neon|none (default: auto)\n");
-    fprintf(stderr, "  -q QUALITY       speed|normal (default: speed)\n");
+    fprintf(stderr, "  -q QUALITY       speed|normal|best (default: speed)\n");
     fprintf(stderr, "  -r RATE:CH:BITS  Raw PCM input (e.g., 44100:1:16)\n");
 }
 
@@ -517,8 +517,9 @@ int main(int argc, char** argv) {
     if (quality_str) {
         if (strcmp(quality_str, "speed") == 0) cfg.quality = GLINT_QUALITY_SPEED;
         else if (strcmp(quality_str, "normal") == 0) cfg.quality = GLINT_QUALITY_NORMAL;
+        else if (strcmp(quality_str, "best") == 0) cfg.quality = GLINT_QUALITY_BEST;
         else {
-            fprintf(stderr, "Error: invalid quality '%s' (use speed or normal)\n", quality_str);
+            fprintf(stderr, "Error: invalid quality '%s' (use speed, normal, or best)\n", quality_str);
             fclose(wav_file);
             return 1;
         }

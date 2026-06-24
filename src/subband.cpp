@@ -145,53 +145,81 @@ void SubbandAnalysis::analyze_float(const float* pcm, double out[kNumSubbands][k
 SubbandAnalysisFP::SubbandAnalysisFP() { reset(); }
 
 void SubbandAnalysisFP::reset() {
-    std::memset(window_buf_, 0, sizeof(window_buf_));
+    std::memset(window_buf_d_, 0, sizeof(window_buf_d_));
     window_offset_ = 0;
 }
 
 void SubbandAnalysisFP::process_slot(const int16_t* samples, int32_t subband_out[kNumSubbands]) {
     window_offset_ = (window_offset_ - 32) & 0x1FF;
     for (int i = 0; i < 32; i++)
-        window_buf_[(window_offset_ + 31 - i) & 0x1FF] = static_cast<int32_t>(samples[i]);
+        window_buf_d_[(window_offset_ + 31 - i) & 0x1FF] = static_cast<double>(samples[i]);
 
-    // Windowed partial sums: Q15 * Q30 = Q45 in int64
-    int64_t z[64];
+    // Scale factor: int16 input (not divided by 32768 like double path),
+    // so result is 32768x larger. Q24 = result * 2^24/32768 = result * 512.
+    const double kQ24Scale = 512.0;
+
+    // Windowed partial sums: buffer is double, window coefficients are double.
+    // Identical to double path except for the Q24 scale at the end.
+    double z[64];
     for (int j = 0; j < 64; j++) {
-        int64_t sum = 0;
+        double sum = 0.0;
 
 #ifndef _MSC_VER
 #pragma GCC unroll 8
 #endif
         for (int p = 0; p < 8; p++) {
             int buf_idx = (window_offset_ + j + 64 * p) & 0x1FF;
-            sum += static_cast<int64_t>(window_buf_[buf_idx]) * tables::analysis_window[j + 64 * p];
+            sum += window_buf_d_[buf_idx] * tables::analysis_window_d[j + 64 * p];
         }
         z[j] = sum;
     }
 
-    // Matrixing: z[] is Q45, subband_matrix[] is Q31.
+    // Matrixing with SIMD double, then convert to Q24.
     for (int i = 0; i < 32; i++) {
-#if defined(__SIZEOF_INT128__)
-        // Full precision: Q45 * Q31 = Q76 in __int128. Output: Q76 >> 52 = Q24.
-        __int128 sum = 0;
-
-#ifndef _MSC_VER
-#pragma GCC unroll 8
+#if defined(__AVX2__) || defined(__AVX__) || defined(__SSE2__) || defined(_M_X64)
+        if (g_simd_level == GLINT_SIMD_AVX) {
+#if defined(__AVX2__) || defined(__AVX__)
+            __m256d vsum0 = _mm256_setzero_pd();
+            __m256d vsum1 = _mm256_setzero_pd();
+            for (int k = 0; k < 64; k += 8) {
+                vsum0 = _mm256_add_pd(vsum0, _mm256_mul_pd(
+                    _mm256_loadu_pd(&z[k]),
+                    _mm256_loadu_pd(&tables::subband_matrix_d[i][k])));
+                vsum1 = _mm256_add_pd(vsum1, _mm256_mul_pd(
+                    _mm256_loadu_pd(&z[k + 4]),
+                    _mm256_loadu_pd(&tables::subband_matrix_d[i][k + 4])));
+            }
+            vsum0 = _mm256_add_pd(vsum0, vsum1);
+            __m128d lo = _mm256_castpd256_pd128(vsum0);
+            __m128d hi = _mm256_extractf128_pd(vsum0, 1);
+            lo = _mm_add_pd(lo, hi);
+            subband_out[i] = static_cast<int32_t>(
+                (_mm_cvtsd_f64(lo) + _mm_cvtsd_f64(_mm_unpackhi_pd(lo, lo))) * kQ24Scale);
+            continue;
 #endif
+        }
+        if (g_simd_level == GLINT_SIMD_SSE2 || g_simd_level == GLINT_SIMD_AVX) {
+            __m128d vsum0 = _mm_setzero_pd();
+            __m128d vsum1 = _mm_setzero_pd();
+            for (int k = 0; k < 64; k += 4) {
+                vsum0 = _mm_add_pd(vsum0, _mm_mul_pd(
+                    _mm_loadu_pd(&z[k]),
+                    _mm_loadu_pd(&tables::subband_matrix_d[i][k])));
+                vsum1 = _mm_add_pd(vsum1, _mm_mul_pd(
+                    _mm_loadu_pd(&z[k + 2]),
+                    _mm_loadu_pd(&tables::subband_matrix_d[i][k + 2])));
+            }
+            vsum0 = _mm_add_pd(vsum0, vsum1);
+            double tmp[2]; _mm_storeu_pd(tmp, vsum0);
+            subband_out[i] = static_cast<int32_t>((tmp[0] + tmp[1]) * kQ24Scale);
+            continue;
+        }
+#endif
+        // Scalar fallback
+        double sum = 0.0;
         for (int k = 0; k < 64; k++)
-            sum += static_cast<__int128>(z[k]) * tables::subband_matrix[i][k];
-        subband_out[i] = static_cast<int32_t>(static_cast<int64_t>(sum >> 52));
-#else
-        // MSVC fallback: pre-shift z >> 24 to Q21, Q21 * Q31 = Q52 in int64.
-        int64_t sum = 0;
-
-#ifndef _MSC_VER
-#pragma GCC unroll 8
-#endif
-        for (int k = 0; k < 64; k++)
-            sum += (z[k] >> 24) * static_cast<int64_t>(tables::subband_matrix[i][k]);
-        subband_out[i] = static_cast<int32_t>(sum >> 28);
-#endif
+            sum += z[k] * tables::subband_matrix_d[i][k];
+        subband_out[i] = static_cast<int32_t>(sum * kQ24Scale);
     }
 }
 

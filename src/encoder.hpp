@@ -13,6 +13,7 @@
 #include "reservoir.hpp"
 #include "bitstream.hpp"
 #include "tables.hpp"
+#include "psycho.hpp"
 
 // Define at global scope to match the C forward declaration in glint.h
 struct glint_context {
@@ -28,7 +29,7 @@ struct glint_context {
     int side_info_bits;
 
     bool use_fixed_point;  // runtime path selection
-    int quality_mode;      // 0=speed, 1=normal (psychoacoustic masking)
+    int quality_mode;      // 0=speed, 1=normal, 2=best (psychoacoustic masking)
 
     bool vbr_mode;         // true when VBR encoding is active
     int vbr_quality;       // VBR quality 0-9 (0=best, 9=worst)
@@ -56,6 +57,9 @@ struct glint_context {
     int padding_remainder;
     int padding_threshold;
     int frame_count;
+
+    // Psychoacoustic model (quality_mode >= 2)
+    glint::PsychoModel psycho;
 
     // Transient detection state (per channel)
     double prev_granule_energy[2];  // per channel
