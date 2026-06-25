@@ -245,10 +245,13 @@ push SNR further, especially at low bitrate.
   coefficients using spreading function + ATH, target 12-18 dB SNR
   (in progress)
 - **Iterative SF amplification** — boost scalefactors for bands exceeding
-  masking threshold (builds on psycho model); a raw-MSE-gated version was
-  tried on `feature/iterative-sf-amplify` but failed: granule-level MSE vs
-  encoder MDCT doesn't correlate with decoded PCM quality due to IMDCT
-  overlap-add, causing regressions in `-q normal`; needs SMR-guided allocation
+  masking threshold (builds on psycho model); two approaches tried and failed:
+  (1) raw-MSE-gated (`feature/iterative-sf-amplify`): IMDCT overlap-add
+  decouples granule MSE from PCM quality, causing regressions; (2) SMR-guided
+  (`feature/smr-sf-amplify`): complete no-op because `quantize_base` already
+  fills the bit budget — any HF SF boost costs more Huffman bits than are
+  available. Real fix requires a full iterative outer loop (à la LAME) that
+  trades LF→HF bits by boosting HF scalefactors while increasing global_gain
 - **Temporal noise shaping (TNS)** — filter quantization noise to follow
   signal envelope, reduce pre-echo without short blocks
 - **Mixed blocks** — short blocks for low subbands (pre-echo sensitive),
