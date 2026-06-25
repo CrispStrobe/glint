@@ -172,6 +172,37 @@ static int encode_scalefac_compress_m2(int slen0, int slen1, int slen2, int slen
 // Thread-local psycho model for use by quantize_granule
 static PsychoModel s_psycho;
 
+// Recompute scalefac_compress and part2_length from the current scalefac[] values.
+// Called whenever scalefac[] changes (initial assignment, iterative SF amplification).
+static void compute_scalefac_bits(GranuleInfo& gi, int sr_index) {
+    bool is_mpeg2 = (sr_index >= 3);
+    if (is_mpeg2) {
+        int max_sf[4] = {};
+        for (int b = 0; b < 6;  b++) max_sf[0] = std::max(max_sf[0], gi.scalefac[b]);
+        for (int b = 6; b < 11; b++) max_sf[1] = std::max(max_sf[1], gi.scalefac[b]);
+        for (int b = 11; b < 16; b++) max_sf[2] = std::max(max_sf[2], gi.scalefac[b]);
+        for (int b = 16; b < 21; b++) max_sf[3] = std::max(max_sf[3], gi.scalefac[b]);
+        int sl[4];
+        for (int g = 0; g < 4; g++) {
+            sl[g] = 0;
+            while ((1 << sl[g]) <= max_sf[g]) sl[g]++;
+            if (sl[g] > 4) sl[g] = 4;
+        }
+        gi.scalefac_compress = encode_scalefac_compress_m2(sl[0], sl[1], sl[2], sl[3]);
+        gi.part2_length = sl[0]*6 + sl[1]*5 + sl[2]*5 + sl[3]*5;
+    } else {
+        int max_sf1 = 0, max_sf2 = 0;
+        for (int b = 0; b < 11; b++) max_sf1 = std::max(max_sf1, gi.scalefac[b]);
+        for (int b = 11; b < 21; b++) max_sf2 = std::max(max_sf2, gi.scalefac[b]);
+        int slen1 = 0; while ((1 << slen1) <= max_sf1) slen1++;
+        int slen2 = 0; while ((1 << slen2) <= max_sf2) slen2++;
+        if (slen1 > 4) slen1 = 4;
+        if (slen2 > 3) slen2 = 3;
+        gi.scalefac_compress = encode_scalefac_compress(slen1, slen2);
+        gi.part2_length = slen1 * 11 + slen2 * 10;
+    }
+}
+
 // Compute headroom-based scalefactors using Vorbis/Opus/FLAC psychoacoustic
 // masking model. Assigns SF inversely proportional to masking headroom:
 // loud bands (high SMR) get sf=0 (noise masked by signal), bands near
@@ -250,6 +281,110 @@ static double granule_mse(const GranuleInfo& gi, const double* mdct_in,
     return noise;
 }
 
+// Spend leftover bits on HF scalefactor boosts to close the spectral rolloff gap.
+//
+// After quantize_base finds global_gain, there are typically 50-300 bits unused.
+// These bits are spent by iteratively boosting per-band scalefactors for HF bands,
+// starting from the highest band. A higher scalefac pre-amplifies that band's MDCT
+// coefficients before quantization so weak HF coefficients survive the dead-zone.
+//
+// Both a bit-budget constraint and an MSE acceptance gate guard each boost:
+// only keep a boost if it strictly reduces decoder-reconstruction MSE vs the
+// original mdct_in. This prevents over-amplification and clipping — a boost that
+// lifts surviving coefficients above the original value increases MSE and is reverted.
+//
+// Bands 10+ only (≥ ~2.5 kHz for 48 kHz): LF bands are already well-served by
+// the per-granule scale search and have few zero'd coefficients anyway.
+static void iterative_sf_amplify(GranuleInfo& gi, const double* scaled_in,
+                                  const double* mdct_in,
+                                  int available_bits, int sr_index,
+                                  bool short_block, int max_iter) {
+    init_quant_tables();
+    const int* sfb = tables::get_sfb_long_by_unified(sr_index);
+    bool is_mpeg2 = (sr_index >= 3);
+
+    // Max scalefac: MPEG-1 bands 0-10 → 15 (slen1 ≤ 4), 11-20 → 7 (slen2 ≤ 3)
+    // MPEG-2/2.5 all groups clamped to slen ≤ 4 → max 15
+    auto sf_max = [&](int band) -> int {
+        return (!is_mpeg2 && band >= 11) ? 7 : 15;
+    };
+
+    bool blocked[21] = {};
+    double cur_mse = granule_mse(gi, mdct_in, sr_index);
+
+    for (int iter = 0; iter < max_iter; iter++) {
+        int leftover = available_bits - gi.part2_3_length;
+        if (leftover <= 4) break;
+
+        // Score = MSE contributed by zero'd coefficients (using original mdct_in).
+        // This is the error that a SF boost might fix. Bands with more
+        // zero'd signal energy are better candidates. Only bands 10+ (HF).
+        int best_band = -1;
+        double best_score = 0.0;
+
+        for (int band = 20; band >= 10; band--) {
+            if (blocked[band]) continue;
+            if (gi.scalefac[band] >= sf_max(band)) { blocked[band] = true; continue; }
+
+            int lo = sfb[band], hi_b = std::min(sfb[band + 1], 576);
+            double zero_mse = 0.0;
+            for (int i = lo; i < hi_b; i++)
+                if (gi.ix[i] == 0) zero_mse += mdct_in[i] * mdct_in[i];
+
+            if (zero_mse == 0.0) { blocked[band] = true; continue; }
+            if (zero_mse > best_score) { best_score = zero_mse; best_band = band; }
+        }
+
+        if (best_band < 0) break;
+
+        // Save full state so we can revert if the boost fails either check
+        int old_sf   = gi.scalefac[best_band];
+        int old_sfc  = gi.scalefac_compress;
+        int old_p2   = gi.part2_length;
+        int old_p23  = gi.part2_3_length;
+        HuffRegions old_regions = gi.regions;
+        int old_ix[576];
+        std::memcpy(old_ix, gi.ix, sizeof(old_ix));
+
+        gi.scalefac[best_band]++;
+        compute_scalefac_bits(gi, sr_index);
+
+        if (gi.part2_length > available_bits) {
+            gi.scalefac[best_band] = old_sf;
+            gi.scalefac_compress   = old_sfc;
+            gi.part2_length        = old_p2;
+            gi.part2_3_length      = old_p23;
+            blocked[best_band] = true;
+            continue;
+        }
+
+        QuantCache cache;
+        fill_quant_cache(cache, scaled_in, gi.scalefac, gi.scalefac_scale,
+                         gi.preflag, sr_index);
+        int huff = quantize_and_count(scaled_in, gi.ix, gi.global_gain,
+                                      gi.scalefac, gi.scalefac_scale,
+                                      gi.preflag, sr_index, &gi.regions,
+                                      &cache, short_block);
+        gi.part2_3_length = gi.part2_length + huff;
+
+        bool bits_ok = (gi.part2_3_length <= available_bits);
+        double new_mse = bits_ok ? granule_mse(gi, mdct_in, sr_index) : cur_mse;
+
+        if (!bits_ok || new_mse >= cur_mse) {
+            // Bits overflow or MSE didn't improve — revert everything
+            gi.scalefac[best_band] = old_sf;
+            gi.scalefac_compress   = old_sfc;
+            gi.part2_length        = old_p2;
+            gi.part2_3_length      = old_p23;
+            gi.regions             = old_regions;
+            std::memcpy(gi.ix, old_ix, sizeof(old_ix));
+            blocked[best_band] = true;
+        } else {
+            cur_mse = new_mse;
+        }
+    }
+}
+
 // Base quantizer: gain search to the bit budget + energy-based scalefactors.
 // Operates on already-scaled input; the public quantize_granule wraps this in
 // the per-granule scale search.
@@ -298,9 +433,20 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
             for (int i = 0; i < 576; i++) scaled[i] = mdct_in[i] * f;
             GranuleInfo gi = quantize_base(scaled, available_bits, sr_index, short_block);
             double d = granule_mse(gi, mdct_in, sr_index);
-            if (d < best_mse) { best_mse = d; best_result = gi; }
+            if (d < best_mse) { best_mse = d; best_result = gi; best_factor = f; }
         }
     }
+
+    // Spend leftover bits on HF scalefactor boosts (normal: up to 8 attempts,
+    // best: up to 16). Uses the original mdct_in as the MSE reference so that
+    // any boost which over-amplifies or adds noise vs the source is rejected.
+    if (quality_mode >= 1) {
+        for (int i = 0; i < 576; i++) scaled[i] = mdct_in[i] * best_factor;
+        int sf_iter = (quality_mode >= 2) ? 16 : 8;
+        iterative_sf_amplify(best_result, scaled, mdct_in, available_bits,
+                             sr_index, short_block, sf_iter);
+    }
+
     return best_result;
 }
 
