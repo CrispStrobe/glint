@@ -32,9 +32,9 @@ with `tests/measure_audio.py`; `double` and `fixed` paths are identical):
 
 | Mode | SNR | seg-SNR | centroid | %E>10 kHz | 95% rolloff | RMS vs src | speed |
 |---|---|---|---|---|---|---|---|
-| -q speed | 12.5 dB | 10.9 dB | 769 Hz | 0.41% | 3.8 kHz | ±0.2 dB | ~70× |
-| **-q normal** | **14.3 dB** | **13.5 dB** | 817 Hz | 0.51% | 5.3 kHz | ±0.2 dB | ~28× |
-| -q best | 15.0 dB | 14.1 dB | 817 Hz | 0.50% | 5.3 kHz | ±0.2 dB | ~12× |
+| -q speed | 12.5 dB | 10.8 dB | 744 Hz | 0.34% | 3.4 kHz | ±0.2 dB | ~70× |
+| **-q normal** | **14.3 dB** | **13.4 dB** | 790 Hz | 0.44% | 4.4 kHz | ±0.2 dB | ~28× |
+| -q best | 14.9 dB | 14.0 dB | 796 Hz | 0.45% | 4.4 kHz | ±0.2 dB | ~12× |
 
 Source rolloff 5.4 kHz, centroid 892 Hz, %E>10 kHz 0.72%. Both signal paths
 are numerically identical. Apple Silicon, 256 kbps stereo. For a deterministic
@@ -45,14 +45,13 @@ local speed/quality run without external audio, use
 
 | Mode | 0–1 kHz | 1–4 kHz | 4–8 kHz | 8–16 kHz |
 |---|---|---|---|---|
-| -q speed | 13.2 dB | 8.9 dB | 10.9 dB | 10.6 dB |
-| -q normal | 15.5 dB | 9.3 dB | 11.7 dB | 11.4 dB |
-| -q best | 16.4 dB | 9.5 dB | 12.0 dB | 11.6 dB |
+| -q speed | 13.2 dB | 8.9 dB | 10.9 dB | 9.8 dB |
+| -q normal | 15.5 dB | 9.4 dB | 11.6 dB | 10.5 dB |
+| -q best | 16.4 dB | 9.6 dB | 12.0 dB | 10.8 dB |
 
 Noise concentrates in the 0–1 kHz band (~62–74% of total error power at all
-tiers); the remaining error is spread across 1–8 kHz, with better 8–16 kHz
-retention from the quantizer pre-emphasis. HF above 16 kHz is absent
-(quantizer dead-zone at 256 kbps speech).
+tiers); the remaining error is spread across 1–8 kHz. HF above 16 kHz is
+absent (quantizer dead-zone at 256 kbps speech).
 
 **Footprint**:
 
