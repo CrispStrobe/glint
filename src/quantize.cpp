@@ -228,10 +228,12 @@ static bool compute_headroom_scalefactors(int scalefac[21],
 // Used to pick the per-granule input scale ("factor") that best preserves the
 // spectrum through the quantizer dead-zone.
 static double granule_mse(const GranuleInfo& gi, const double* mdct_in,
-                          int sr_index) {
+                          int sr_index, int quality_mode) {
     const int* sfb = tables::get_sfb_long_by_unified(sr_index);
     double decoder_gain = std::pow(2.0, 0.25 * (gi.global_gain - 210));
     double noise = 0.0;
+    double src_band[21] = {};
+    double rec_band[21] = {};
     int b = 0;
     for (int i = 0; i < 576; i++) {
         while (b < 20 && i >= sfb[b + 1]) b++;
@@ -246,8 +248,27 @@ static double granule_mse(const GranuleInfo& gi, const double* mdct_in,
         }
         double err = mdct_in[i] - xr_hat;
         noise += err * err;
+        src_band[b] += mdct_in[i] * mdct_in[i];
+        rec_band[b] += xr_hat * xr_hat;
     }
-    return noise;
+
+    if (quality_mode <= 0) return noise;
+
+    double total = 0.0;
+    for (int band = 0; band < 21; band++)
+        total += src_band[band];
+    if (total <= 0.0) return noise;
+
+    double envelope_penalty = 0.0;
+    for (int band = 0; band < 21; band++) {
+        if (src_band[band] < total * 1e-4) continue;
+        double retention = rec_band[band] / (src_band[band] + 1e-18);
+        if (retention >= 0.9) continue;
+        double loss = std::log(0.9 / std::max(retention, 1e-6));
+        double band_weight = (band >= 12) ? 3.0 : 0.75;
+        envelope_penalty += band_weight * src_band[band] * loss * loss;
+    }
+    return noise + 0.15 * envelope_penalty;
 }
 
 // Base quantizer: gain search to the bit budget + energy-based scalefactors.
@@ -287,7 +308,7 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
         double f = factors[fi];
         for (int i = 0; i < 576; i++) scaled[i] = mdct_in[i] * f;
         GranuleInfo gi = quantize_base(scaled, available_bits, sr_index, short_block);
-        double d = granule_mse(gi, mdct_in, sr_index);
+        double d = granule_mse(gi, mdct_in, sr_index, quality_mode);
         if (d < best_mse) { best_mse = d; best_result = gi; best_factor = f; }
     }
     if (quality_mode >= 2) {
@@ -297,7 +318,7 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
             if (f < 0.5) continue;
             for (int i = 0; i < 576; i++) scaled[i] = mdct_in[i] * f;
             GranuleInfo gi = quantize_base(scaled, available_bits, sr_index, short_block);
-            double d = granule_mse(gi, mdct_in, sr_index);
+            double d = granule_mse(gi, mdct_in, sr_index, quality_mode);
             if (d < best_mse) { best_mse = d; best_result = gi; }
         }
     }

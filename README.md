@@ -33,8 +33,8 @@ with `tests/measure_audio.py`; `double` and `fixed` paths are identical):
 | Mode | SNR | seg-SNR | centroid | %E>10 kHz | 95% rolloff | RMS vs src | speed |
 |---|---|---|---|---|---|---|---|
 | -q speed | 12.5 dB | 10.8 dB | 744 Hz | 0.34% | 3.4 kHz | ±0.2 dB | ~70× |
-| **-q normal** | **14.3 dB** | **13.4 dB** | 790 Hz | 0.44% | 4.4 kHz | ±0.2 dB | ~28× |
-| -q best | 14.9 dB | 14.0 dB | 796 Hz | 0.45% | 4.4 kHz | ±0.2 dB | ~12× |
+| **-q normal** | **14.1 dB** | **13.2 dB** | 830 Hz | 0.48% | 5.3 kHz | ±0.2 dB | ~28× |
+| -q best | 14.7 dB | 13.8 dB | 820 Hz | 0.47% | 5.1 kHz | ±0.2 dB | ~12× |
 
 Source rolloff 5.4 kHz, centroid 892 Hz, %E>10 kHz 0.72%. Both signal paths
 are numerically identical. Apple Silicon, 256 kbps stereo. For a deterministic
@@ -46,12 +46,14 @@ local speed/quality run without external audio, use
 | Mode | 0–1 kHz | 1–4 kHz | 4–8 kHz | 8–16 kHz |
 |---|---|---|---|---|
 | -q speed | 13.2 dB | 8.9 dB | 10.9 dB | 9.8 dB |
-| -q normal | 15.5 dB | 9.4 dB | 11.6 dB | 10.5 dB |
-| -q best | 16.4 dB | 9.6 dB | 12.0 dB | 10.8 dB |
+| -q normal | 15.1 dB | 9.6 dB | 11.7 dB | 10.9 dB |
+| -q best | 16.0 dB | 9.8 dB | 12.0 dB | 11.1 dB |
 
-Noise concentrates in the 0–1 kHz band (~62–74% of total error power at all
-tiers); the remaining error is spread across 1–8 kHz. HF above 16 kHz is
-absent (quantizer dead-zone at 256 kbps speech).
+Normal/best use an envelope-aware scale-search objective that penalizes decoded
+scalefactor bands whose energy collapses relative to the source. This closes
+most of the source rolloff gap without pre-emphasizing the input spectrum.
+Noise still concentrates in the 0–1 kHz band (~62–74% of total error power at
+all tiers); HF above 16 kHz is absent (quantizer dead-zone at 256 kbps speech).
 
 **Footprint**:
 
@@ -225,8 +227,8 @@ passes. Measured on a 1-min 256 kbps stereo speech clip (`double`==`fixed`):
 | metric (vs source)   | before (spd/nrm/best) | after (spd/nrm/best) |
 |----------------------|-----------------------|----------------------|
 | RMS level            | −25.9 / −21.4 / −19.7 | within ~0.2 dB of source, all tiers |
-| 95% rolloff          | 1031 / 1031 / 4359 Hz | 3422 / 4359 / 4430 Hz |
-| overall SNR          | 5.1 / 10.1 / 15.0 dB  | 12.5 / 14.3 / 14.9 dB |
+| 95% rolloff          | 1031 / 1031 / 4359 Hz | 3422 / 5344 / 5133 Hz |
+| overall SNR          | 5.1 / 10.1 / 15.0 dB  | 12.5 / 14.1 / 14.7 dB |
 | encode speed         | —                     | ~70× / 28× / 12× realtime (Apple M-series) |
 
 Verify with `python tests/measure_audio.py original.wav out.mp3` (want RMS
@@ -235,10 +237,10 @@ within ~0.5 dB of source, rolloff near source, `double`==`fixed`) and
 The `tests/test_quality.py --fixed` path covers signal quality, bitrate range,
 stereo, MPEG-2/2.5 sample rates, and transient handling through `-p fixed`.
 
-Remaining headroom: the scale search is a coarse stand-in for a real
-rate-distortion loop. A proper per-band noise-shaping outer loop (see
-*Iterative SF amplification* below) should close the last ~1 kHz of rolloff and
-push SNR further, especially at low bitrate.
+Remaining headroom: the scale search is still a coarse stand-in for a full
+rate-distortion loop. It now includes a decoded spectral-envelope term for
+normal/best, but a true per-band bit-allocation loop should improve SNR and
+bandwidth together, especially at low bitrate.
 
 ### Quality (longer-term)
 - **Bark-band psychoacoustic masking** (`-q best`) — zero masked MDCT
