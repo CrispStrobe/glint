@@ -245,7 +245,10 @@ push SNR further, especially at low bitrate.
   coefficients using spreading function + ATH, target 12-18 dB SNR
   (in progress)
 - **Iterative SF amplification** — boost scalefactors for bands exceeding
-  masking threshold (builds on psycho model)
+  masking threshold (builds on psycho model); a raw-MSE-gated version was
+  tried on `feature/iterative-sf-amplify` but failed: granule-level MSE vs
+  encoder MDCT doesn't correlate with decoded PCM quality due to IMDCT
+  overlap-add, causing regressions in `-q normal`; needs SMR-guided allocation
 - **Temporal noise shaping (TNS)** — filter quantization noise to follow
   signal envelope, reduce pre-echo without short blocks
 - **Mixed blocks** — short blocks for low subbands (pre-echo sensitive),
