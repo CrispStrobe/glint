@@ -256,6 +256,14 @@ static double granule_mse(const GranuleInfo& gi, const double* mdct_in,
 static GranuleInfo quantize_base(const double* mdct_in, int available_bits,
                                  int sr_index, bool short_block);
 
+// Mild high-band lift before quantization counters the quantizer dead-zone
+// that otherwise drops low-energy upper harmonics and narrows bandwidth.
+static double quantize_preemphasis(int i) {
+    if (i < 96) return 1.0;
+    if (i >= 192) return 1.20;
+    return 1.0 + (static_cast<double>(i - 96) * (0.20 / 96.0));
+}
+
 // Per-granule scale search (all quality tiers).
 //
 // The quantizer is is = int(|xr|^0.75 * step + 0.4054); coefficients whose
@@ -285,7 +293,8 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
     double scaled[576];
     for (int fi = 0; fi < nf; fi++) {
         double f = factors[fi];
-        for (int i = 0; i < 576; i++) scaled[i] = mdct_in[i] * f;
+        for (int i = 0; i < 576; i++)
+            scaled[i] = mdct_in[i] * f * quantize_preemphasis(i);
         GranuleInfo gi = quantize_base(scaled, available_bits, sr_index, short_block);
         double d = granule_mse(gi, mdct_in, sr_index);
         if (d < best_mse) { best_mse = d; best_result = gi; best_factor = f; }
@@ -295,7 +304,8 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
             if (step == 0) continue;
             double f = best_factor + step * 0.12;
             if (f < 0.5) continue;
-            for (int i = 0; i < 576; i++) scaled[i] = mdct_in[i] * f;
+            for (int i = 0; i < 576; i++)
+                scaled[i] = mdct_in[i] * f * quantize_preemphasis(i);
             GranuleInfo gi = quantize_base(scaled, available_bits, sr_index, short_block);
             double d = granule_mse(gi, mdct_in, sr_index);
             if (d < best_mse) { best_mse = d; best_result = gi; }
