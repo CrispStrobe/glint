@@ -30,18 +30,28 @@ path needs only 50 KB RAM and no FPU.
 **Quality** — speech, 256 kbps stereo, vs. the original (1-min clip, measured
 with `tests/measure_audio.py`; `double` and `fixed` paths are identical):
 
-| Mode | overall SNR | seg-SNR | 95% rolloff | level vs source | encode speed |
-|---|---|---|---|---|---|
-| -q speed | 12.5 dB | 10.8 dB | 3.4 kHz | ±0.3 dB | ~94× realtime |
-| **-q normal (default)** | **14.3 dB** | **13.4 dB** | 4.4 kHz | ±0.3 dB | ~37× realtime |
-| -q best | 14.9 dB | 14.0 dB | 4.5 kHz | ±0.3 dB | ~14× realtime |
+| Mode | SNR | seg-SNR | centroid | %E>10 kHz | 95% rolloff | RMS vs src | speed |
+|---|---|---|---|---|---|---|---|
+| -q speed | 12.5 dB | 10.8 dB | 744 Hz | 0.34% | 3.4 kHz | ±0.2 dB | ~70× |
+| **-q normal** | **14.3 dB** | **13.4 dB** | 790 Hz | 0.44% | 4.4 kHz | ±0.2 dB | ~28× |
+| -q best | 14.9 dB | 14.0 dB | 796 Hz | 0.45% | 4.4 kHz | ±0.2 dB | ~12× |
 
-Reference (source) rolloff on this clip is 5.4 kHz. All three tiers reconstruct
-at the source's level and bandwidth; the tiers trade encode time for the last
-~2 dB of SNR (see the per-granule scale search in the roadmap). Apple Silicon,
-256 kbps stereo; speeds are relative, not absolute. For a deterministic local
-speed/quality run without external audio, use `python tests/benchmark_encoder.py
-build/glint_cli`.
+Source rolloff 5.4 kHz, centroid 892 Hz, %E>10 kHz 0.72%. Both signal paths
+are numerically identical. Apple Silicon, 256 kbps stereo. For a deterministic
+local speed/quality run without external audio, use
+`python tests/benchmark_encoder.py build/glint_cli`.
+
+**Per-band SNR vs source** (256 kbps stereo, speech):
+
+| Mode | 0–1 kHz | 1–4 kHz | 4–8 kHz | 8–16 kHz |
+|---|---|---|---|---|
+| -q speed | 13.2 dB | 8.9 dB | 10.9 dB | 9.8 dB |
+| -q normal | 15.5 dB | 9.4 dB | 11.6 dB | 10.5 dB |
+| -q best | 16.4 dB | 9.6 dB | 12.0 dB | 10.8 dB |
+
+Noise concentrates in the 0–1 kHz band (~62–74% of total error power at all
+tiers); the remaining error is spread across 1–8 kHz. HF above 16 kHz is
+absent (quantizer dead-zone at 256 kbps speech).
 
 **Footprint**:
 
@@ -214,10 +224,10 @@ passes. Measured on a 1-min 256 kbps stereo speech clip (`double`==`fixed`):
 
 | metric (vs source)   | before (spd/nrm/best) | after (spd/nrm/best) |
 |----------------------|-----------------------|----------------------|
-| RMS level            | −25.9 / −21.4 / −19.7 | within ~0.3 dB of source, all tiers |
-| 95% rolloff          | 1031 / 1031 / 4359 Hz | 3398 / 4383 / 4453 Hz |
+| RMS level            | −25.9 / −21.4 / −19.7 | within ~0.2 dB of source, all tiers |
+| 95% rolloff          | 1031 / 1031 / 4359 Hz | 3422 / 4359 / 4430 Hz |
 | overall SNR          | 5.1 / 10.1 / 15.0 dB  | 12.5 / 14.3 / 14.9 dB |
-| encode speed         | —                     | ~94× / 37× / 14× realtime |
+| encode speed         | —                     | ~70× / 28× / 12× realtime (Apple M-series) |
 
 Verify with `python tests/measure_audio.py original.wav out.mp3` (want RMS
 within ~0.5 dB of source, rolloff near source, `double`==`fixed`) and
