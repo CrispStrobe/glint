@@ -41,7 +41,8 @@ static double fast_pow34(double x) {
 
 // Cache for pre-computed per-coefficient values (constant across binary search)
 struct QuantCache {
-    double pow34_sf[576]; // pow34(|xr|) * sf_scale - precomputed
+    float pow34_sf[576];  // pow34(|xr|) * sf_scale — float is sufficient
+                          // (result is truncated to int 0..8191 anyway)
     int sign[576];        // +1 or -1
 };
 
@@ -113,9 +114,10 @@ static int quantize_and_count(const double* mdct_in, int* ix,
     int rzero = 0;          // last nonzero index + 1
 
     if (cache) {
+        float step_f = static_cast<float>(base_step);
         for (int i = 0; i < 576; i++) {
-            double qval_d = cache->pow34_sf[i] * base_step + 0.4054;
-            int qval = (qval_d >= 8191.0) ? 8191 : static_cast<int>(qval_d);
+            float qval_f = cache->pow34_sf[i] * step_f + 0.4054f;
+            int qval = (qval_f >= 8191.0f) ? 8191 : static_cast<int>(qval_f);
             ix[i] = cache->sign[i] * qval;
         }
         // Scan backward for rzero (avoids branch in hot loop)
