@@ -340,11 +340,14 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
     // Precompute pow34 and signs for the unscaled input once.
     // For scaled input: pow34(|x*f|) = pow34(|x|) * f^0.75, so we avoid
     // recomputing pow34 for each scale factor in the search.
+    // Also precompute total input energy for trivial MSE shortcut.
     double base_pow34[576];
     int base_sign[576];
+    double input_energy = 0.0;
     for (int i = 0; i < 576; i++) {
         base_pow34[i] = fast_pow34(std::fabs(mdct_in[i]));
         base_sign[i] = (mdct_in[i] < 0.0) ? -1 : 1;
+        input_energy += mdct_in[i] * mdct_in[i];
     }
 
     // Scale search with early exit: once we've found a good factor and MSE
@@ -356,7 +359,13 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
         for (int i = 0; i < 576; i++) scaled[i] = mdct_in[i] * f;
         GranuleInfo gi = quantize_base(scaled, available_bits, sr_index,
                                         short_block, base_pow34, base_sign, f);
-        double d = granule_mse(gi, mdct_in, sr_index, quality_mode);
+        // Shortcut: if everything quantized to zero, MSE = input_energy
+        double d;
+        if (gi.part2_3_length == gi.part2_length) {
+            d = input_energy;  // all ix[] are zero → no reconstruction
+        } else {
+            d = granule_mse(gi, mdct_in, sr_index, quality_mode);
+        }
         if (d < best_mse) { best_mse = d; best_result = gi; best_factor = f; }
         if (nf >= 4 && fi >= 2 && d > best_mse * 3.0 && d > prev_mse) break;
         prev_mse = d;
@@ -369,7 +378,12 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
             for (int i = 0; i < 576; i++) scaled[i] = mdct_in[i] * f;
             GranuleInfo gi = quantize_base(scaled, available_bits, sr_index,
                                             short_block, base_pow34, base_sign, f);
-            double d = granule_mse(gi, mdct_in, sr_index, quality_mode);
+            double d;
+            if (gi.part2_3_length == gi.part2_length) {
+                d = input_energy;
+            } else {
+                d = granule_mse(gi, mdct_in, sr_index, quality_mode);
+            }
             if (d < best_mse) { best_mse = d; best_result = gi; }
         }
     }
