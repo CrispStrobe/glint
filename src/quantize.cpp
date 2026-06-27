@@ -117,8 +117,10 @@ static int quantize_and_count(const double* mdct_in, int* ix,
             double qval_d = cache->pow34_sf[i] * base_step + 0.4054;
             int qval = (qval_d >= 8191.0) ? 8191 : static_cast<int>(qval_d);
             ix[i] = cache->sign[i] * qval;
-            if (qval > 0) rzero = i + 1;
         }
+        // Scan backward for rzero (avoids branch in hot loop)
+        rzero = 576;
+        while (rzero > 0 && ix[rzero - 1] == 0) rzero--;
     } else {
         // Per-band iteration with 22 bands (21 ISO + HF tail).
         const int* sfb = tables::get_sfb_long_by_unified(sr_index);
@@ -135,9 +137,10 @@ static int quantize_and_count(const double* mdct_in, int* ix,
                 double qval_d = pow34_val * step + 0.4054;
                 int qval = (qval_d >= 8191.0) ? 8191 : static_cast<int>(qval_d);
                 ix[i] = (mdct_in[i] < 0.0) ? -qval : qval;
-                if (qval > 0) rzero = i + 1;
             }
         }
+        rzero = 576;
+        while (rzero > 0 && ix[rzero - 1] == 0) rzero--;
     }
 
     // Short blocks use a different region layout; the gain search must count
