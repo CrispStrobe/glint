@@ -15,8 +15,8 @@ All measurements on x86-64 (Intel Xeon), `-O3 -march=native -ffast-math`, LTO.
 ### After all optimizations
 - Unit tests: 30/30
 - Quality tests: ALL PASS
-- Speed (256 kbps stereo): speed=28.8x, normal=12.7x, best=4.9x
-- Speed (mono 128kbps, 5min): ~70x realtime (+133%)
+- Speed (256 kbps stereo): speed=23.7x, normal=13.0x, best=5.0x
+- Speed (mono 128kbps, 5min): ~80x realtime (+167%)
 - RAM (encoder state + tables): 188 KB (double), 46 KB (fixed)
 - Fidelity (256 kbps stereo): SNR 14.8–15.2 dB, all tiers within thresholds
 
@@ -24,9 +24,9 @@ All measurements on x86-64 (Intel Xeon), `-O3 -march=native -ffast-math`, LTO.
 
 | Mode | Baseline | Optimized | Improvement |
 |---|---|---|---|
-| speed | 16.4x | **28.8x** | +76% |
-| normal | 5.4x | **12.7x** | +135% |
-| best | 2.3x | **4.9x** | +113% |
+| speed | 16.4x | **23.7x** | +45% |
+| normal | 5.4x | **13.0x** | +141% |
+| best | 2.3x | **5.0x** | +117% |
 
 ## Implemented Optimizations
 
@@ -78,23 +78,25 @@ All measurements on x86-64 (Intel Xeon), `-O3 -march=native -ffast-math`, LTO.
 - `mdct_out[32][18]` is contiguous — pass pointer directly instead of copying
 - Scan backward for rzero after quantize loop instead of per-element branch
 
-## Profile (after all optimizations, mono 128kbps)
+### 8. Fused frequency inversion + MDCT (mdct.cpp, encoder.cpp)
+- **Impact:** eliminates sub_gr[32][18] temporary and 576-double copy per granule
+- New `MDCT::process_strided()` reads from `subband_out[32][36]` at slot offset,
+  applying frequency inversion inline (negate odd sb × odd ts)
+- Both double-precision encode paths use the fused method
 
-| Function | % time | Notes |
-|---|---|---|
-| quantize_and_count | ~31% | Cached quantize + Huffman regions |
-| glint_encode | ~28% | Orchestrator (subband, MDCT, bitstream) |
-| huffman_count_bits | ~10% | Bit counting in binary search |
-| fill_quant_cache | ~7% | Down from 37% (pow34 sharing) |
-| granule_mse | ~7% | Down from 16% (cbrt + per-band) |
-| quantize_base | ~7% | Wrapper: gain search + SF adjustment |
+### 9. Early-exit scale search (quantize.cpp)
+- **Impact:** +15-20% for normal/best modes
+- For ≥4 scale factors, stop searching once MSE rises 3× past the best
+  and is monotonically increasing (past the optimum)
+- Typical savings: 1-2 fewer quantize_base calls for normal, 3-5 for best
 
-The top two functions (quantize_and_count 31%, glint_encode 28%) are now the
-bottleneck. `quantize_and_count`'s inner loop is a tight multiply-add-clamp-store
-that the compiler auto-vectorizes; `glint_encode` includes SIMD-optimized subband
-analysis and MDCT. Further gains require architectural changes.
+### 10. Tighter binary search upper bound (quantize.cpp)
+- **Impact:** minor, reduces wasted iterations at high gain values
+- Estimate `max_gain` where peak coefficient quantizes to ~1 bit
+- Narrows the `[min_gain, 255]` search range
 
 ## Remaining Ideas
 - **PGO** (profile-guided optimization): ~5% expected, build process change
-- **Fused subband+MDCT**: eliminate intermediate 32x36 buffer
+- **Fused subband+MDCT**: eliminate intermediate 32x36 buffer by streaming
+  subband output directly into MDCT accumulator
 - **Fixed-point signal path activation**: full Q31 conversion for embedded

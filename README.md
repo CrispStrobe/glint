@@ -33,7 +33,7 @@ path needs only ~46 KB RAM and no FPU.
 
 | Mode | SNR | seg-SNR | LSD | speed (x86-64) |
 |---|---|---|---|---|
-| -q speed | 15.1 dB | 15.1 dB | 18.9 dB | ~29× |
+| -q speed | 15.1 dB | 15.1 dB | 18.9 dB | ~24× |
 | **-q normal** | **14.8 dB** | **14.8 dB** | **18.6 dB** | ~13× |
 | -q best | 15.2 dB | 15.2 dB | 18.6 dB | ~5× |
 
@@ -45,7 +45,7 @@ path needs only ~46 KB RAM and no FPU.
 | -q normal | 15.3 dB | 5.0 dB | 7.2 dB | 1.4 dB |
 | -q best | 15.6 dB | 5.1 dB | 7.3 dB | 1.4 dB |
 
-Mono encoding at 128 kbps reaches ~70× realtime on x86-64 (Intel Xeon,
+Mono encoding at 128 kbps reaches ~80× realtime on x86-64 (Intel Xeon,
 `-O3 -march=native -ffast-math`, LTO). For a deterministic local speed/quality
 run: `python tests/benchmark_encoder.py build/glint_cli`.
 
@@ -227,7 +227,7 @@ passes. Measured on a 1-min 256 kbps stereo speech clip (`double`==`fixed`):
 | RMS level            | −25.9 / −21.4 / −19.7 | within ~0.2 dB of source, all tiers |
 | 95% rolloff          | 1031 / 1031 / 4359 Hz | 3422 / 5344 / 5133 Hz |
 | overall SNR          | 5.1 / 10.1 / 15.0 dB  | 12.5 / 14.1 / 14.7 dB |
-| encode speed         | —                     | ~29× / 13× / 5× realtime (x86-64 Xeon) |
+| encode speed         | —                     | ~24× / 13× / 5× realtime (x86-64 Xeon) |
 
 Verify with `python tests/measure_audio.py original.wav out.mp3` (want RMS
 within ~0.5 dB of source, rolloff near source, `double`==`fixed`) and
