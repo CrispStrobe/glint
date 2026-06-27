@@ -378,10 +378,9 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                     enc->mdct[ch].process(sub_gr, mdct_out);
                     alias_reduce_d(mdct_out);
 
-                    double mdct_flat[576];
-                    for (int sb = 0; sb < 32; sb++)
-                        for (int k = 0; k < 18; k++)
-                            mdct_flat[sb * 18 + k] = mdct_out[sb][k];
+                    // mdct_out[32][18] is contiguous 576 doubles in row-major
+                    // order — identical layout to a flat[576] array.
+                    double* mdct_flat = &mdct_out[0][0];
 
                     if (enc->vbr_mode) {
                         granule_info[gr][ch] = quantize_granule_vbr(mdct_flat, gr_bits,
@@ -801,10 +800,7 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
                 enc->mdct[ch].process(sub_gr, mdct_out);
                 alias_reduce_d(mdct_out);
 
-                double mdct_flat[576];
-                for (int sb = 0; sb < 32; sb++)
-                    for (int k = 0; k < 18; k++)
-                        mdct_flat[sb * 18 + k] = mdct_out[sb][k];
+                double* mdct_flat = &mdct_out[0][0];
 
                 if (enc->vbr_mode) {
                     granule_info[gr][ch] = quantize_granule_vbr(mdct_flat, gr_bits,
