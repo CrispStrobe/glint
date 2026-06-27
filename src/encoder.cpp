@@ -327,14 +327,6 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                     subband_out_d[ch], gr,
                     enc->prev_energy_valid, &enc->prev_granule_energy[ch]);
 
-                // Frequency inversion and extract granule slice in one pass
-                double sub_gr[32][18];
-                for (int sb = 0; sb < 32; sb++)
-                    for (int ts = 0; ts < 18; ts++) {
-                        double v = subband_out_d[ch][sb][t0 + ts];
-                        sub_gr[sb][ts] = ((sb & 1) && (ts & 1)) ? -v : v;
-                    }
-
                 // Short blocks are disabled while the bit reservoir is
                 // disabled. A transient frame wants far more bits than a single
                 // frame's budget; with no reservoir to borrow from it gets
@@ -347,7 +339,13 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                                  enc->quality_mode >= 1;
 
                 if (use_short) {
-                    // Short-block path
+                    // Short-block path needs sub_gr copy (freq inversion)
+                    double sub_gr[32][18];
+                    for (int sb = 0; sb < 32; sb++)
+                        for (int ts = 0; ts < 18; ts++) {
+                            double v = subband_out_d[ch][sb][t0 + ts];
+                            sub_gr[sb][ts] = ((sb & 1) && (ts & 1)) ? -v : v;
+                        }
                     double mdct_out_short[32][3][6];
                     enc->mdct[ch].process_short(sub_gr, mdct_out_short);
                     // No alias reduction for short blocks (ISO spec)
@@ -373,13 +371,11 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                     }
                     granule_info[gr][ch].block_type = 2;
                 } else {
-                    // Long-block path
+                    // Long-block path: fused freq inversion + MDCT
                     double mdct_out[32][18];
-                    enc->mdct[ch].process(sub_gr, mdct_out);
+                    enc->mdct[ch].process_strided(subband_out_d[ch], t0, mdct_out);
                     alias_reduce_d(mdct_out);
 
-                    // mdct_out[32][18] is contiguous 576 doubles in row-major
-                    // order — identical layout to a flat[576] array.
                     double* mdct_flat = &mdct_out[0][0];
 
                     if (enc->vbr_mode) {
@@ -763,13 +759,6 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
                 subband_out_d[ch], gr,
                 enc->prev_energy_valid, &enc->prev_granule_energy[ch]);
 
-            double sub_gr[32][18];
-            for (int sb = 0; sb < 32; sb++)
-                for (int ts = 0; ts < 18; ts++) {
-                    double v = subband_out_d[ch][sb][t0 + ts];
-                    sub_gr[sb][ts] = ((sb & 1) && (ts & 1)) ? -v : v;
-                }
-
             // Short blocks disabled while the reservoir is disabled (see the
             // int16 path above for the rationale).
             static constexpr bool kShortBlocksEnabled = false;
@@ -777,14 +766,18 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
                              enc->quality_mode >= 1;
 
             if (use_short) {
+                double sub_gr[32][18];
+                for (int sb = 0; sb < 32; sb++)
+                    for (int ts = 0; ts < 18; ts++) {
+                        double v = subband_out_d[ch][sb][t0 + ts];
+                        sub_gr[sb][ts] = ((sb & 1) && (ts & 1)) ? -v : v;
+                    }
                 double mdct_out_short[32][3][6];
                 enc->mdct[ch].process_short(sub_gr, mdct_out_short);
 
                 double mdct_flat[576];
                 reorder_short_blocks(mdct_out_short, mdct_flat, enc->sr_index);
 
-                // Short-block quantization with the matching region layout
-                // (see glint_encode for the rationale).
                 if (enc->vbr_mode) {
                     granule_info[gr][ch] = quantize_granule_vbr(mdct_flat, gr_bits,
                         enc->sr_index, enc->quality_mode, enc->vbr_quality,
@@ -797,7 +790,7 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
                 granule_info[gr][ch].block_type = 2;
             } else {
                 double mdct_out[32][18];
-                enc->mdct[ch].process(sub_gr, mdct_out);
+                enc->mdct[ch].process_strided(subband_out_d[ch], t0, mdct_out);
                 alias_reduce_d(mdct_out);
 
                 double* mdct_flat = &mdct_out[0][0];

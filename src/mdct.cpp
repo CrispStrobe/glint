@@ -129,6 +129,69 @@ void MDCT::process(const double subband[32][18], double mdct_out[32][18]) {
     }
 }
 
+void MDCT::process_strided(const double subband_out[32][36], int slot_offset,
+                           double mdct_out[32][18]) {
+    // Read directly from subband_out with stride 36, applying frequency
+    // inversion inline: negate odd subbands at odd time slots.
+    for (int sb = 0; sb < 32; sb++) {
+        double x[36];
+        bool invert = (sb & 1);
+        for (int n = 0; n < 18; n++) x[n] = prev_[sb][n];
+        if (invert) {
+            for (int ts = 0; ts < 18; ts++)
+                x[18 + ts] = (ts & 1) ? -subband_out[sb][slot_offset + ts]
+                                       :  subband_out[sb][slot_offset + ts];
+        } else {
+            for (int ts = 0; ts < 18; ts++)
+                x[18 + ts] = subband_out[sb][slot_offset + ts];
+        }
+
+        // Fused MDCT (same as process())
+        for (int k = 0; k < 18; k++) {
+#if defined(__AVX2__) || defined(__AVX__)
+            __m256d vsum0 = _mm256_setzero_pd();
+            __m256d vsum1 = _mm256_setzero_pd();
+            for (int n = 0; n < 32; n += 8) {
+                vsum0 = _mm256_add_pd(vsum0, _mm256_mul_pd(_mm256_loadu_pd(&x[n]), _mm256_loadu_pd(&mdct_wincos_d_t[k][n])));
+                vsum1 = _mm256_add_pd(vsum1, _mm256_mul_pd(_mm256_loadu_pd(&x[n+4]), _mm256_loadu_pd(&mdct_wincos_d_t[k][n+4])));
+            }
+            __m256d vxt = _mm256_loadu_pd(&x[32]);
+            __m256d vct = _mm256_loadu_pd(&mdct_wincos_d_t[k][32]);
+            vsum0 = _mm256_add_pd(vsum0, _mm256_mul_pd(vxt, vct));
+            vsum0 = _mm256_add_pd(vsum0, vsum1);
+            __m128d lo = _mm256_castpd256_pd128(vsum0);
+            __m128d hi = _mm256_extractf128_pd(vsum0, 1);
+            lo = _mm_add_pd(lo, hi);
+            mdct_out[sb][k] = _mm_cvtsd_f64(lo) + _mm_cvtsd_f64(_mm_unpackhi_pd(lo, lo));
+#elif defined(__SSE2__)
+            __m128d vsum0 = _mm_setzero_pd(), vsum1 = _mm_setzero_pd();
+            for (int n = 0; n < 36; n += 4) {
+                vsum0 = _mm_add_pd(vsum0, _mm_mul_pd(_mm_loadu_pd(&x[n]), _mm_loadu_pd(&mdct_wincos_d_t[k][n])));
+                vsum1 = _mm_add_pd(vsum1, _mm_mul_pd(_mm_loadu_pd(&x[n+2]), _mm_loadu_pd(&mdct_wincos_d_t[k][n+2])));
+            }
+            vsum0 = _mm_add_pd(vsum0, vsum1);
+            double tmp[2]; _mm_storeu_pd(tmp, vsum0);
+            mdct_out[sb][k] = tmp[0] + tmp[1];
+#else
+            double sum = 0.0;
+            for (int n = 0; n < 36; n++)
+                sum += x[n] * mdct_wincos_d[n][k];
+            mdct_out[sb][k] = sum;
+#endif
+        }
+
+        // Store prev for next granule (with freq inversion applied)
+        if (invert) {
+            for (int ts = 0; ts < 18; ts++)
+                prev_[sb][ts] = (ts & 1) ? -subband_out[sb][slot_offset + ts]
+                                          :  subband_out[sb][slot_offset + ts];
+        } else {
+            for (int ts = 0; ts < 18; ts++)
+                prev_[sb][ts] = subband_out[sb][slot_offset + ts];
+        }
+    }
+}
+
 // Short-block MDCT: 12-point transform, 3 windows per subband
 // ISO 11172-3: X[win][k] = sum_{n=0}^{11} z[n] * cos(pi/24 * (2n+7) * (2k+1))
 // Window: sin(pi/12 * (n + 0.5))
