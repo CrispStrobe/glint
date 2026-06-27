@@ -7,7 +7,7 @@ encoder lineage.
 Implements the full MPEG-1/2/2.5 Layer III encoding pipeline from the
 ISO 11172-3 and ISO 13818-3 standards. No third-party encoder code
 referenced. Designed for embedded and real-time use: the fixed-point
-path needs only ~42 KB RAM and no FPU.
+path needs only ~46 KB RAM and no FPU.
 
 ## Features
 
@@ -23,7 +23,7 @@ path needs only ~42 KB RAM and no FPU.
   mu-law, WAVE_FORMAT_EXTENSIBLE, raw PCM (`-r`)
 - **Streaming API**: callback-based output for real-time use
 - **Bindings**: Python (ctypes), Rust (FFI + safe), Dart (Flutter FFI)
-- **Embedded**: ~42 KB RAM (fixed-point), fits ESP32/RP2040/STM32F4
+- **Embedded**: ~46 KB RAM (fixed-point), fits ESP32/RP2040/STM32F4
 
 ## Benchmarks
 
@@ -33,19 +33,19 @@ path needs only ~42 KB RAM and no FPU.
 
 | Mode | SNR | seg-SNR | LSD | speed (x86-64) |
 |---|---|---|---|---|
-| -q speed | 14.3 dB | 14.7 dB | 18.9 dB | ~17× |
-| **-q normal** | **14.2 dB** | **14.5 dB** | **18.5 dB** | ~5× |
-| -q best | 15.1 dB | 15.1 dB | 18.5 dB | ~2.5× |
+| -q speed | 13.8 dB | 14.6 dB | 18.9 dB | ~22× |
+| **-q normal** | **13.9 dB** | **14.4 dB** | **18.6 dB** | ~8× |
+| -q best | 15.1 dB | 15.1 dB | 18.6 dB | ~5× |
 
 **Per-band SNR vs source** (256 kbps stereo):
 
 | Mode | 0–1 kHz | 1–4 kHz | 4–8 kHz | 8–16 kHz |
 |---|---|---|---|---|
-| -q speed | 14.7 dB | 4.9 dB | 6.5 dB | 1.4 dB |
-| -q normal | 14.5 dB | 5.1 dB | 7.1 dB | 1.4 dB |
-| -q best | 15.6 dB | 5.1 dB | 7.2 dB | 1.4 dB |
+| -q speed | 14.1 dB | 5.1 dB | 6.8 dB | 1.4 dB |
+| -q normal | 14.3 dB | 5.2 dB | 7.2 dB | 1.4 dB |
+| -q best | 15.5 dB | 5.1 dB | 7.2 dB | 1.4 dB |
 
-Mono encoding at 128 kbps reaches ~38× realtime on x86-64 (Intel Xeon,
+Mono encoding at 128 kbps reaches ~80× realtime on x86-64 (Intel Xeon,
 `-O3 -march=native -ffast-math`, LTO). For a deterministic local speed/quality
 run: `python tests/benchmark_encoder.py build/glint_cli`.
 
@@ -55,8 +55,8 @@ run: `python tests/benchmark_encoder.py build/glint_cli`.
 |---|---|---|---|
 | Library (.text) | 158 KB | 127 KB | 225 KB |
 | Encoder state | 58 KB | 34 KB | — |
-| Static tables | 90 KB | 8 KB | — |
-| **Total RAM** | **148 KB** | **42 KB** | ~100 KB |
+| Static tables | 130 KB | 12 KB | — |
+| **Total RAM** | **188 KB** | **46 KB** | ~100 KB |
 | Process RSS | ~4.5 MB | ~3 MB | — |
 | License | **MIT** | **MIT** | LGPL v2 |
 
@@ -72,9 +72,9 @@ cmake --build build -j$(nproc)
 
 | Build mode | Flag | RAM (state+tables) |
 |---|---|---|
-| `double` (default) | — | 148 KB |
-| `fixed` | `-DGLINT_MODE=fixed` | 42 KB (no FPU needed) |
-| `both` | `-DGLINT_MODE=both` | ~190 KB (runtime `-p` switch) |
+| `double` (default) | — | 188 KB |
+| `fixed` | `-DGLINT_MODE=fixed` | 46 KB (no FPU needed) |
+| `both` | `-DGLINT_MODE=both` | ~234 KB (runtime `-p` switch) |
 
 ### Cross-compilation
 
@@ -167,9 +167,10 @@ PCM input → Subband Analysis → MDCT → Alias Reduction → Quantization
 - **MDCT**: 36-point (long) with fused window×cosine×normalization table
   (eliminates separate windowing loop and per-output /288 division), transposed
   layout for SIMD (12-point short blocks implemented but gated off — see roadmap)
-- **Quantization**: pow34 table lookup, anti-clipping gain floor, binary-search
-  gain to the bit budget (`quantize_base`), wrapped in a per-granule input-scale
-  search that minimizes decoder-reconstruction MSE (`quantize_granule`)
+- **Quantization**: double-precision pow34 table with shared precomputation
+  across scale factors, anti-clipping gain floor, binary-search gain to the bit
+  budget (`quantize_base`), wrapped in a per-granule input-scale search that
+  minimizes decoder-reconstruction MSE via `cbrt`-accelerated `granule_mse`
 - **Huffman**: O(1) max-value table selection, 34 ISO tables, SCFSI
 - **Bitstream**: 32-bit accumulator; each frame self-contained (bit reservoir
   mechanism on the `feature/bit-reservoir` branch, off by default — see roadmap)
@@ -186,7 +187,7 @@ glint/
 │   ├── python/                ctypes wrapper + pip packaging
 │   ├── rust/                  glint-sys (FFI) + glint (safe)
 │   └── dart/                  Flutter FFI
-├── esp-idf/                   ESP32 component (50 KB RAM)
+├── esp-idf/                   ESP32 component (~46 KB RAM)
 ├── packaging/vcpkg/           vcpkg port
 ├── .github/workflows/         CI + release (9 platforms)
 └── CMakeLists.txt
@@ -226,7 +227,7 @@ passes. Measured on a 1-min 256 kbps stereo speech clip (`double`==`fixed`):
 | RMS level            | −25.9 / −21.4 / −19.7 | within ~0.2 dB of source, all tiers |
 | 95% rolloff          | 1031 / 1031 / 4359 Hz | 3422 / 5344 / 5133 Hz |
 | overall SNR          | 5.1 / 10.1 / 15.0 dB  | 12.5 / 14.1 / 14.7 dB |
-| encode speed         | —                     | ~17× / 5× / 2.5× realtime (x86-64 Xeon) |
+| encode speed         | —                     | ~22× / 8× / 5× realtime (x86-64 Xeon) |
 
 Verify with `python tests/measure_audio.py original.wav out.mp3` (want RMS
 within ~0.5 dB of source, rolloff near source, `double`==`fixed`) and
