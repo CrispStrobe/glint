@@ -86,7 +86,7 @@ static void test_pow34_table() {
     double max_err = 0;
     for (int x = 1; x < 1000; x++) {
         double expected = std::pow(static_cast<double>(x), 0.75);
-        double from_table = glint::tables::pow34_table[x] / 65536.0;
+        double from_table = glint::tables::pow34_table[x];
         double err = std::fabs(from_table - expected);
         if (err > max_err) max_err = err;
     }

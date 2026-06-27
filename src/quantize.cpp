@@ -34,9 +34,7 @@ static double fast_pow34(double x) {
     if (x < static_cast<double>(tables::kPow34TableSize - 1)) {
         int idx = static_cast<int>(x);
         double frac = x - idx;
-        double a = tables::pow34_table[idx] * (1.0 / 65536.0);
-        double b = tables::pow34_table[idx + 1] * (1.0 / 65536.0);
-        return a + frac * (b - a);  // linear interpolation
+        return tables::pow34_table[idx] + frac * (tables::pow34_table[idx + 1] - tables::pow34_table[idx]);
     }
     return std::pow(x, 0.75);
 }
@@ -242,22 +240,26 @@ static double granule_mse(const GranuleInfo& gi, const double* mdct_in,
     double noise = 0.0;
     double src_band[22] = {};
     double rec_band[22] = {};
-    int b = 0;
-    for (int i = 0; i < 576; i++) {
-        while (b < 21 && i >= sfb[b + 1]) b++;
+    // Per-band iteration: hoists sf_d computation (std::pow) out of inner loop
+    for (int b = 0; b <= 21; b++) {
+        int start = sfb[b];
+        int end = (b < 21) ? sfb[b + 1] : 576;
+        if (start >= end) continue;
         int sf = gi.scalefac[b];
         if (gi.preflag && b < 21) sf += tables::preemphasis[b];
         double sf_d = std::pow(2.0, -0.5 * sf * (1 + gi.scalefac_scale));
-        double xr_hat = 0.0;
-        if (gi.ix[i] != 0) {
-            double a = std::abs(static_cast<double>(gi.ix[i]));
-            xr_hat = std::copysign(std::pow(a, 4.0/3.0) * decoder_gain * sf_d,
-                                   mdct_in[i]);
+        double gain_sf = decoder_gain * sf_d;
+        for (int i = start; i < end; i++) {
+            double xr_hat = 0.0;
+            if (gi.ix[i] != 0) {
+                double a = std::abs(static_cast<double>(gi.ix[i]));
+                xr_hat = std::copysign(a * std::cbrt(a) * gain_sf, mdct_in[i]);
+            }
+            double err = mdct_in[i] - xr_hat;
+            noise += err * err;
+            src_band[b] += mdct_in[i] * mdct_in[i];
+            rec_band[b] += xr_hat * xr_hat;
         }
-        double err = mdct_in[i] - xr_hat;
-        noise += err * err;
-        src_band[b] += mdct_in[i] * mdct_in[i];
-        rec_band[b] += xr_hat * xr_hat;
     }
 
     if (quality_mode <= 0) return noise;

@@ -43,6 +43,15 @@ glint/main, not replacing it.
 - Changed from default `-O2` to `-O3` for more aggressive optimization
 - Added `CMAKE_INTERPROCEDURAL_OPTIMIZATION` for cross-TU inlining
 
+### 3. Fix scalefac[21] OOB + per-band quantizer (quantize.cpp)
+- **Impact:** bit-identical output, eliminates undefined behavior, enables
+  per-band loop optimization
+- Extended `scalefac[21]` → `scalefac[22]` with explicit HF tail band
+- Mirror `scalefac_compress` into `scalefac[21]` after each computation
+- Fixed `granule_mse` to use `band < 21` (matching encoder)
+- Restructured `fill_quant_cache` and uncached `quantize_and_count` as
+  per-band loops, hoisting sf_scale out of inner loop
+
 ## Already in glint/main (not re-implemented)
 - pow34 lookup table (10000 entries, uint32 with 1/65536 scaling)
 - QuantCache (precompute pow34*sf once, reuse across binary search)
