@@ -26,47 +26,47 @@ struct HuffRegions {
 // signs: sign flags (true = negative) for each value
 // regions: region info
 // Returns total bits needed
-int huffman_count_bits(const int* ix, const HuffRegions& regions,
+int huffman_count_bits(const int16_t* ix, const HuffRegions& regions,
                        int sr_index);
 
 // Count bits with early exit. Returns a value greater than bit_limit as soon as
 // the partial count exceeds bit_limit; otherwise returns the exact count.
-int huffman_count_bits_limited(const int* ix, const HuffRegions& regions,
+int huffman_count_bits_limited(const int16_t* ix, const HuffRegions& regions,
                                int sr_index, int bit_limit);
 
 // Encode the quantized spectrum into the bitstream
 // ix: quantized spectrum (576 values, signed)
 // regions: region info
 // bs: bitstream writer to output to
-void huffman_encode(const int* ix, const HuffRegions& regions,
+void huffman_encode(const int16_t* ix, const HuffRegions& regions,
                     int sr_index, BitstreamWriter& bs);
 
 // Determine regions from quantized spectrum
 // ix: quantized spectrum (576 values, unsigned magnitudes)
 // sr_index: sample rate index (for scalefactor band boundaries)
 // Returns filled HuffRegions struct
-HuffRegions huffman_determine_regions(const int* ix, int sr_index);
+HuffRegions huffman_determine_regions(const int16_t* ix, int sr_index);
 
 // Determine regions for a short (block_type 2) granule. Short blocks use a
 // fixed region0_end of 36 and only two big-value sub-regions, so they need a
 // different region layout than long blocks. The gain search and the final
 // encode MUST use the same layout, otherwise the stored part2_3_length will
 // not match the bits actually written.
-HuffRegions huffman_determine_regions_short(const int* ix, int sr_index);
+HuffRegions huffman_determine_regions_short(const int16_t* ix, int sr_index);
 
 // Determine regions when the caller already knows the nonzero/count1
 // boundaries from quantization. count1_start is the first index of the count1
 // region and rzero is the first trailing-zero index.
-HuffRegions huffman_determine_regions_from_bounds(const int* ix, int sr_index,
+HuffRegions huffman_determine_regions_from_bounds(const int16_t* ix, int sr_index,
                                                   int rzero, int count1_start);
-HuffRegions huffman_determine_regions_short_from_bounds(const int* ix,
+HuffRegions huffman_determine_regions_short_from_bounds(const int16_t* ix,
                                                         int sr_index,
                                                         int rzero,
                                                         int count1_start);
 
 // Select the best Huffman table for a region
 // Returns table_id that minimizes bit count
-int select_best_table(const int* ix, int start, int end);
+int select_best_table(const int16_t* ix, int start, int end);
 
 } // namespace glint
 

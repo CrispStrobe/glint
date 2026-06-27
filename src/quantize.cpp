@@ -46,7 +46,7 @@ struct QuantCache {
     int sign[576];        // +1 or -1
 };
 
-static int find_count1_start(const int* ix, int rzero) {
+static int find_count1_start(const int16_t* ix, int rzero) {
     int count1_start = (rzero + 3) & ~3;
     if (count1_start > rzero) count1_start = rzero;
 
@@ -99,7 +99,7 @@ static void fill_quant_cache(QuantCache& cache, const double* mdct_in,
     }
 }
 
-static int quantize_and_count(const double* mdct_in, int* ix,
+static int quantize_and_count(const double* mdct_in, int16_t* ix,
                                int global_gain, const int scalefac[22],
                                int scalefac_scale, int preflag,
                                int sr_index,
