@@ -44,7 +44,7 @@ static double fast_pow34(double x) {
 // Cache for pre-computed per-coefficient values (constant across binary search)
 struct QuantCache {
     double pow34_sf[576]; // pow34(|xr|) * sf_scale - precomputed
-    int sign[576];        // +1 or -1
+    int8_t sign[576];     // +1 or -1
 };
 
 static int find_count1_start(const int16_t* ix, int rzero) {
