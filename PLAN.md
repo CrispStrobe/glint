@@ -51,12 +51,29 @@ glint/main, not replacing it.
 - Huffman bit-limited counting (early exit)
 - Short blocks, psychoacoustic model, VBR
 
+## Investigated and Rejected
+
+### Per-band quantizer iteration
+- **Tried:** restructure `fill_quant_cache` and uncached `quantize_and_count`
+  from per-sample (with `while (band < 21)` tracking) to per-band loops that
+  hoist `sf_scale` computation.
+- **Result:** -17 dB SNR regression (18.4 → 1.3 dB). Root cause: the original
+  while-loop lets `band` reach 21 and reads `scalefac[21]` (out-of-bounds,
+  actually reads `scalefac_compress` from the adjacent struct field). After
+  `recompute_scalefac_encoding()` sets `scalefac_compress` to non-zero, the
+  out-of-bounds read changes the quantization behavior. The encoder's scale
+  search has adapted to this; changing it breaks the output. Fixing the OOB
+  read is a separate task that requires re-tuning the scale search.
+- **Additionally:** the hot path (cached quantize at lines 99-105) is already
+  band-agnostic (`pow34_sf[i] * base_step + 0.4054`) so per-band iteration
+  cannot help there. The cache fill runs only ~3 times per granule vs 4608
+  iterations for the cached binary search.
+- **Verdict:** Not viable without also fixing the OOB read and re-tuning.
+
 ## Remaining Ideas (not yet implemented)
 - **PGO** (profile-guided optimization): 5-15% expected
-- **Per-band quantizer iteration**: restructure `quantize_and_count` inner
-  loop from per-sample with while-loop to per-band. Hoists `step*sf_scale`.
-  Already in sync-main, gave ~15-30% speedup — needs careful porting to
-  glint/main's QuantCache-based path.
+- **Fix scalefac[21] OOB read**: extend `scalefac` array to 22 entries with
+  explicit zero for band 21, then safely apply per-band optimization
 - **Fused subband+MDCT**: eliminate intermediate 32x36 buffer by streaming
   subband output directly into MDCT accumulator
 - **Fixed-point signal path activation**: full Q31 conversion for embedded
