@@ -14,6 +14,10 @@ class MDCT {
 public:
     MDCT();
     void process(const double subband[32][18], double mdct_out[32][18]);
+    // Read directly from subband_out[32][36] at slot offset, applying
+    // frequency inversion inline. Eliminates the sub_gr copy.
+    void process_strided(const double subband_out[32][36], int slot_offset,
+                         double mdct_out[32][18]);
     void process_short(const double subband[32][18], double mdct_out[32][3][6]);
     void reset();
 private:

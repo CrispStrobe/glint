@@ -415,8 +415,22 @@ static GranuleInfo quantize_base(const double* mdct_in, int available_bits,
     fill_quant_cache(cache, mdct_in, info.scalefac, info.scalefac_scale,
                      info.preflag, sr_index, base_pow34, base_sign, f_pow34);
 
+    // Tighten binary search upper bound: gain where the peak quantizes to ~1.
+    // pow34_peak * gain_table[g] + 0.4054 < 1.0 → g > 210 - (16/3)*log2(0.6/pow34_peak)
+    int max_gain = 255;
+    if (max_abs > 0.0) {
+        double pow34_peak = (base_pow34 && scale_factor > 0.0)
+            ? fast_pow34(max_abs * scale_factor)
+            : fast_pow34(max_abs);
+        if (pow34_peak > 0.0) {
+            double g_max = 210.0 - (16.0 / 3.0) * std::log2(0.6 / pow34_peak);
+            int est = static_cast<int>(g_max) + 2;
+            if (est < max_gain && est > min_gain) max_gain = est;
+        }
+    }
+
     // Binary search for global_gain.
-    int lo = min_gain, hi = 255, best_gain = 255;
+    int lo = min_gain, hi = max_gain, best_gain = max_gain;
 
     for (int iter = 0; iter < 8 && lo <= hi; iter++) {
         int gain = (lo + hi) / 2;
@@ -492,7 +506,7 @@ static GranuleInfo quantize_base(const double* mdct_in, int available_bits,
                              info.scalefac_scale, info.preflag, sr_index,
                              base_pow34, base_sign, f_pow34);
 
-            lo = min_gain; hi = 255; best_gain = 255;
+            lo = min_gain; hi = max_gain; best_gain = max_gain;
             for (int iter = 0; iter < 8 && lo <= hi; iter++) {
                 int gain = (lo + hi) / 2;
                 int bits = quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
