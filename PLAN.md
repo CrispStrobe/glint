@@ -2,7 +2,9 @@
 
 ## A/B Test Results (2026-06-27)
 
-All measurements on x86-64 (Intel Xeon), `-O3 -march=native -ffast-math`, LTO.
+All measurements on x86-64 (Intel Xeon Skylake, 4 cores), `-O3 -march=native -ffast-math`.
+A/B tests use `tests/ab_benchmark.py` with `taskset` core pinning, interleaved runs,
+warmup discards, and Mann-Whitney U significance testing.
 
 ### Baseline: glint/main (unmodified)
 - Unit tests: 30/30
@@ -12,21 +14,27 @@ All measurements on x86-64 (Intel Xeon), `-O3 -march=native -ffast-math`, LTO.
 - RAM (encoder state + tables): 148 KB (double), 42 KB (fixed)
 - Fidelity (multi-tone 128kbps): SNR=18.4 dB, segSNR=18.5 dB
 
-### After all optimizations
+### After optimizations #1-15
 - Unit tests: 30/30
 - Quality tests: ALL PASS
 - Speed (256 kbps stereo): speed=23.7x, normal=13.0x, best=5.0x
 - Speed (mono 128kbps, 5min): ~80x realtime (+167%)
 - RAM (encoder state + tables): 188 KB (double), 46 KB (fixed)
-- Fidelity (256 kbps stereo): SNR 14.8–15.2 dB, all tiers within thresholds
+- Fidelity (multi-tone 128kbps): SNR=17.6 dB (-0.8 dB from #6, within thresholds)
+
+### After PGO (#16) — A/B tested, 10 runs, taskset core 3
+- Unit tests: 30/30
+- Quality tests: ALL PASS
+- Speed (256 kbps stereo): speed=34.8x, normal=16.0x, best=6.1x
+- Fidelity (multi-tone 128kbps): SNR=17.6 dB (identical to pre-PGO)
 
 ### Speed improvement summary (256 kbps stereo)
 
-| Mode | Baseline | Optimized | Improvement |
-|---|---|---|---|
-| speed | 16.4x | **23.7x** | +45% |
-| normal | 5.4x | **13.0x** | +141% |
-| best | 2.3x | **5.0x** | +117% |
+| Mode | Baseline | After #1-15 | After PGO | Total improvement |
+|---|---|---|---|---|
+| speed | 16.4x | 23.7x | **34.8x** | +112% |
+| normal | 5.4x | 13.0x | **16.0x** | +196% |
+| best | 2.3x | 5.0x | **6.1x** | +165% |
 
 ## Implemented Optimizations
 
@@ -124,17 +132,24 @@ All measurements on x86-64 (Intel Xeon), `-O3 -march=native -ffast-math`, LTO.
   - sign: 2304 → 576 (int8_t)
   - ix: 2304 → 1152 (int16_t)
 
+### 16. PGO — profile-guided optimization (CMakeLists.txt) — DONE
+- **Impact:** +20-25% across all tiers (A/B tested, p<0.002)
+- New `GLINT_PGO` cmake option: `off` (default), `generate`, `use`
+- Training: 4 encodes covering speed/normal/best + mono/stereo
+- GCC 13 PGO + LTO crashes (miscompilation in cleanup); LTO auto-disabled
+  for PGO builds. PGO without LTO still beats baseline with LTO by 20-25%
+  since hot loops are within single translation units.
+
 ## Remaining Ideas
 
-**16. Batch multi-gain quantize** — process all 8 binary search gains in a
-single pass through the 576 coefficients. Major restructuring required.
-
-**17. Fused subband+MDCT streaming** — eliminate the intermediate
-`subband_out[32][36]` buffer. Major refactor of analyze() and MDCT.
-
-**18. Track max_val during quantize** — skip Huffman region max-value scans
+**17. Track max_val during quantize** — skip Huffman region max-value scans
 by tracking max_val per subband group during the quantize loop.
 
-**19. PGO** — profile-guided optimization, ~5% expected
+**18. Batch multi-gain quantize** — process all 8 binary search gains in a
+single pass through the 576 coefficients. Major restructuring required.
+
+**19. Fused subband+MDCT streaming** — eliminate the intermediate
+`subband_out[32][36]` buffer. Major refactor of analyze() and MDCT.
+
 **20. Parallel channels** — encode L and R concurrently (2× for stereo)
 **21. Fixed-point signal path** — full Q31 conversion for embedded targets
