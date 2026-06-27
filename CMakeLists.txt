@@ -10,10 +10,12 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
         add_compile_options(/O2 /fp:fast)
     elseif(NOT CMAKE_CROSSCOMPILING AND CMAKE_SYSTEM_PROCESSOR STREQUAL CMAKE_HOST_SYSTEM_PROCESSOR)
         # -march=native only works for native builds, not cross-compilation
-        add_compile_options(-march=native -ffast-math)
+        add_compile_options(-O3 -march=native -ffast-math)
     else()
-        add_compile_options(-O2 -ffast-math)
+        add_compile_options(-O3 -ffast-math)
     endif()
+    # Link-time optimization for cross-TU inlining
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
 
 # Signal path mode:

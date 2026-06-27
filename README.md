@@ -7,7 +7,7 @@ encoder lineage.
 Implements the full MPEG-1/2/2.5 Layer III encoding pipeline from the
 ISO 11172-3 and ISO 13818-3 standards. No third-party encoder code
 referenced. Designed for embedded and real-time use: the fixed-point
-path needs only 50 KB RAM and no FPU.
+path needs only ~42 KB RAM and no FPU.
 
 ## Features
 
@@ -23,48 +23,45 @@ path needs only 50 KB RAM and no FPU.
   mu-law, WAVE_FORMAT_EXTENSIBLE, raw PCM (`-r`)
 - **Streaming API**: callback-based output for real-time use
 - **Bindings**: Python (ctypes), Rust (FFI + safe), Dart (Flutter FFI)
-- **Embedded**: 50 KB RAM (fixed-point), fits ESP32/RP2040/STM32F4
+- **Embedded**: ~42 KB RAM (fixed-point), fits ESP32/RP2040/STM32F4
 
 ## Benchmarks
 
-**Quality** — speech, 256 kbps stereo, vs. the original (1-min clip, measured
-with `tests/measure_audio.py`; `double` and `fixed` paths are identical):
+**Quality** — deterministic speech-like stereo signal, 256 kbps, measured with
+`tests/benchmark_encoder.py` and `tests/measure_audio.py`. Both signal paths
+(`double` and `fixed`) produce identical output:
 
-| Mode | SNR | seg-SNR | centroid | %E>10 kHz | 95% rolloff | RMS vs src | speed |
-|---|---|---|---|---|---|---|---|
-| -q speed | 12.5 dB | 10.8 dB | 744 Hz | 0.34% | 3.4 kHz | ±0.2 dB | ~70× |
-| **-q normal** | **14.1 dB** | **13.2 dB** | 830 Hz | 0.48% | 5.3 kHz | ±0.2 dB | ~28× |
-| -q best | 14.7 dB | 13.8 dB | 820 Hz | 0.47% | 5.1 kHz | ±0.2 dB | ~12× |
+| Mode | SNR | seg-SNR | LSD | speed (x86-64) |
+|---|---|---|---|---|
+| -q speed | 14.3 dB | 14.7 dB | 18.9 dB | ~17× |
+| **-q normal** | **14.2 dB** | **14.5 dB** | **18.5 dB** | ~5× |
+| -q best | 15.1 dB | 15.1 dB | 18.5 dB | ~2.5× |
 
-Source rolloff 5.4 kHz, centroid 892 Hz, %E>10 kHz 0.72%. Both signal paths
-are numerically identical. Apple Silicon, 256 kbps stereo. For a deterministic
-local speed/quality run without external audio, use
-`python tests/benchmark_encoder.py build/glint_cli`.
-
-**Per-band SNR vs source** (256 kbps stereo, speech):
+**Per-band SNR vs source** (256 kbps stereo):
 
 | Mode | 0–1 kHz | 1–4 kHz | 4–8 kHz | 8–16 kHz |
 |---|---|---|---|---|
-| -q speed | 13.2 dB | 8.9 dB | 10.9 dB | 9.8 dB |
-| -q normal | 15.1 dB | 9.6 dB | 11.7 dB | 10.9 dB |
-| -q best | 16.0 dB | 9.8 dB | 12.0 dB | 11.1 dB |
+| -q speed | 14.7 dB | 4.9 dB | 6.5 dB | 1.4 dB |
+| -q normal | 14.5 dB | 5.1 dB | 7.1 dB | 1.4 dB |
+| -q best | 15.6 dB | 5.1 dB | 7.2 dB | 1.4 dB |
 
-Normal/best use an envelope-aware scale-search objective that penalizes decoded
-scalefactor bands whose energy collapses relative to the source. This closes
-most of the source rolloff gap without pre-emphasizing the input spectrum.
-Noise still concentrates in the 0–1 kHz band (~62–74% of total error power at
-all tiers); HF above 16 kHz is absent (quantizer dead-zone at 256 kbps speech).
+Mono encoding at 128 kbps reaches ~38× realtime on x86-64 (Intel Xeon,
+`-O3 -march=native -ffast-math`, LTO). For a deterministic local speed/quality
+run: `python tests/benchmark_encoder.py build/glint_cli`.
 
 **Footprint**:
 
 | | glint double | glint fixed | Shine |
 |---|---|---|---|
-| Library | 158 KB | 127 KB | 225 KB |
-| RAM | 141 KB | **50 KB** | ~100 KB |
+| Library (.text) | 158 KB | 127 KB | 225 KB |
+| Encoder state | 58 KB | 34 KB | — |
+| Static tables | 90 KB | 8 KB | — |
+| **Total RAM** | **148 KB** | **42 KB** | ~100 KB |
+| Process RSS | ~4.5 MB | ~3 MB | — |
 | License | **MIT** | **MIT** | LGPL v2 |
 
-MIT licensed, 50 KB RAM in fixed-point mode. Whisper ASR round-trip:
-91% word similarity.
+Fixed-point mode fits comfortably in ESP32's 520 KB SRAM (<10% usage).
+Whisper ASR round-trip: 91% word similarity.
 
 ## Building
 
@@ -73,11 +70,11 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 ```
 
-| Build mode | Flag | RAM footprint |
+| Build mode | Flag | RAM (state+tables) |
 |---|---|---|
-| `double` (default) | — | 141 KB |
-| `fixed` | `-DGLINT_MODE=fixed` | 50 KB (no FPU needed) |
-| `both` | `-DGLINT_MODE=both` | 191 KB (runtime `-p` switch) |
+| `double` (default) | — | 148 KB |
+| `fixed` | `-DGLINT_MODE=fixed` | 42 KB (no FPU needed) |
+| `both` | `-DGLINT_MODE=both` | ~190 KB (runtime `-p` switch) |
 
 ### Cross-compilation
 
@@ -167,9 +164,9 @@ PCM input → Subband Analysis → MDCT → Alias Reduction → Quantization
 ```
 
 - **Subband**: 512-point polyphase filter bank (AVX/SSE2/NEON vectorized)
-- **MDCT**: 36-point (long) with sine window, /288 normalization, transposed
-  cosine table for SIMD (12-point short blocks implemented but gated off — see
-  roadmap)
+- **MDCT**: 36-point (long) with fused window×cosine×normalization table
+  (eliminates separate windowing loop and per-output /288 division), transposed
+  layout for SIMD (12-point short blocks implemented but gated off — see roadmap)
 - **Quantization**: pow34 table lookup, anti-clipping gain floor, binary-search
   gain to the bit budget (`quantize_base`), wrapped in a per-granule input-scale
   search that minimizes decoder-reconstruction MSE (`quantize_granule`)
@@ -229,7 +226,7 @@ passes. Measured on a 1-min 256 kbps stereo speech clip (`double`==`fixed`):
 | RMS level            | −25.9 / −21.4 / −19.7 | within ~0.2 dB of source, all tiers |
 | 95% rolloff          | 1031 / 1031 / 4359 Hz | 3422 / 5344 / 5133 Hz |
 | overall SNR          | 5.1 / 10.1 / 15.0 dB  | 12.5 / 14.1 / 14.7 dB |
-| encode speed         | —                     | ~70× / 28× / 12× realtime (Apple M-series) |
+| encode speed         | —                     | ~17× / 5× / 2.5× realtime (x86-64 Xeon) |
 
 Verify with `python tests/measure_audio.py original.wav out.mp3` (want RMS
 within ~0.5 dB of source, rolloff near source, `double`==`fixed`) and
