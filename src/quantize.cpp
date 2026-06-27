@@ -107,7 +107,8 @@ static int quantize_and_count(const double* mdct_in, int16_t* ix,
                                const QuantCache* cache = nullptr,
                                bool short_block = false,
                                int bit_limit = -1) {
-    init_quant_tables();
+    // Note: init_quant_tables() must be called before this function.
+    // The callers (quantize_base, quantize_granule) handle initialization.
     double base_step = gain_table[global_gain];
 
     // Fused quantize + region detection in a single pass
