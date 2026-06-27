@@ -257,8 +257,8 @@ def main():
                         help="Number of iterations per config (default: 7)")
     parser.add_argument("--warmup", type=int, default=2,
                         help="Warmup runs to discard (default: 2)")
-    parser.add_argument("--core", type=int, default=3,
-                        help="CPU core to pin to via taskset (default: 3)")
+    parser.add_argument("--core", default="3",
+                        help="CPU core(s) to pin to via taskset (default: 3, e.g. '2,3')")
     parser.add_argument("--seconds", type=int, default=30,
                         help="Audio duration in seconds (default: 30)")
     parser.add_argument("--tiers", nargs="+", default=["speed", "normal", "best"],

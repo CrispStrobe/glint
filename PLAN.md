@@ -140,16 +140,31 @@ warmup discards, and Mann-Whitney U significance testing.
   for PGO builds. PGO without LTO still beats baseline with LTO by 20-25%
   since hot loops are within single translation units.
 
-## Remaining Ideas
+## Negative Results (A/B tested, reverted)
 
-**17. Track max_val during quantize** — skip Huffman region max-value scans
-by tracking max_val per subband group during the quantize loop.
+### 17. Track max_val during quantize — REJECTED
+- **Result:** -25% to -31% regression (p<0.001 all tiers)
+- Tracking per-band max |ix| during the cached quantize loop adds branching
+  overhead that far outweighs the saved `select_best_table` scans. The scans
+  operate on L1-hot data (3×576 int16 reads) and are very cheap.
 
-**18. Batch multi-gain quantize** — process all 8 binary search gains in a
-single pass through the 576 coefficients. Major restructuring required.
+### 18. Batch multi-gain quantize — NOT FEASIBLE
+- The binary search is inherently sequential: each iteration's gain depends
+  on whether the previous iteration fit the bit budget. Cannot batch.
 
-**19. Fused subband+MDCT streaming** — eliminate the intermediate
-`subband_out[32][36]` buffer. Major refactor of analyze() and MDCT.
+### 19. Fused subband+MDCT streaming — NOT FEASIBLE
+- MS stereo transform operates on the full `subband_out[32][36]` buffer
+  in-place before MDCT runs. A streaming fusion is incompatible with this
+  without restructuring the entire MS stereo path. High risk, uncertain gain.
 
-**20. Parallel channels** — encode L and R concurrently (2× for stereo)
-**21. Fixed-point signal path** — full Q31 conversion for embedded targets
+### 20. Parallel channels (std::async) — REJECTED
+- **Result:** -5% to -19% regression (p<0.01 all tiers)
+- `std::async` per-frame thread creation/join overhead dominates the
+  per-channel work (~17ms for speed tier). Would need a persistent thread
+  pool to be viable, adding substantial complexity for modest gain.
+
+### 21. Fixed-point signal path — NO BENEFIT on x86
+- **Result:** 0% difference (all p>0.19, n.s.)
+- On x86-64 with SSE2, double-precision FP is as fast as integer math.
+  Quality identical (14.83 dB SNR both). Fixed-point path is for embedded
+  ARM/RISC targets without FPU, not for x86 performance.
