@@ -590,17 +590,29 @@ int main(int argc, char** argv) {
         if (read_count == 0) break;
         int got = static_cast<int>(read_count);
 
-        // Convert and deinterleave
+        // Convert and deinterleave — fast path for 16-bit PCM (>99% of files)
         bool downmix = (enc_channels == 1 && nch == 2);
-        for (int i = 0; i < got; i++) {
-            if (downmix) {
-                int16_t l = convert_sample(raw_buf + i * sample_stride, wav.audio_format, wav.bits_per_sample);
-                int16_t r = convert_sample(raw_buf + i * sample_stride + bytes_per_sample, wav.audio_format, wav.bits_per_sample);
-                channel_buf[0][i] = static_cast<int16_t>((l + r) / 2);
+        if (wav.audio_format == WAVE_FORMAT_PCM && wav.bits_per_sample == 16 && !downmix) {
+            const int16_t* pcm16 = reinterpret_cast<const int16_t*>(raw_buf);
+            if (nch == 1) {
+                std::memcpy(channel_buf[0], pcm16, got * sizeof(int16_t));
             } else {
-                channel_buf[0][i] = convert_sample(raw_buf + i * sample_stride, wav.audio_format, wav.bits_per_sample);
-                if (nch > 1) {
-                    channel_buf[1][i] = convert_sample(raw_buf + i * sample_stride + bytes_per_sample, wav.audio_format, wav.bits_per_sample);
+                for (int i = 0; i < got; i++) {
+                    channel_buf[0][i] = pcm16[i * 2];
+                    channel_buf[1][i] = pcm16[i * 2 + 1];
+                }
+            }
+        } else {
+            for (int i = 0; i < got; i++) {
+                if (downmix) {
+                    int16_t l = convert_sample(raw_buf + i * sample_stride, wav.audio_format, wav.bits_per_sample);
+                    int16_t r = convert_sample(raw_buf + i * sample_stride + bytes_per_sample, wav.audio_format, wav.bits_per_sample);
+                    channel_buf[0][i] = static_cast<int16_t>((l + r) / 2);
+                } else {
+                    channel_buf[0][i] = convert_sample(raw_buf + i * sample_stride, wav.audio_format, wav.bits_per_sample);
+                    if (nch > 1) {
+                        channel_buf[1][i] = convert_sample(raw_buf + i * sample_stride + bytes_per_sample, wav.audio_format, wav.bits_per_sample);
+                    }
                 }
             }
         }
