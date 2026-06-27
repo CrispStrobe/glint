@@ -853,7 +853,7 @@ inline uint32_t get_huff_code(int table_id, int idx) {
 
 // ---------------------------------------------------------------------------
 // 7. x^(3/4) lookup table
-//    Precomputed: pow34_table[x] = round(x^0.75 * 65536) for x = 0..8206
+//    Precomputed: pow34_table[x] = x^0.75 (double) for x = 0..kPow34TableSize-1
 //    Used in quantization: floor(abs(x)^(3/4) * scale + 0.4054)
 //    Computed at runtime in init_tables().
 // ---------------------------------------------------------------------------
@@ -863,7 +863,7 @@ static constexpr int kPow34TableSize = 1000;
 #else
 static constexpr int kPow34TableSize = 10000;
 #endif
-inline uint32_t pow34_table[kPow34TableSize];
+inline double pow34_table[kPow34TableSize];
 
 // ---------------------------------------------------------------------------
 // Psychoacoustic model tables
@@ -963,11 +963,10 @@ inline void init_tables() {
         }
     }
 
-    // ----- x^(3/4) lookup table -----
-    pow34_table[0] = 0;
+    // ----- x^(3/4) lookup table (double precision) -----
+    pow34_table[0] = 0.0;
     for (int x = 1; x < kPow34TableSize; ++x) {
-        double val = std::pow(static_cast<double>(x), 0.75) * 65536.0;
-        pow34_table[x] = static_cast<uint32_t>(val + 0.5);
+        pow34_table[x] = std::pow(static_cast<double>(x), 0.75);
     }
 
     // ----- Subband matrixing table (32x64) -----
