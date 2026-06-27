@@ -12,7 +12,7 @@ namespace glint {
 struct GranuleInfo {
     int ix[576];
     int global_gain;
-    int scalefac[21];
+    int scalefac[22];       // 21 ISO bands + [21] HF tail (mirrors scalefac_compress)
     int scalefac_compress;
     int part2_3_length;
     int part2_length;
