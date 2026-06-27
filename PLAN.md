@@ -53,27 +53,34 @@ glint/main, not replacing it.
 
 ## Investigated and Rejected
 
-### Per-band quantizer iteration
-- **Tried:** restructure `fill_quant_cache` and uncached `quantize_and_count`
-  from per-sample (with `while (band < 21)` tracking) to per-band loops that
-  hoist `sf_scale` computation.
-- **Result:** -17 dB SNR regression (18.4 → 1.3 dB). Root cause: the original
-  while-loop lets `band` reach 21 and reads `scalefac[21]` (out-of-bounds,
-  actually reads `scalefac_compress` from the adjacent struct field). After
-  `recompute_scalefac_encoding()` sets `scalefac_compress` to non-zero, the
-  out-of-bounds read changes the quantization behavior. The encoder's scale
-  search has adapted to this; changing it breaks the output. Fixing the OOB
-  read is a separate task that requires re-tuning the scale search.
+### Per-band quantizer iteration + scalefac[21] OOB fix
+- **Tried:** Fix the UB read of `scalefac[21]` (which reads `scalefac_compress`
+  from the adjacent struct field) by either: (a) extending `scalefac` to [22],
+  (b) clamping band at 20, or (c) both. Then apply per-band loop optimization.
+- **Result:** Every approach causes -17 dB SNR regression (18.4 → 1.3 dB).
+  Root cause: the OOB read acts as an implicit extra scalefactor for the HF
+  tail (indices 418-575). `scalefac_compress` is non-zero after energy-based SF
+  assignment, so it provides an accidental but beneficial boost to HF precision.
+  The per-granule scale search (`quantize_granule`) has been tuned around this
+  behavior — it picks input scale factors whose MSE (via `granule_mse`) is
+  optimal under the mismatch between encoder (`band<21`, reads OOB) and MSE
+  evaluation (`b<20`, clamps at 20). Making them consistent changes the MSE
+  landscape and the search picks worse factors.
 - **Additionally:** the hot path (cached quantize at lines 99-105) is already
   band-agnostic (`pow34_sf[i] * base_step + 0.4054`) so per-band iteration
-  cannot help there. The cache fill runs only ~3 times per granule vs 4608
-  iterations for the cached binary search.
-- **Verdict:** Not viable without also fixing the OOB read and re-tuning.
+  cannot help the innermost loop. The cache fill runs only ~3 times per granule
+  vs 4608 iterations for the cached binary search — not a bottleneck.
+- **To fix properly:** The OOB read must be fixed together with re-tuning the
+  scale search to compensate. Options: (1) add an explicit 22nd band SF for
+  the HF tail and include it in the energy-based assignment, (2) widen the
+  scale search to compensate for lost HF, (3) adjust `granule_mse` weights.
+  This is a quality engineering task, not a mechanical fix.
 
 ## Remaining Ideas (not yet implemented)
 - **PGO** (profile-guided optimization): 5-15% expected
-- **Fix scalefac[21] OOB read**: extend `scalefac` array to 22 entries with
-  explicit zero for band 21, then safely apply per-band optimization
+- **Fix scalefac[21] OOB read + re-tune scale search**: extend `scalefac` to
+  22 entries with explicit HF tail band, re-tune `quantize_granule` scale
+  factors and `granule_mse` weights to compensate (see rejected section)
 - **Fused subband+MDCT**: eliminate intermediate 32x36 buffer by streaming
   subband output directly into MDCT accumulator
 - **Fixed-point signal path activation**: full Q31 conversion for embedded
