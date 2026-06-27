@@ -7,7 +7,7 @@ encoder lineage.
 Implements the full MPEG-1/2/2.5 Layer III encoding pipeline from the
 ISO 11172-3 and ISO 13818-3 standards. No third-party encoder code
 referenced. Designed for embedded and real-time use: the fixed-point
-path needs only ~46 KB RAM and no FPU.
+path needs only ~42 KB RAM and no FPU.
 
 ## Features
 
@@ -23,7 +23,7 @@ path needs only ~46 KB RAM and no FPU.
   mu-law, WAVE_FORMAT_EXTENSIBLE, raw PCM (`-r`)
 - **Streaming API**: callback-based output for real-time use
 - **Bindings**: Python (ctypes), Rust (FFI + safe), Dart (Flutter FFI)
-- **Embedded**: ~46 KB RAM (fixed-point), fits ESP32/RP2040/STM32F4
+- **Embedded**: ~42 KB RAM (fixed-point), fits ESP32/RP2040/STM32F4
 
 ## Benchmarks
 
@@ -55,8 +55,8 @@ run: `python tests/benchmark_encoder.py build/glint_cli`.
 |---|---|---|---|
 | Library (.text) | 158 KB | 127 KB | 225 KB |
 | Encoder state | 58 KB | 34 KB | — |
-| Static tables | 130 KB | 12 KB | — |
-| **Total RAM** | **188 KB** | **46 KB** | ~100 KB |
+| Static tables | 78 KB | 8 KB | — |
+| **Total RAM** | **136 KB** | **42 KB** | ~100 KB |
 | Process RSS | ~4.5 MB | ~3 MB | — |
 | License | **MIT** | **MIT** | LGPL v2 |
 
@@ -72,9 +72,9 @@ cmake --build build -j$(nproc)
 
 | Build mode | Flag | RAM (state+tables) |
 |---|---|---|
-| `double` (default) | — | 188 KB |
-| `fixed` | `-DGLINT_MODE=fixed` | 46 KB (no FPU needed) |
-| `both` | `-DGLINT_MODE=both` | ~234 KB (runtime `-p` switch) |
+| `double` (default) | — | 136 KB |
+| `fixed` | `-DGLINT_MODE=fixed` | 42 KB (no FPU needed) |
+| `both` | `-DGLINT_MODE=both` | ~178 KB (runtime `-p` switch) |
 
 ### Cross-compilation
 
@@ -187,7 +187,7 @@ glint/
 │   ├── python/                ctypes wrapper + pip packaging
 │   ├── rust/                  glint-sys (FFI) + glint (safe)
 │   └── dart/                  Flutter FFI
-├── esp-idf/                   ESP32 component (~46 KB RAM)
+├── esp-idf/                   ESP32 component (~42 KB RAM)
 ├── packaging/vcpkg/           vcpkg port
 ├── .github/workflows/         CI + release (9 platforms)
 └── CMakeLists.txt

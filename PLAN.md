@@ -95,46 +95,46 @@ All measurements on x86-64 (Intel Xeon), `-O3 -march=native -ffast-math`, LTO.
 - Estimate `max_gain` where peak coefficient quantizes to ~1 bit
 - Narrows the `[min_gain, 255]` search range
 
-## Remaining Ideas (ordered by expected impact)
+## Implemented (continued)
 
-### High impact (architectural)
+### 11. Float QuantCache (quantize.cpp) — DONE
+- Switch `pow34_sf[576]` from `double` (4608 bytes) to `float` (2304 bytes)
+- Cached quantize loop uses float arithmetic throughout
+- Halves cache pressure for the hottest loop
 
-**11. Float QuantCache** — switch `pow34_sf[576]` from `double` to `float`.
-Halves cache pressure (4608→2304 bytes) and doubles SIMD throughput for the
-cached quantize loop (729K calls, 33% of total time). The multiply-add-clamp
-`pow34_sf[i] * base_step + 0.4054` doesn't need double precision since the
-result is truncated to int anyway. Needs quality validation.
+### 12. int16_t for ix[] (quantize.hpp, huffman.hpp/cpp) — DONE
+- Quantized values are -8191..8191 — fits int16_t
+- Halves ix[576] from 2304 to 1152 bytes
+- Updated all Huffman function signatures and consumers
 
-**12. Batch multi-gain quantize** — process all 8 binary search gains in a
-single pass through the 576 coefficients. Each coefficient needs one cache
-lookup; the 8 gains are just 8 different `base_step` multipliers. Reduces
-L1 cache misses by ~8× for the binary search. Requires restructuring the
-gain search loop to produce 8 ix[] arrays or lazily commit.
+### 13. int8_t for QuantCache sign[] (quantize.cpp) — DONE
+- Sign is +1 or -1 — int8_t instead of int
+- Shrinks sign array from 2304 to 576 bytes
 
-**13. Fused subband+MDCT streaming** — eliminate the intermediate
-`subband_out[32][36]` buffer (9 KB per channel). Stream each time slot's
-32 subband outputs directly into the MDCT overlap-add accumulator. Major
-refactor of analyze() and process_strided() interfaces.
+### 14. Skip trivial granule_mse (quantize.cpp) — DONE
+- Precompute input_energy = sum(mdct_in²) once
+- When all ix[] are zero (part2_3_length == part2_length), MSE = input_energy
+- Skips the full granule_mse decode loop for trivially bad scale factors
 
-### Medium impact
+### 15. Remove init_quant_tables from hot path (quantize.cpp) — DONE
+- Removed from quantize_and_count (729K calls) — callers handle init
 
-**14. int16 for ix[]** — quantized values are -8191..8191 (fits int16_t).
-Halves ix[576] from 2304 to 1152 bytes. Every Huffman scan and region
-detection reads this array — halving it doubles effective L1 throughput.
-Requires updating all ix[] consumers (Huffman, bitstream, MSE).
+**Total hot working set reduction:** 11,520 → 4,032 bytes
+  - pow34_sf: 4608 → 2304 (float)
+  - sign: 2304 → 576 (int8_t)
+  - ix: 2304 → 1152 (int16_t)
 
-**15. Track max_val during quantize** — `select_best_table` scans each
-Huffman region for `max_val` on every call. If we track max_val per-region
-during the quantize loop itself (where we already touch every element), we
-can skip those scans. Saves 3 region scans × 729K calls = 2M+ scans/frame.
+## Remaining Ideas
 
-**16. Skip trivial granule_mse** — if the quantizer produced all zeros
-(entire spectrum below dead-zone), MSE = sum(mdct_in²), computable without
-the full decode loop. Skip scale factors that produce obviously worse
-results early.
+**16. Batch multi-gain quantize** — process all 8 binary search gains in a
+single pass through the 576 coefficients. Major restructuring required.
 
-### Low impact (diminishing returns)
+**17. Fused subband+MDCT streaming** — eliminate the intermediate
+`subband_out[32][36]` buffer. Major refactor of analyze() and MDCT.
 
-**17. PGO** — profile-guided optimization, ~5% from branch prediction hints
-**18. Parallel channels** — encode L and R concurrently (2× for stereo)
-**19. Fixed-point signal path** — full Q31 conversion for embedded targets
+**18. Track max_val during quantize** — skip Huffman region max-value scans
+by tracking max_val per subband group during the quantize loop.
+
+**19. PGO** — profile-guided optimization, ~5% expected
+**20. Parallel channels** — encode L and R concurrently (2× for stereo)
+**21. Fixed-point signal path** — full Q31 conversion for embedded targets

@@ -1,7 +1,7 @@
 # glint ESP-IDF Component
 
 MP3 encoder for ESP32, ESP32-S3, and other ESP-IDF targets.
-Uses fixed-point path with small buffers — **~46 KB RAM** footprint.
+Uses fixed-point path with small buffers — **~42 KB RAM** footprint.
 
 ## Setup
 
@@ -41,8 +41,8 @@ const uint8_t* mp3 = glint_encode(enc, ch, &mp3_size);
 |---|---|
 | Static tables | 8 KB (in .rodata/flash) |
 | pow34 table | 8 KB (GLINT_SMALL_POW34, double) |
-| Encoder state | ~34 KB |
-| **Total RAM** | **~46 KB** |
+| Encoder state | ~30 KB |
+| **Total RAM** | **~42 KB** |
 
 ESP32 has 520 KB SRAM — glint uses <10% of it.
 
