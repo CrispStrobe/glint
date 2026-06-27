@@ -22,6 +22,26 @@ endif()
 #   double (default) — double-precision only
 #   fixed            — Q31 fixed-point only
 #   both             — both compiled in, selectable at runtime via CLI -p flag
+# PGO (profile-guided optimization):
+#   off      — no PGO (default)
+#   generate — instrument build, produces .gcda profile data when run
+#   use      — optimize using profile data from a prior "generate" run
+set(GLINT_PGO "off" CACHE STRING "PGO mode: off, generate, or use")
+set_property(CACHE GLINT_PGO PROPERTY STRINGS off generate use)
+
+if(GLINT_PGO STREQUAL "generate")
+    set(GLINT_PGO_DIR "${CMAKE_BINARY_DIR}/pgo-data" CACHE PATH "Directory for PGO profile data")
+    file(MAKE_DIRECTORY "${GLINT_PGO_DIR}")
+    add_compile_options(-fprofile-generate=${GLINT_PGO_DIR})
+    add_link_options(-fprofile-generate=${GLINT_PGO_DIR})
+elseif(GLINT_PGO STREQUAL "use")
+    set(GLINT_PGO_DIR "${CMAKE_BINARY_DIR}/pgo-data" CACHE PATH "Directory for PGO profile data")
+    add_compile_options(-fprofile-use=${GLINT_PGO_DIR} -fprofile-correction)
+    add_link_options(-fprofile-use=${GLINT_PGO_DIR})
+    # GCC 13 miscompiles under PGO + LTO (crash in cleanup); disable LTO for PGO builds
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION FALSE)
+endif()
+
 set(GLINT_MODE "double" CACHE STRING "Signal path: double, fixed, or both")
 set_property(CACHE GLINT_MODE PROPERTY STRINGS double fixed both)
 
