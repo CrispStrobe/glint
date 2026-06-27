@@ -67,23 +67,32 @@ All measurements on x86-64 (Intel Xeon), `-O3 -march=native -ffast-math`, LTO.
 - Precompute `decoder_gain * sf_d` once per band
 
 ### 6. Share pow34 across scale search (quantize.cpp)
-- **Impact:** ~16% speedup, reduces fill_quant_cache from 36% to ~15%
+- **Impact:** ~16% speedup, reduces fill_quant_cache from 36% to ~7%
 - Precompute `pow34(|mdct_in[i]|)` once in `quantize_granule`, pass to
   `quantize_base` → `fill_quant_cache` with `f^0.75` multiplier
 - Exploits `pow34(|x*f|) = pow34(|x|) * f^0.75` to skip table lookups
 - Reduces `fast_pow34` calls from ~24/frame to ~4/frame
-- Minor quality trade-off: -0.8 dB SNR from table interpolation differences
+
+### 7. Eliminate mdct_flat copy + backward rzero scan (encoder.cpp, quantize.cpp)
+- **Impact:** minor cleanup, removes 576-double copy per granule
+- `mdct_out[32][18]` is contiguous — pass pointer directly instead of copying
+- Scan backward for rzero after quantize loop instead of per-element branch
 
 ## Profile (after all optimizations, mono 128kbps)
 
 | Function | % time | Notes |
 |---|---|---|
 | quantize_and_count | ~31% | Cached quantize + Huffman regions |
-| glint_encode | ~28% | Orchestrator (subband, MDCT, copies) |
+| glint_encode | ~28% | Orchestrator (subband, MDCT, bitstream) |
 | huffman_count_bits | ~10% | Bit counting in binary search |
 | fill_quant_cache | ~7% | Down from 37% (pow34 sharing) |
 | granule_mse | ~7% | Down from 16% (cbrt + per-band) |
 | quantize_base | ~7% | Wrapper: gain search + SF adjustment |
+
+The top two functions (quantize_and_count 31%, glint_encode 28%) are now the
+bottleneck. `quantize_and_count`'s inner loop is a tight multiply-add-clamp-store
+that the compiler auto-vectorizes; `glint_encode` includes SIMD-optimized subband
+analysis and MDCT. Further gains require architectural changes.
 
 ## Remaining Ideas
 - **PGO** (profile-guided optimization): ~5% expected, build process change
