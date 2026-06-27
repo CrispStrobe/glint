@@ -36,6 +36,51 @@ warmup discards, and Mann-Whitney U significance testing.
 | normal | 5.4x | 13.0x | **16.0x** | +196% |
 | best | 2.3x | 5.0x | **6.1x** | +165% |
 
+### Cross-platform: Apple M1 (NEON)
+
+| Mode | main (M1) | all-opts (M1) | Gain |
+|---|---|---|---|
+| speed | 108x | 143x | +33% |
+| normal | 43x | 66x | +54% |
+| best | 18x | 28x | +56% |
+
+Parallel channel encoding (`GLINT_PARALLEL_CH`) is a win on M1 (~1.5x) thanks
+to fast GCD-based thread dispatch, confirming it's a platform-dependent result
+(regressed on x86 Xeon with `std::async` overhead).
+
+### ⚠️ Quality regression (discovered on M1 crosscheck)
+
+The optimizations silently regress rolloff/bandwidth — the A/B harness only
+measured global SNR (which didn't regress), missing segSNR and spectral shape:
+
+| Metric | main (s/n/b) | all-opts (s/n/b) |
+|---|---|---|
+| 95% rolloff | 3422 / 5344 / 5133 Hz | **1453** / 4734 / 4922 Hz |
+| centroid | 744 / 830 / 820 | 623 / 806 / 814 |
+| seg-SNR | 10.77 / 13.22 / 13.84 | 9.59 / 12.24 / 12.79 |
+| overall SNR | 12.50 / 14.08 / 14.74 | 12.96 / 14.42 / 14.76 |
+
+Speed tier worst: rolloff 3.4 kHz → 1.45 kHz — regression back toward the
+"dull, normalized" sound that `feature/rolloff-noise-shaping` was created to fix.
+
+**Root causes:**
+1. **granule_mse rewrite (#3/#5/#6/#11)** — per-band + cbrt + float-cache
+   restructure changes which scale factor wins, weakening envelope retention.
+2. **Early-exit scale search (#9)** — `d > best_mse*3.0` assumes convex MSE
+   curve, but HF-retention penalty deliberately accepts higher raw MSE. Bails
+   before reaching envelope-optimal candidate (affects normal/best; speed uses
+   2 factors, below the `nf>=4` guard).
+
+**Safe to cherry-pick** (no scale-factor selection change):
+#1, #2, #4, #7, #8, #10, #12, #13 — most of the speed at zero quality cost.
+
+**Hold / rework:**
+#9 early-exit (guard off when envelope penalty active), #3/#5/#6/#11 granule_mse
+(verify reproduces main's scale-factor selection per granule, not just global SNR).
+
+**Testing gap:** `ab_benchmark.py` quality comparison needs rolloff, centroid,
+and segSNR metrics on speech signals, not just global SNR on multi-tone.
+
 ## Implemented Optimizations
 
 ### 1. Fused MDCT window+cosine+normalization table (mdct.cpp)
