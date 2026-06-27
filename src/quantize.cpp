@@ -67,8 +67,12 @@ static int find_count1_start(const int* ix, int rzero) {
 
 static void fill_quant_cache(QuantCache& cache, const double* mdct_in,
                               const int scalefac[22], int scalefac_scale,
-                              int preflag, int sr_index) {
+                              int preflag, int sr_index,
+                              const double* base_pow34 = nullptr,
+                              const int* base_sign = nullptr,
+                              double f_pow34 = 0.0) {
     const int* sfb = tables::get_sfb_long_by_unified(sr_index);
+    const bool use_base = (base_pow34 != nullptr && f_pow34 > 0.0);
     // Per-band iteration with 22 bands (21 ISO + HF tail).
     for (int band = 0; band <= 21; band++) {
         int start = sfb[band];
@@ -77,9 +81,19 @@ static void fill_quant_cache(QuantCache& cache, const double* mdct_in,
         int sf = scalefac[band];
         if (preflag && band < 21) sf += tables::preemphasis[band];
         double sfs = (sf > 0 && sf < 16) ? sf_table[scalefac_scale][sf] : 1.0;
-        for (int i = start; i < end; i++) {
-            cache.pow34_sf[i] = fast_pow34(std::fabs(mdct_in[i])) * sfs;
-            cache.sign[i] = (mdct_in[i] < 0.0) ? -1 : 1;
+        if (use_base) {
+            // Fast path: reuse precomputed pow34 from unscaled input.
+            // pow34(|x*f|) = pow34(|x|) * f^0.75
+            double sfs_f = sfs * f_pow34;
+            for (int i = start; i < end; i++) {
+                cache.pow34_sf[i] = base_pow34[i] * sfs_f;
+                cache.sign[i] = base_sign[i];
+            }
+        } else {
+            for (int i = start; i < end; i++) {
+                cache.pow34_sf[i] = fast_pow34(std::fabs(mdct_in[i])) * sfs;
+                cache.sign[i] = (mdct_in[i] < 0.0) ? -1 : 1;
+            }
         }
     }
 }
@@ -285,7 +299,10 @@ static double granule_mse(const GranuleInfo& gi, const double* mdct_in,
 // Operates on already-scaled input; the public quantize_granule wraps this in
 // the per-granule scale search.
 static GranuleInfo quantize_base(const double* mdct_in, int available_bits,
-                                 int sr_index, bool short_block);
+                                 int sr_index, bool short_block,
+                                 const double* base_pow34 = nullptr,
+                                 const int* base_sign = nullptr,
+                                 double scale_factor = 0.0);
 
 // Per-granule scale search (all quality tiers).
 //
@@ -314,10 +331,22 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
     double best_mse = 1e30;
     double best_factor = 1.0;
     double scaled[576];
+
+    // Precompute pow34 and signs for the unscaled input once.
+    // For scaled input: pow34(|x*f|) = pow34(|x|) * f^0.75, so we avoid
+    // recomputing pow34 for each scale factor in the search.
+    double base_pow34[576];
+    int base_sign[576];
+    for (int i = 0; i < 576; i++) {
+        base_pow34[i] = fast_pow34(std::fabs(mdct_in[i]));
+        base_sign[i] = (mdct_in[i] < 0.0) ? -1 : 1;
+    }
+
     for (int fi = 0; fi < nf; fi++) {
         double f = factors[fi];
         for (int i = 0; i < 576; i++) scaled[i] = mdct_in[i] * f;
-        GranuleInfo gi = quantize_base(scaled, available_bits, sr_index, short_block);
+        GranuleInfo gi = quantize_base(scaled, available_bits, sr_index,
+                                        short_block, base_pow34, base_sign, f);
         double d = granule_mse(gi, mdct_in, sr_index, quality_mode);
         if (d < best_mse) { best_mse = d; best_result = gi; best_factor = f; }
     }
@@ -327,7 +356,8 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
             double f = best_factor + step * 0.12;
             if (f < 0.5) continue;
             for (int i = 0; i < 576; i++) scaled[i] = mdct_in[i] * f;
-            GranuleInfo gi = quantize_base(scaled, available_bits, sr_index, short_block);
+            GranuleInfo gi = quantize_base(scaled, available_bits, sr_index,
+                                            short_block, base_pow34, base_sign, f);
             double d = granule_mse(gi, mdct_in, sr_index, quality_mode);
             if (d < best_mse) { best_mse = d; best_result = gi; }
         }
@@ -336,7 +366,10 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
 }
 
 static GranuleInfo quantize_base(const double* mdct_in, int available_bits,
-                                 int sr_index, bool short_block) {
+                                 int sr_index, bool short_block,
+                                 const double* base_pow34,
+                                 const int* base_sign,
+                                 double scale_factor) {
     GranuleInfo info{};
     std::memset(&info, 0, sizeof(info));
     init_quant_tables();
@@ -371,9 +404,13 @@ static GranuleInfo quantize_base(const double* mdct_in, int available_bits,
     }
 
     // Pre-compute pow34 * sf_scale for all coefficients (constant across binary search)
+    // If base_pow34 is provided (from quantize_granule's scale search), use it
+    // to avoid recomputing fast_pow34 for each scale factor.
+    double f_pow34 = (base_pow34 && scale_factor > 0.0)
+        ? std::pow(scale_factor, 0.75) : 0.0;
     QuantCache cache;
     fill_quant_cache(cache, mdct_in, info.scalefac, info.scalefac_scale,
-                     info.preflag, sr_index);
+                     info.preflag, sr_index, base_pow34, base_sign, f_pow34);
 
     // Binary search for global_gain.
     int lo = min_gain, hi = 255, best_gain = 255;
@@ -449,7 +486,8 @@ static GranuleInfo quantize_base(const double* mdct_in, int available_bits,
 
             QuantCache sf_cache;
             fill_quant_cache(sf_cache, mdct_in, info.scalefac,
-                             info.scalefac_scale, info.preflag, sr_index);
+                             info.scalefac_scale, info.preflag, sr_index,
+                             base_pow34, base_sign, f_pow34);
 
             lo = min_gain; hi = 255; best_gain = 255;
             for (int iter = 0; iter < 8 && lo <= hi; iter++) {
@@ -487,7 +525,7 @@ static GranuleInfo quantize_base(const double* mdct_in, int available_bits,
     // and cache the regions to avoid redundant huffman_determine_regions call
     QuantCache final_cache;
     fill_quant_cache(final_cache, mdct_in, info.scalefac, info.scalefac_scale,
-                     info.preflag, sr_index);
+                     info.preflag, sr_index, base_pow34, base_sign, f_pow34);
     int huff_bits = quantize_and_count(mdct_in, info.ix, best_gain,
                                        info.scalefac, info.scalefac_scale,
                                        info.preflag, sr_index, &info.regions,
