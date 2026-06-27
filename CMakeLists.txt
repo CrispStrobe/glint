@@ -42,6 +42,12 @@ elseif(GLINT_PGO STREQUAL "use")
     set(CMAKE_INTERPROCEDURAL_OPTIMIZATION FALSE)
 endif()
 
+# Experimental: parallel stereo channel encoding (off by default).
+# Regressed on x86 Xeon (-5 to -19%) due to std::async overhead, but may
+# help on platforms with fast thread dispatch (Apple M1/M2) or with a
+# thread pool. Enable to test: cmake -DGLINT_PARALLEL_CH=ON ..
+option(GLINT_PARALLEL_CH "Encode stereo channels in parallel via std::async" OFF)
+
 set(GLINT_MODE "double" CACHE STRING "Signal path: double, fixed, or both")
 set_property(CACHE GLINT_MODE PROPERTY STRINGS double fixed both)
 
@@ -56,6 +62,11 @@ set(GLINT_SOURCES
     src/encoder.cpp
 )
 
+# Threading support (only needed for parallel channel encoding)
+if(GLINT_PARALLEL_CH)
+    find_package(Threads REQUIRED)
+endif()
+
 # Static library
 add_library(glint_static STATIC ${GLINT_SOURCES})
 target_include_directories(glint_static PUBLIC include PRIVATE src)
@@ -65,6 +76,13 @@ set_target_properties(glint_static PROPERTIES OUTPUT_NAME glint)
 add_library(glint_shared SHARED ${GLINT_SOURCES})
 target_include_directories(glint_shared PUBLIC include PRIVATE src)
 set_target_properties(glint_shared PROPERTIES OUTPUT_NAME glint)
+
+if(GLINT_PARALLEL_CH)
+    target_compile_definitions(glint_static PUBLIC GLINT_PARALLEL_CHANNELS)
+    target_compile_definitions(glint_shared PUBLIC GLINT_PARALLEL_CHANNELS)
+    target_link_libraries(glint_static PUBLIC Threads::Threads)
+    target_link_libraries(glint_shared PUBLIC Threads::Threads)
+endif()
 
 if(GLINT_MODE STREQUAL "fixed")
     target_compile_definitions(glint_static PUBLIC GLINT_FIXED_POINT GLINT_SMALL_BUFFERS GLINT_SMALL_POW34)

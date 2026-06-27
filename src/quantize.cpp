@@ -195,8 +195,13 @@ static int encode_scalefac_compress_m2(int slen0, int slen1, int slen2, int slen
     return 0;  // all zero
 }
 
-// Thread-local psycho model for use by quantize_granule
+// Psycho model for use by quantize_granule.
+// thread_local when parallel channel encoding is enabled.
+#ifdef GLINT_PARALLEL_CHANNELS
+static thread_local PsychoModel s_psycho;
+#else
 static PsychoModel s_psycho;
+#endif
 
 // Compute headroom-based scalefactors using Vorbis/Opus/FLAC psychoacoustic
 // masking model. Assigns SF inversely proportional to masking headroom:

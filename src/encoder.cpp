@@ -10,6 +10,9 @@
 #include <cstdio>
 #include <cmath>
 #include <algorithm>
+#ifdef GLINT_PARALLEL_CHANNELS
+#include <future>
+#endif
 
 using namespace glint;
 
@@ -319,27 +322,20 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                 mode_ext = 2;
             }
 
-            for (int ch = 0; ch < nch; ch++) {
+            // Per-channel MDCT + quantize work, extracted as a lambda for
+            // optional parallel dispatch (GLINT_PARALLEL_CHANNELS).
+            auto process_channel = [&](int ch) {
                 int gr_bits = bits_gr[gr];
 
-                // Transient detection on subband output
                 bool transient_detected = detect_transient(
                     subband_out_d[ch], gr,
                     enc->prev_energy_valid, &enc->prev_granule_energy[ch]);
 
-                // Short blocks are disabled while the bit reservoir is
-                // disabled. A transient frame wants far more bits than a single
-                // frame's budget; with no reservoir to borrow from it gets
-                // coarsened so hard that quality drops 4-9 dB below the
-                // long-block path (and short blocks were the source of the
-                // part2_3_length overflow). Transient detection still runs so
-                // prev_granule_energy stays warm for when this is re-enabled.
                 static constexpr bool kShortBlocksEnabled = false;
                 bool use_short = kShortBlocksEnabled && transient_detected &&
                                  enc->quality_mode >= 1;
 
                 if (use_short) {
-                    // Short-block path needs sub_gr copy (freq inversion)
                     double sub_gr[32][18];
                     for (int sb = 0; sb < 32; sb++)
                         for (int ts = 0; ts < 18; ts++) {
@@ -348,18 +344,10 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                         }
                     double mdct_out_short[32][3][6];
                     enc->mdct[ch].process_short(sub_gr, mdct_out_short);
-                    // No alias reduction for short blocks (ISO spec)
 
-                    // Reorder to flat 576 array
                     double mdct_flat[576];
                     reorder_short_blocks(mdct_out_short, mdct_flat, enc->sr_index);
 
-                    // Quantize with short-block region layout so the gain
-                    // search fits the bit budget under the SAME layout the
-                    // bitstream actually uses. (Previously the gain was fitted
-                    // with the long-block layout and the regions were swapped
-                    // afterwards, leaving part2_3_length far over budget and
-                    // overflowing the 12-bit side-info field.)
                     if (enc->vbr_mode) {
                         granule_info[gr][ch] = quantize_granule_vbr(mdct_flat, gr_bits,
                             enc->sr_index, enc->quality_mode, enc->vbr_quality,
@@ -371,7 +359,6 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                     }
                     granule_info[gr][ch].block_type = 2;
                 } else {
-                    // Long-block path: fused freq inversion + MDCT
                     double mdct_out[32][18];
                     enc->mdct[ch].process_strided(subband_out_d[ch], t0, mdct_out);
                     alias_reduce_d(mdct_out);
@@ -387,9 +374,27 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                     }
                     granule_info[gr][ch].block_type = 0;
                 }
+            };
 
-                total_main_bits += granule_info[gr][ch].part2_3_length;
+#ifdef GLINT_PARALLEL_CHANNELS
+            if (nch == 2) {
+                // Parallel channel encoding: launch ch1 async, do ch0 inline.
+                // Thread-safe: MDCT objects are per-channel, quantize uses
+                // thread_local PsychoModel, granule_info slots are disjoint.
+                auto ch1_future = std::async(std::launch::async,
+                                             process_channel, 1);
+                process_channel(0);
+                ch1_future.get();
+            } else {
+                process_channel(0);
             }
+#else
+            for (int ch = 0; ch < nch; ch++)
+                process_channel(ch);
+#endif
+
+            for (int ch = 0; ch < nch; ch++)
+                total_main_bits += granule_info[gr][ch].part2_3_length;
         }
         // Mark energy as valid after first frame
         enc->prev_energy_valid = true;
