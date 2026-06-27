@@ -15,18 +15,18 @@ All measurements on x86-64 (Intel Xeon), `-O3 -march=native -ffast-math`, LTO.
 ### After all optimizations
 - Unit tests: 30/30
 - Quality tests: ALL PASS
-- Speed (256 kbps stereo): speed=22.0x, normal=8.4x, best=4.6x
-- Speed (mono 128kbps, 5min): ~80x realtime (+170%)
+- Speed (256 kbps stereo): speed=28.8x, normal=12.7x, best=4.9x
+- Speed (mono 128kbps, 5min): ~70x realtime (+133%)
 - RAM (encoder state + tables): 188 KB (double), 46 KB (fixed)
-- Fidelity (multi-tone 128kbps): SNR=17.6 dB (-0.8 dB, within thresholds)
+- Fidelity (256 kbps stereo): SNR 14.8–15.2 dB, all tiers within thresholds
 
 ### Speed improvement summary (256 kbps stereo)
 
 | Mode | Baseline | Optimized | Improvement |
 |---|---|---|---|
-| speed | 16.4x | **22.0x** | +34% |
-| normal | 5.4x | **8.4x** | +56% |
-| best | 2.3x | **4.6x** | +100% |
+| speed | 16.4x | **28.8x** | +76% |
+| normal | 5.4x | **12.7x** | +135% |
+| best | 2.3x | **4.9x** | +113% |
 
 ## Implemented Optimizations
 
@@ -78,11 +78,12 @@ All measurements on x86-64 (Intel Xeon), `-O3 -march=native -ffast-math`, LTO.
 
 | Function | % time | Notes |
 |---|---|---|
-| fill_quant_cache | ~15% | Down from 37% (pow34 sharing) |
-| quantize_and_count | ~22% | Cached path: multiply + compare |
-| glint_encode | ~17% | Orchestrator overhead |
-| granule_mse | ~9% | Down from 16% (cbrt + per-band) |
-| huffman_count_bits | ~7% | Bit counting per region |
+| quantize_and_count | ~31% | Cached quantize + Huffman regions |
+| glint_encode | ~28% | Orchestrator (subband, MDCT, copies) |
+| huffman_count_bits | ~10% | Bit counting in binary search |
+| fill_quant_cache | ~7% | Down from 37% (pow34 sharing) |
+| granule_mse | ~7% | Down from 16% (cbrt + per-band) |
+| quantize_base | ~7% | Wrapper: gain search + SF adjustment |
 
 ## Remaining Ideas
 - **PGO** (profile-guided optimization): ~5% expected, build process change
