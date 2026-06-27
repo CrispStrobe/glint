@@ -8,7 +8,7 @@
 namespace glint {
 
 // Find the best Huffman table for a region via max-value-indexed lookup.
-int select_best_table(const int* ix, int start, int end) {
+int select_best_table(const int16_t* ix, int start, int end) {
     if (start >= end) return 0;
     int max_val = 0;
     for (int i = start; i < end; i++) {
@@ -18,7 +18,7 @@ int select_best_table(const int* ix, int start, int end) {
     return tables::choose_huff_table(max_val);
 }
 
-static int find_count1_start(const int* ix, int rzero) {
+static int find_count1_start(const int16_t* ix, int rzero) {
     int count1_start = (rzero + 3) & ~3;
     if (count1_start > rzero) count1_start = rzero;
 
@@ -38,7 +38,7 @@ static int find_count1_start(const int* ix, int rzero) {
     return count1_start;
 }
 
-HuffRegions huffman_determine_regions_from_bounds(const int* ix, int sr_index,
+HuffRegions huffman_determine_regions_from_bounds(const int16_t* ix, int sr_index,
                                                   int rzero,
                                                   int count1_start) {
     HuffRegions r{};
@@ -114,14 +114,14 @@ HuffRegions huffman_determine_regions_from_bounds(const int* ix, int sr_index,
     return r;
 }
 
-HuffRegions huffman_determine_regions(const int* ix, int sr_index) {
+HuffRegions huffman_determine_regions(const int16_t* ix, int sr_index) {
     int rzero = 576;
     while (rzero > 0 && ix[rzero - 1] == 0) rzero--;
     return huffman_determine_regions_from_bounds(ix, sr_index, rzero,
                                                  find_count1_start(ix, rzero));
 }
 
-HuffRegions huffman_determine_regions_short_from_bounds(const int* ix,
+HuffRegions huffman_determine_regions_short_from_bounds(const int16_t* ix,
                                                         int sr_index,
                                                         int rzero,
                                                         int count1_start) {
@@ -167,14 +167,14 @@ HuffRegions huffman_determine_regions_short_from_bounds(const int* ix,
     return r;
 }
 
-HuffRegions huffman_determine_regions_short(const int* ix, int sr_index) {
+HuffRegions huffman_determine_regions_short(const int16_t* ix, int sr_index) {
     int rzero = 576;
     while (rzero > 0 && ix[rzero - 1] == 0) rzero--;
     return huffman_determine_regions_short_from_bounds(
         ix, sr_index, rzero, find_count1_start(ix, rzero));
 }
 
-int huffman_count_bits_limited(const int* ix, const HuffRegions& regions,
+int huffman_count_bits_limited(const int16_t* ix, const HuffRegions& regions,
                                int sr_index, int bit_limit) {
     const int* sfb = tables::get_sfb_long_by_unified(sr_index);
     int big_values_end = regions.big_values * 2;
@@ -221,7 +221,7 @@ int huffman_count_bits_limited(const int* ix, const HuffRegions& regions,
     return total;
 }
 
-int huffman_count_bits(const int* ix, const HuffRegions& regions, int sr_index) {
+int huffman_count_bits(const int16_t* ix, const HuffRegions& regions, int sr_index) {
     return huffman_count_bits_limited(ix, regions, sr_index, -1);
 }
 
@@ -316,7 +316,7 @@ static void encode_count1(int table_id, int v, int w, int x, int y,
     if (y != 0) bs.write_bits(y < 0 ? 1 : 0, 1);
 }
 
-void huffman_encode(const int* ix, const HuffRegions& regions,
+void huffman_encode(const int16_t* ix, const HuffRegions& regions,
                     int sr_index, BitstreamWriter& bs) {
     const int* sfb = tables::get_sfb_long_by_unified(sr_index);
     int big_values_end = regions.big_values * 2;

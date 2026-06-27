@@ -61,7 +61,7 @@ static void test_huffman_consistency() {
     glint::tables::init_tables();
 
     // Create a test spectrum
-    int ix[576] = {};
+    int16_t ix[576] = {};
     ix[0] = 5; ix[1] = -3; ix[2] = 7; ix[3] = -1;
     ix[4] = 2; ix[5] = 0; ix[6] = 1; ix[7] = -1;
 
