@@ -124,12 +124,15 @@ def run_encode(binary, wav_path, mp3_path, quality, core, extra_args=None):
     return speed_x, audio_sec, elapsed_sec
 
 
-def measure_quality(binary, wav_path, mp3_path, core):
-    """Run encode + ffmpeg decode, return SNR via measure_audio.py logic."""
+def measure_quality(binary, wav_path, mp3_path, quality, core):
+    """Encode at a given quality tier, decode, measure full quality metrics.
+
+    Returns dict with: snr, seg_snr, rolloff, centroid, hf_pct, decode_errors
+    """
     # Encode
     subprocess.run(
         ["taskset", "-c", str(core),
-         binary, wav_path, mp3_path, "-b", "256", "-m", "stereo", "-q", "normal"],
+         binary, wav_path, mp3_path, "-b", "256", "-m", "stereo", "-q", quality],
         capture_output=True, text=True, timeout=300)
 
     # Validate with ffmpeg
@@ -146,7 +149,6 @@ def measure_quality(binary, wav_path, mp3_path, core):
          "-ar", str(SR), "-ac", "1", "-acodec", "pcm_s16le", dec_path],
         capture_output=True, text=True, check=True, timeout=60)
 
-    # Load and compute SNR
     ref = load_wav_mono(wav_path)
     dec = load_wav_mono(dec_path)
 
@@ -158,10 +160,41 @@ def measure_quality(binary, wav_path, mp3_path, core):
     a = ref[trim:n - trim]
     b = t[trim:n - trim]
     err = a - b
+
+    # Global SNR
     snr = 10 * np.log10(np.sum(a ** 2) / (np.sum(err ** 2) + 1e-12))
 
+    # Segmental SNR (20ms windows, skip silence — tracks perceived quality)
+    win = int(0.02 * SR)
+    seg_snrs = []
+    for i in range(0, len(a) - win, win):
+        s = np.sum(a[i:i + win] ** 2)
+        e = np.sum(err[i:i + win] ** 2)
+        if s < 1e-7:
+            continue
+        seg_snrs.append(np.clip(10 * np.log10(s / (e + 1e-12)), -10, 50))
+    seg_snr = float(np.mean(seg_snrs)) if seg_snrs else float('nan')
+
+    # Spectral shape of decoded signal (rolloff, centroid, HF energy)
+    try:
+        import scipy.signal as sig
+        f, _, X = sig.stft(b, SR, nperseg=2048)
+        psd = (np.abs(X) ** 2).mean(axis=1) + 1e-15
+        centroid = float(np.sum(f * psd) / np.sum(psd))
+        hf_pct = float(100 * psd[f >= 10000].sum() / psd.sum())
+        rolloff = float(f[np.searchsorted(np.cumsum(psd) / psd.sum(), 0.95)])
+    except ImportError:
+        centroid, hf_pct, rolloff = float('nan'), float('nan'), float('nan')
+
     os.unlink(dec_path)
-    return snr, len(errors)
+    return {
+        "snr": snr,
+        "seg_snr": seg_snr,
+        "rolloff": rolloff,
+        "centroid": centroid,
+        "hf_pct": hf_pct,
+        "decode_errors": len(errors),
+    }
 
 
 def load_wav_mono(path):
@@ -386,28 +419,60 @@ def main():
         sb = statistics(r["b_elapsed"])
         print_comparison(f"{tier} (elapsed s)", sa, sb, r["a_elapsed"], r["b_elapsed"])
 
-    # Quality comparison
+    # Quality comparison — all tiers, full metrics
+    quality_results = {}
     if args.quality:
         print(f"\n{'='*60}")
-        print(f"QUALITY COMPARISON (SNR dB — higher is better)")
+        print(f"QUALITY COMPARISON (per tier, higher is better except errors)")
         print(f"{'='*60}")
 
-        mp3_qa = os.path.join(tmpdir, "quality_a.mp3")
-        mp3_qb = os.path.join(tmpdir, "quality_b.mp3")
+        any_regression = False
 
-        snr_a, err_a = measure_quality(args.bin_a, wav_path, mp3_qa, args.core)
-        snr_b, err_b = measure_quality(args.bin_b, wav_path, mp3_qb, args.core)
+        for tier in args.tiers:
+            mp3_qa = os.path.join(tmpdir, f"quality_{tier}_a.mp3")
+            mp3_qb = os.path.join(tmpdir, f"quality_{tier}_b.mp3")
 
-        print(f"  A: SNR={snr_a:.2f} dB  decode_errors={err_a}")
-        print(f"  B: SNR={snr_b:.2f} dB  decode_errors={err_b}")
-        delta = snr_b - snr_a
-        print(f"  Delta: {'+' if delta > 0 else ''}{delta:.2f} dB")
-        if abs(delta) < 0.5:
-            print(f"  Verdict: quality equivalent (|delta| < 0.5 dB)")
-        elif delta > 0:
-            print(f"  Verdict: B has better quality")
+            qa = measure_quality(args.bin_a, wav_path, mp3_qa, tier, args.core)
+            qb = measure_quality(args.bin_b, wav_path, mp3_qb, tier, args.core)
+            quality_results[tier] = {"a": qa, "b": qb}
+
+            print(f"\n  --- {tier} ---")
+            print(f"    {'':14s} {'SNR':>8s} {'segSNR':>8s} {'rolloff':>9s} "
+                  f"{'centroid':>10s} {'HF%':>6s} {'errors':>7s}")
+            print(f"    {'A':14s} {qa['snr']:8.2f} {qa['seg_snr']:8.2f} "
+                  f"{qa['rolloff']:9.0f} {qa['centroid']:10.0f} "
+                  f"{qa['hf_pct']:6.2f} {qa['decode_errors']:7d}")
+            print(f"    {'B':14s} {qb['snr']:8.2f} {qb['seg_snr']:8.2f} "
+                  f"{qb['rolloff']:9.0f} {qb['centroid']:10.0f} "
+                  f"{qb['hf_pct']:6.2f} {qb['decode_errors']:7d}")
+
+            # Regression flags
+            flags = []
+            d_snr = qb["snr"] - qa["snr"]
+            d_seg = qb["seg_snr"] - qa["seg_snr"]
+            d_roll = qb["rolloff"] - qa["rolloff"]
+            d_cent = qb["centroid"] - qa["centroid"]
+
+            if d_seg < -0.5:
+                flags.append(f"segSNR {d_seg:+.2f} dB")
+            if qa["rolloff"] > 0 and d_roll / qa["rolloff"] < -0.10:
+                flags.append(f"rolloff {d_roll:+.0f} Hz ({d_roll/qa['rolloff']*100:+.0f}%)")
+            if qa["centroid"] > 0 and d_cent / qa["centroid"] < -0.05:
+                flags.append(f"centroid {d_cent:+.0f} Hz ({d_cent/qa['centroid']*100:+.0f}%)")
+            if qb["decode_errors"] > qa["decode_errors"]:
+                flags.append(f"+{qb['decode_errors'] - qa['decode_errors']} decode errors")
+
+            if flags:
+                any_regression = True
+                print(f"    {'⚠ REGRESSION':14s} {', '.join(flags)}")
+            else:
+                delta_str = f"SNR {d_snr:+.2f}, segSNR {d_seg:+.2f}, rolloff {d_roll:+.0f}"
+                print(f"    {'✓ OK':14s} {delta_str}")
+
+        if any_regression:
+            print(f"\n  ⚠ QUALITY REGRESSIONS DETECTED — review before merging")
         else:
-            print(f"  Verdict: A has better quality")
+            print(f"\n  ✓ All tiers quality-equivalent")
 
     # JSON output
     if args.json:
@@ -433,6 +498,10 @@ def main():
                 "a_speed_stats": statistics(r["a_speed"]),
                 "b_speed_stats": statistics(r["b_speed"]),
             }
+        if args.quality and quality_results:
+            out["quality"] = {}
+            for tier, qr in quality_results.items():
+                out["quality"][tier] = {"a": qr["a"], "b": qr["b"]}
         with open(args.json, "w") as f:
             json.dump(out, f, indent=2)
         print(f"\nRaw results written to {args.json}")
