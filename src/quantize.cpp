@@ -345,6 +345,10 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
         base_sign[i] = (mdct_in[i] < 0.0) ? -1 : 1;
     }
 
+    // Scale search with early exit: once we've found a good factor and MSE
+    // is rising past the optimum, skip remaining larger factors.
+    // Only for ≥4 factors (normal/best); speed mode always tries all 2.
+    double prev_mse = 1e30;
     for (int fi = 0; fi < nf; fi++) {
         double f = factors[fi];
         for (int i = 0; i < 576; i++) scaled[i] = mdct_in[i] * f;
@@ -352,6 +356,8 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
                                         short_block, base_pow34, base_sign, f);
         double d = granule_mse(gi, mdct_in, sr_index, quality_mode);
         if (d < best_mse) { best_mse = d; best_result = gi; best_factor = f; }
+        if (nf >= 4 && fi >= 2 && d > best_mse * 3.0 && d > prev_mse) break;
+        prev_mse = d;
     }
     if (quality_mode >= 2) {
         for (int step = -2; step <= 2; step++) {
