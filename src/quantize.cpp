@@ -43,7 +43,7 @@ static double fast_pow34(double x) {
 struct QuantCache {
     float pow34_sf[576];  // pow34(|xr|) * sf_scale — float is sufficient
                           // (result is truncated to int 0..8191 anyway)
-    int sign[576];        // +1 or -1
+    int8_t sign[576];     // +1 or -1
 };
 
 static int find_count1_start(const int16_t* ix, int rzero) {
