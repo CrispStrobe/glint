@@ -333,6 +333,7 @@ static void print_usage(const char* prog) {
     fprintf(stderr, "  -s SIMD          auto|avx|sse2|neon|none (default: auto)\n");
     fprintf(stderr, "  -q QUALITY       speed|normal|best (default: speed)\n");
     fprintf(stderr, "  -r RATE:CH:BITS  Raw PCM input (e.g., 44100:1:16)\n");
+    fprintf(stderr, "  -j N             Worker threads for the scale-factor search (default: 1)\n");
 }
 
 // Parse raw PCM spec: "RATE:CHANNELS:BITS"
@@ -367,6 +368,7 @@ int main(int argc, char** argv) {
     const char* raw_spec = nullptr;
     const char* input_path = nullptr;
     const char* output_path = nullptr;
+    int threads = 1;
 
     // Parse arguments
     for (int i = 1; i < argc; i++) {
@@ -388,6 +390,9 @@ int main(int argc, char** argv) {
             quality_str = argv[++i];
         } else if (strcmp(argv[i], "-r") == 0 && i + 1 < argc) {
             raw_spec = argv[++i];
+        } else if (strcmp(argv[i], "-j") == 0 && i + 1 < argc) {
+            threads = atoi(argv[++i]);
+            if (threads < 1) threads = 1;
         } else if (!input_path) {
             input_path = argv[i];
         } else if (!output_path) {
@@ -531,6 +536,7 @@ int main(int argc, char** argv) {
         cfg.vbr_quality = vbr_quality;
     }
 
+    glint_set_threads(threads);
     glint_t enc = glint_create(&cfg);
     if (!enc) {
         fprintf(stderr, "Error: failed to create encoder\n");

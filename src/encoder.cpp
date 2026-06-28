@@ -80,6 +80,10 @@ int glint_check_config(int sample_rate, int bitrate) {
     return 0;
 }
 
+void glint_set_threads(int num_threads) {
+    quantize_set_threads(num_threads);
+}
+
 glint_t glint_create(const glint_config* cfg) {
     if (!cfg) return nullptr;
 

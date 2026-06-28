@@ -9,8 +9,121 @@
 #include <algorithm>
 #include <cstring>
 #include <cstdio>
+#include <vector>
+#include <thread>
+#include <mutex>
+#include <atomic>
+#include <condition_variable>
+#include <functional>
 
 namespace glint {
+
+// ---------------------------------------------------------------------------
+// Thread pool for the per-granule scale-factor search.
+//
+// The factor search in quantize_granule evaluates nf independent candidates
+// (each a full quantize_base + granule_mse). quantize_base is pure, so the
+// candidates can run on a pool and be reduced in deterministic index order.
+// That makes the output BYTE-IDENTICAL regardless of thread count — the
+// reduction picks the lowest-index minimum exactly as the old sequential
+// loop did. Default thread count is 1 (the pool is never created; the loop
+// runs inline), so the library stays deterministic and dependency-free unless
+// a caller explicitly opts in via glint_config.threads / CLI -j.
+// ---------------------------------------------------------------------------
+// Spin-wait pool. The per-granule tasks are tiny (tens of microseconds), so a
+// condition-variable wake/sleep per dispatch (thousands of dispatches/sec)
+// costs more than the work it parallelizes. Workers instead spin on an atomic
+// generation counter (yielding after a spin budget), giving sub-microsecond
+// dispatch latency. This burns idle cores during the sequential per-frame work
+// between dispatches, which is the right trade for a batch encoder.
+class ThreadPool {
+public:
+    explicit ThreadPool(int n) {
+        for (int i = 0; i < n; i++)
+            workers_.emplace_back([this] { worker(); });
+    }
+    ~ThreadPool() {
+        stop_.store(true, std::memory_order_release);
+        for (auto& t : workers_) t.join();
+    }
+    int size() const { return static_cast<int>(workers_.size()); }
+
+    // Run fn(i) for i in [0, n). Blocks until all complete. The calling
+    // thread participates, so total parallelism is workers + 1.
+    void parallel_for(int n, const std::function<void(int)>& fn) {
+        if (n <= 0) return;
+        fn_ = &fn;
+        n_ = n;
+        next_.store(0, std::memory_order_relaxed);
+        active_.store(static_cast<int>(workers_.size()) + 1,
+                      std::memory_order_relaxed);
+        gen_.fetch_add(1, std::memory_order_release);  // publish the job
+        run_indices(&fn, n);                            // calling thread works
+        active_.fetch_sub(1, std::memory_order_acq_rel);
+        // Wait for workers to drain.
+        int spins = 0;
+        while (active_.load(std::memory_order_acquire) != 0) {
+            if (++spins > 2048) std::this_thread::yield();
+        }
+    }
+
+private:
+    void run_indices(const std::function<void(int)>* fn, int n) {
+        for (;;) {
+            int i = next_.fetch_add(1, std::memory_order_relaxed);
+            if (i >= n) break;
+            (*fn)(i);
+        }
+    }
+    void worker() {
+        uint64_t seen = 0;
+        int spins = 0;
+        for (;;) {
+            uint64_t g = gen_.load(std::memory_order_acquire);
+            if (g == seen) {
+                if (stop_.load(std::memory_order_acquire)) return;
+                if (++spins > 2048) std::this_thread::yield();
+                continue;
+            }
+            seen = g;
+            spins = 0;
+            const std::function<void(int)>* fn = fn_;
+            int n = n_;
+            run_indices(fn, n);
+            active_.fetch_sub(1, std::memory_order_acq_rel);
+        }
+    }
+
+    std::vector<std::thread> workers_;
+    std::atomic<bool> stop_{false};
+    const std::function<void(int)>* fn_ = nullptr;
+    int n_ = 0;
+    std::atomic<int> next_{0};
+    std::atomic<int> active_{0};
+    std::atomic<uint64_t> gen_{0};
+};
+
+static int g_quant_threads = 1;
+static ThreadPool* g_pool = nullptr;
+
+void quantize_set_threads(int n) {
+    if (n < 1) n = 1;
+    if (n == g_quant_threads) return;
+    g_quant_threads = n;
+    delete g_pool;
+    g_pool = nullptr;
+    if (n > 1) g_pool = new ThreadPool(n - 1);  // + the calling thread
+}
+
+// Run fn(i) for i in [0,n): on the pool when threads > 1, else inline. Inline
+// runs in ascending index order — identical to the old sequential loop.
+static void quant_parallel_for(int n, const std::function<void(int)>& fn) {
+    if (g_pool && n > 1) {
+        g_pool->parallel_for(n, fn);
+    } else {
+        for (int i = 0; i < n; i++) fn(i);
+    }
+}
 
 static double gain_table[256];
 static double sf_table[2][16];
@@ -319,26 +432,52 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
     else if (quality_mode == 1) { factors = kNormal; nf = 6; }
     else                        { factors = kSpeed;  nf = 2; }
 
-    GranuleInfo best_result{};
-    double best_mse = 1e30;
-    double best_factor = 1.0;
-    double scaled[576];
-    for (int fi = 0; fi < nf; fi++) {
+    // Evaluate all nf candidate factors (each independent), then reduce in
+    // ascending index order — same selection as the old sequential loop
+    // (first/lowest-index minimum wins), so the result is byte-identical for
+    // any thread count.
+    std::vector<GranuleInfo> results(nf);
+    std::vector<double> mses(nf);
+    quant_parallel_for(nf, [&](int fi) {
         double f = factors[fi];
+        double scaled[576];
         for (int i = 0; i < 576; i++) scaled[i] = mdct_in[i] * f;
-        GranuleInfo gi = quantize_base(scaled, available_bits, sr_index, short_block);
-        double d = granule_mse(gi, mdct_in, sr_index, quality_mode);
-        if (d < best_mse) { best_mse = d; best_result = gi; best_factor = f; }
+        results[fi] = quantize_base(scaled, available_bits, sr_index, short_block);
+        mses[fi] = granule_mse(results[fi], mdct_in, sr_index, quality_mode);
+    });
+
+    GranuleInfo best_result = results[0];
+    double best_mse = mses[0];
+    double best_factor = factors[0];
+    for (int fi = 1; fi < nf; fi++) {
+        if (mses[fi] < best_mse) {
+            best_mse = mses[fi];
+            best_result = results[fi];
+            best_factor = factors[fi];
+        }
     }
+
     if (quality_mode >= 2) {
+        // Fine refinement around best_factor: candidates for step -2,-1,1,2
+        // (skipping any f < 0.5), kept in that exact order for the reduction.
+        double cand[4];
+        int nc = 0;
         for (int step = -2; step <= 2; step++) {
             if (step == 0) continue;
             double f = best_factor + step * 0.12;
             if (f < 0.5) continue;
-            for (int i = 0; i < 576; i++) scaled[i] = mdct_in[i] * f;
-            GranuleInfo gi = quantize_base(scaled, available_bits, sr_index, short_block);
-            double d = granule_mse(gi, mdct_in, sr_index, quality_mode);
-            if (d < best_mse) { best_mse = d; best_result = gi; }
+            cand[nc++] = f;
+        }
+        std::vector<GranuleInfo> rres(nc);
+        std::vector<double> rmse(nc);
+        quant_parallel_for(nc, [&](int k) {
+            double scaled[576];
+            for (int i = 0; i < 576; i++) scaled[i] = mdct_in[i] * cand[k];
+            rres[k] = quantize_base(scaled, available_bits, sr_index, short_block);
+            rmse[k] = granule_mse(rres[k], mdct_in, sr_index, quality_mode);
+        });
+        for (int k = 0; k < nc; k++) {
+            if (rmse[k] < best_mse) { best_mse = rmse[k]; best_result = rres[k]; }
         }
     }
     return best_result;

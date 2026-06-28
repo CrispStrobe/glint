@@ -59,6 +59,13 @@ struct glint_config {
 // Callback: called with each encoded MP3 frame
 typedef void (*glint_write_cb)(const uint8_t* data, int size, void* user_data);
 
+// Set the worker-thread count for the per-granule scale-factor search,
+// process-wide. 1 (the default) runs single-threaded. The output bitstream is
+// byte-identical regardless of thread count — candidates are reduced in a
+// fixed order — so threading is a pure throughput knob with no quality effect.
+// Call once before encoding (it (re)creates the shared pool).
+void           glint_set_threads(int num_threads);
+
 int            glint_check_config(int sample_rate, int bitrate);
 glint_t        glint_create(const struct glint_config* cfg);
 glint_t        glint_create_streaming(const struct glint_config* cfg,
