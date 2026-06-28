@@ -369,11 +369,6 @@ static GranuleInfo quantize_base(const double* mdct_in, int available_bits,
         }
     }
 
-    // Pre-compute pow34 * sf_scale for all coefficients (constant across binary search)
-    QuantCache cache;
-    fill_quant_cache(cache, mdct_in, info.scalefac, info.scalefac_scale,
-                     info.preflag, sr_index);
-
     // Tighten binary search upper bound: gain where the peak quantizes to ~1.
     // pow34_peak * gain_table[g] + 0.4054 < 1.0 → g > 210 - (16/3)*log2(0.6/pow34_peak)
     int max_gain = 255;
@@ -386,21 +381,14 @@ static GranuleInfo quantize_base(const double* mdct_in, int available_bits,
         }
     }
 
-    // Binary search for global_gain.
-    int lo = min_gain, hi = max_gain, best_gain = max_gain;
-
-    for (int iter = 0; iter < 8 && lo <= hi; iter++) {
-        int gain = (lo + hi) / 2;
-        int bits = quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
-                                       info.scalefac_scale, info.preflag, sr_index,
-                                       nullptr, &cache, short_block, target_bits);
-        if (bits <= target_bits) { hi = gain - 1; best_gain = gain; }
-        else { lo = gain + 1; }
-    }
-
-    info.global_gain = best_gain;
-
-    // Scalefactor adjustment
+    // Assign scalefactors FIRST, then run a single gain search with them.
+    // The previous code ran a full 8-iteration gain search with zero
+    // scalefactors and then threw it away whenever the energy-based
+    // scalefactors were applied (the common case for real audio), re-running
+    // the whole search inside recompute_scalefac_encoding(). Deciding the
+    // scalefactors before the only search removes that dead work — output is
+    // byte-identical (the scalefactors, target_bits and gain bounds the search
+    // sees are exactly what the second search used to see).
     {
         const int* sfb = tables::get_sfb_long_by_unified(sr_index);
         double band_energy[21], max_energy = 0.0;
@@ -419,56 +407,6 @@ static GranuleInfo quantize_base(const double* mdct_in, int available_bits,
                 if (band_energy[band] / max_energy > 0.01) active_bands++;
         }
 
-        // Helper lambda to compute slen/part2 and re-search gain
-        auto recompute_scalefac_encoding = [&]() {
-            bool is_mpeg2 = (sr_index >= 3);
-
-            if (is_mpeg2) {
-                int max_sf[4] = {};
-                for (int b = 0; b < 6; b++) max_sf[0] = std::max(max_sf[0], info.scalefac[b]);
-                for (int b = 6; b < 11; b++) max_sf[1] = std::max(max_sf[1], info.scalefac[b]);
-                for (int b = 11; b < 16; b++) max_sf[2] = std::max(max_sf[2], info.scalefac[b]);
-                for (int b = 16; b < 21; b++) max_sf[3] = std::max(max_sf[3], info.scalefac[b]);
-                int sl[4];
-                for (int g = 0; g < 4; g++) {
-                    sl[g] = 0;
-                    while ((1 << sl[g]) <= max_sf[g]) sl[g]++;
-                    if (sl[g] > 4) sl[g] = 4;
-                }
-                info.scalefac_compress = encode_scalefac_compress_m2(
-                    sl[0], sl[1], sl[2], sl[3]);
-                info.part2_length = sl[0]*6 + sl[1]*5 + sl[2]*5 + sl[3]*5;
-            } else {
-                int max_sf1 = 0, max_sf2 = 0;
-                for (int b = 0; b < 11; b++) max_sf1 = std::max(max_sf1, info.scalefac[b]);
-                for (int b = 11; b < 21; b++) max_sf2 = std::max(max_sf2, info.scalefac[b]);
-                slen1 = 0; while ((1 << slen1) <= max_sf1) slen1++;
-                slen2 = 0; while ((1 << slen2) <= max_sf2) slen2++;
-                if (slen1 > 4) slen1 = 4;
-                if (slen2 > 3) slen2 = 3;
-                info.scalefac_compress = encode_scalefac_compress(slen1, slen2);
-                info.part2_length = slen1 * 11 + slen2 * 10;
-            }
-            target_bits = available_bits - info.part2_length;
-            if (target_bits < 0) target_bits = 0;
-
-            QuantCache sf_cache;
-            fill_quant_cache(sf_cache, mdct_in, info.scalefac,
-                             info.scalefac_scale, info.preflag, sr_index);
-
-            lo = min_gain; hi = max_gain; best_gain = max_gain;
-            for (int iter = 0; iter < 8 && lo <= hi; iter++) {
-                int gain = (lo + hi) / 2;
-                int bits = quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
-                                           info.scalefac_scale, info.preflag, sr_index,
-                                           nullptr, &sf_cache, short_block,
-                                           target_bits);
-                if (bits <= target_bits) { hi = gain - 1; best_gain = gain; }
-                else { lo = gain + 1; }
-            }
-            info.global_gain = best_gain;
-        };
-
         if (max_energy > 0.0 && active_bands >= 3) {
             // Energy-based scalefactor assignment: give a little extra precision
             // to higher-energy bands. Modes 1/2 get their per-granule fidelity
@@ -483,20 +421,66 @@ static GranuleInfo quantize_base(const double* mdct_in, int available_bits,
                 }
             }
             if (any) {
-                recompute_scalefac_encoding();
+                // Encode the chosen scalefactors → slen/part2_length and adjust
+                // the gain-search bit target. (No gain search here; that runs
+                // once below with the final scalefactors.)
+                bool is_mpeg2 = (sr_index >= 3);
+                if (is_mpeg2) {
+                    int max_sf[4] = {};
+                    for (int b = 0; b < 6; b++) max_sf[0] = std::max(max_sf[0], info.scalefac[b]);
+                    for (int b = 6; b < 11; b++) max_sf[1] = std::max(max_sf[1], info.scalefac[b]);
+                    for (int b = 11; b < 16; b++) max_sf[2] = std::max(max_sf[2], info.scalefac[b]);
+                    for (int b = 16; b < 21; b++) max_sf[3] = std::max(max_sf[3], info.scalefac[b]);
+                    int sl[4];
+                    for (int g = 0; g < 4; g++) {
+                        sl[g] = 0;
+                        while ((1 << sl[g]) <= max_sf[g]) sl[g]++;
+                        if (sl[g] > 4) sl[g] = 4;
+                    }
+                    info.scalefac_compress = encode_scalefac_compress_m2(
+                        sl[0], sl[1], sl[2], sl[3]);
+                    info.part2_length = sl[0]*6 + sl[1]*5 + sl[2]*5 + sl[3]*5;
+                } else {
+                    int max_sf1 = 0, max_sf2 = 0;
+                    for (int b = 0; b < 11; b++) max_sf1 = std::max(max_sf1, info.scalefac[b]);
+                    for (int b = 11; b < 21; b++) max_sf2 = std::max(max_sf2, info.scalefac[b]);
+                    slen1 = 0; while ((1 << slen1) <= max_sf1) slen1++;
+                    slen2 = 0; while ((1 << slen2) <= max_sf2) slen2++;
+                    if (slen1 > 4) slen1 = 4;
+                    if (slen2 > 3) slen2 = 3;
+                    info.scalefac_compress = encode_scalefac_compress(slen1, slen2);
+                    info.part2_length = slen1 * 11 + slen2 * 10;
+                }
+                target_bits = available_bits - info.part2_length;
+                if (target_bits < 0) target_bits = 0;
             }
         }
     }
 
-    // Final quantize to populate ix[] with the chosen gain and scalefactors,
-    // and cache the regions to avoid redundant huffman_determine_regions call
-    QuantCache final_cache;
-    fill_quant_cache(final_cache, mdct_in, info.scalefac, info.scalefac_scale,
+    // Single gain search with the final scalefactors. The cache is filled once
+    // and reused for the final quantize and the budget-guarantee loop below
+    // (scalefactors no longer change after this point).
+    QuantCache cache;
+    fill_quant_cache(cache, mdct_in, info.scalefac, info.scalefac_scale,
                      info.preflag, sr_index);
+
+    int lo = min_gain, hi = max_gain, best_gain = max_gain;
+    for (int iter = 0; iter < 8 && lo <= hi; iter++) {
+        int gain = (lo + hi) / 2;
+        int bits = quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
+                                       info.scalefac_scale, info.preflag, sr_index,
+                                       nullptr, &cache, short_block, target_bits);
+        if (bits <= target_bits) { hi = gain - 1; best_gain = gain; }
+        else { lo = gain + 1; }
+    }
+    info.global_gain = best_gain;
+
+    // Final quantize to populate ix[] with the chosen gain and scalefactors,
+    // and cache the regions to avoid a redundant huffman_determine_regions call.
     int huff_bits = quantize_and_count(mdct_in, info.ix, best_gain,
                                        info.scalefac, info.scalefac_scale,
                                        info.preflag, sr_index, &info.regions,
-                                       &final_cache, short_block);
+                                       &cache, short_block);
     info.part2_3_length = info.part2_length + huff_bits;
 
     // Budget guarantee: part2_3_length must fit both the per-granule bit
@@ -513,7 +497,7 @@ static GranuleInfo quantize_base(const double* mdct_in, int available_bits,
             huff_bits = quantize_and_count(mdct_in, info.ix, info.global_gain,
                                            info.scalefac, info.scalefac_scale,
                                            info.preflag, sr_index, &info.regions,
-                                           &final_cache, short_block);
+                                           &cache, short_block);
             info.part2_3_length = info.part2_length + huff_bits;
         }
     }
