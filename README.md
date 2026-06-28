@@ -241,7 +241,7 @@ passes. Measured on a 1-min 256 kbps stereo speech clip (`double`==`fixed`):
 | RMS level            | −25.9 / −21.4 / −19.7 | within ~0.2 dB of source, all tiers |
 | 95% rolloff          | 1031 / 1031 / 4359 Hz | 3422 / 5344 / 5133 Hz |
 | overall SNR          | 5.1 / 10.1 / 15.0 dB  | 12.5 / 14.1 / 14.7 dB |
-| encode speed         | —                     | ~127× / 52× / 22× realtime (Apple M1) |
+| encode speed         | —                     | ~190× / 89× / 39× realtime (Apple M1, `-j1`) |
 
 Verify with `python tests/measure_audio.py original.wav out.mp3` (want RMS
 within ~0.5 dB of source, rolloff near source, `double`==`fixed`) and
