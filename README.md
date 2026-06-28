@@ -110,7 +110,13 @@ glint_cli [options] input output.mp3
   -s SIMD           auto|avx|sse2|neon|none (default: auto)
   -p PATH           double|fixed (only in both-mode builds)
   -r RATE:CH:BITS   Raw PCM input (e.g., 44100:1:16)
+  -j N              Worker threads for the scale-factor search (default: 1)
 ```
+
+`-j` parallelizes the per-granule scale-factor search across threads. The
+output bitstream is byte-identical regardless of thread count (candidates are
+reduced in a fixed order), so it is a pure throughput knob with no quality
+effect. Gains are largest for `-q best`.
 
 ### C API
 
@@ -143,6 +149,7 @@ glint_destroy(enc);
 | `glint_encode_int32(enc, int32**, &size)` | Encode from int32 |
 | `glint_flush(enc, &size)` | Flush final frame |
 | `glint_destroy(enc)` | Free encoder |
+| `glint_set_threads(n)` | Worker threads for the scale-factor search (process-global; output byte-identical for any `n`) |
 
 ### Python
 
