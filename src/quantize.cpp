@@ -251,7 +251,8 @@ static double granule_mse(const GranuleInfo& gi, const double* mdct_in,
             double xr_hat = 0.0;
             if (gi.ix[i] != 0) {
                 double a = std::abs(static_cast<double>(gi.ix[i]));
-                xr_hat = std::copysign(std::pow(a, 4.0/3.0) * decoder_gain * sf_d,
+                // a^(4/3) == a * a^(1/3); cbrt is ~3x faster than pow.
+                xr_hat = std::copysign(a * std::cbrt(a) * decoder_gain * sf_d,
                                        mdct_in[i]);
             }
             double err = mdct_in[i] - xr_hat;
