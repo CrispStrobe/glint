@@ -14,12 +14,19 @@ namespace glint {
 
 static double gain_table[256];
 static double sf_table[2][16];
+// cbrt_lut[a] = a * cbrt(a), for a = |ix| in [0, 8191] (ix is clamped to 8191
+// in the quantizer). Used in granule_mse to avoid a std::cbrt per nonzero
+// coefficient. Holds exactly the same double the inline expression produced,
+// so the MSE — and the scale-factor it selects — is bit-identical.
+static double cbrt_lut[8192];
 static bool tables_init = false;
 
 static void init_quant_tables() {
     if (tables_init) return;
     for (int g = 0; g < 256; g++)
         gain_table[g] = std::pow(2.0, -3.0 * (g - 210.0) / 16.0);
+    for (int a = 0; a < 8192; a++)
+        cbrt_lut[a] = static_cast<double>(a) * std::cbrt(static_cast<double>(a));
     for (int sf = 0; sf < 16; sf++) {
         // Encoder uses positive exponent to compensate decoder's negative:
         // Decoder: 2^(-0.5*(1+sfs)*sf), Encoder: 2^(+0.75*0.5*(1+sfs)*sf)
@@ -250,10 +257,12 @@ static double granule_mse(const GranuleInfo& gi, const double* mdct_in,
         for (int i = start; i < end; i++) {
             double xr_hat = 0.0;
             if (gi.ix[i] != 0) {
-                double a = std::abs(static_cast<double>(gi.ix[i]));
-                // a^(4/3) == a * a^(1/3); cbrt is ~3x faster than pow.
-                xr_hat = std::copysign(a * std::cbrt(a) * decoder_gain * sf_d,
-                                       mdct_in[i]);
+                // a^(4/3) == a * a^(1/3); precomputed in cbrt_lut[a]. ix is
+                // always in [0,8191], but guard the index defensively.
+                int a = std::abs(static_cast<int>(gi.ix[i]));
+                double a43 = (a < 8192) ? cbrt_lut[a]
+                                        : static_cast<double>(a) * std::cbrt(static_cast<double>(a));
+                xr_hat = std::copysign(a43 * decoder_gain * sf_d, mdct_in[i]);
             }
             double err = mdct_in[i] - xr_hat;
             noise += err * err;
