@@ -32,15 +32,18 @@ with `tests/measure_audio.py`; `double` and `fixed` paths are identical):
 
 | Mode | SNR | seg-SNR | centroid | %E>10 kHz | 95% rolloff | RMS vs src | speed |
 |---|---|---|---|---|---|---|---|
-| -q speed | 12.5 dB | 10.8 dB | 744 Hz | 0.34% | 3.4 kHz | ±0.2 dB | ~127× |
-| **-q normal** | **14.1 dB** | **13.2 dB** | 830 Hz | 0.48% | 5.3 kHz | ±0.2 dB | ~52× |
-| -q best | 14.7 dB | 13.8 dB | 820 Hz | 0.47% | 5.1 kHz | ±0.2 dB | ~22× |
+| -q speed | 12.5 dB | 10.8 dB | 744 Hz | 0.34% | 3.4 kHz | ±0.2 dB | ~190× |
+| **-q normal** | **14.1 dB** | **13.2 dB** | 830 Hz | 0.48% | 5.3 kHz | ±0.2 dB | ~89× |
+| -q best | 14.7 dB | 13.8 dB | 820 Hz | 0.47% | 5.1 kHz | ±0.2 dB | ~39× |
 
 Source rolloff 5.4 kHz, centroid 892 Hz, %E>10 kHz 0.72%. Both signal paths
-are numerically identical. Apple M1, 256 kbps stereo (approximate; re-measure
-on an idle machine). For a deterministic local speed/quality run without
-external audio, use `python tests/benchmark_encoder.py build/glint_cli`; to A/B
-two builds with statistics, byte-identity, and quality regression flags, use
+are numerically identical. Apple M1, 256 kbps stereo, single-threaded (`-j1`),
+best of 8 runs. The optional threaded scale-factor search (`-j N`, byte-identical
+output) reaches **~149× normal / ~86× best at `-j4`** on the M1's four
+performance cores; `-j8` regresses past that. Quality metrics are unaffected by
+thread count. For a deterministic local speed/quality run without external
+audio, use `python tests/benchmark_encoder.py build/glint_cli`; to A/B two
+builds with statistics, byte-identity, and quality regression flags, use
 `python tests/ab_benchmark.py --a A/glint_cli --b B/glint_cli --quality`.
 
 **Per-band SNR vs source** (256 kbps stereo, speech):
