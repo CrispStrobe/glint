@@ -235,22 +235,30 @@ static double granule_mse(const GranuleInfo& gi, const double* mdct_in,
     double noise = 0.0;
     double src_band[21] = {};
     double rec_band[21] = {};
-    int b = 0;
-    for (int i = 0; i < 576; i++) {
-        while (b < 20 && i >= sfb[b + 1]) b++;
+    // Per-band iteration so the expensive std::pow(2.0, ...) sf_d term is
+    // computed 21 times instead of once per coefficient (576). Band ranges and
+    // the per-coefficient reconstruction expression are kept identical to the
+    // previous per-coefficient loop (band index capped at 20 — band 20 covers
+    // [sfb[20], 576) — and preflag for b < 22), so output is bit-identical.
+    for (int b = 0; b < 21; b++) {
+        int start = sfb[b];
+        int end = (b < 20) ? sfb[b + 1] : 576;
+        if (start >= end) continue;
         int sf = gi.scalefac[b];
         if (gi.preflag && b < 22) sf += tables::preemphasis[b];
         double sf_d = std::pow(2.0, -0.5 * sf * (1 + gi.scalefac_scale));
-        double xr_hat = 0.0;
-        if (gi.ix[i] != 0) {
-            double a = std::abs(static_cast<double>(gi.ix[i]));
-            xr_hat = std::copysign(std::pow(a, 4.0/3.0) * decoder_gain * sf_d,
-                                   mdct_in[i]);
+        for (int i = start; i < end; i++) {
+            double xr_hat = 0.0;
+            if (gi.ix[i] != 0) {
+                double a = std::abs(static_cast<double>(gi.ix[i]));
+                xr_hat = std::copysign(std::pow(a, 4.0/3.0) * decoder_gain * sf_d,
+                                       mdct_in[i]);
+            }
+            double err = mdct_in[i] - xr_hat;
+            noise += err * err;
+            src_band[b] += mdct_in[i] * mdct_in[i];
+            rec_band[b] += xr_hat * xr_hat;
         }
-        double err = mdct_in[i] - xr_hat;
-        noise += err * err;
-        src_band[b] += mdct_in[i] * mdct_in[i];
-        rec_band[b] += xr_hat * xr_hat;
     }
 
     if (quality_mode <= 0) return noise;
