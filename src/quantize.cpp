@@ -345,16 +345,36 @@ static bool compute_headroom_scalefactors(int scalefac[21],
     return any;
 }
 
+// Per-band source energy for the granule_mse envelope penalty. Depends only
+// on the unscaled input, so it is identical for every candidate in the scale
+// search — compute it once per granule and share it. Loop order matches the
+// old in-loop accumulation exactly (ascending i within each band), so the
+// sums are bit-identical.
+static void compute_src_band(const double* mdct_in, int sr_index,
+                             double src_band[21]) {
+    const int* sfb = tables::get_sfb_long_by_unified(sr_index);
+    for (int b = 0; b < 21; b++) {
+        src_band[b] = 0.0;
+        int start = sfb[b];
+        int end = (b < 20) ? sfb[b + 1] : 576;
+        for (int i = start; i < end; i++)
+            src_band[b] += mdct_in[i] * mdct_in[i];
+    }
+}
+
 // Decoder-reconstruction MSE for a quantized granule vs the original MDCT.
 // Used to pick the per-granule input scale ("factor") that best preserves the
-// spectrum through the quantizer dead-zone.
+// spectrum through the quantizer dead-zone. src_band is the precomputed
+// per-band source energy (see compute_src_band); it is only read when
+// quality_mode > 0 and may be null otherwise.
 static double granule_mse(const GranuleInfo& gi, const double* mdct_in,
-                          int sr_index, int quality_mode) {
+                          int sr_index, int quality_mode,
+                          const double* src_band) {
     const int* sfb = tables::get_sfb_long_by_unified(sr_index);
     double decoder_gain = std::pow(2.0, 0.25 * (gi.global_gain - 210));
     double noise = 0.0;
-    double src_band[21] = {};
     double rec_band[21] = {};
+    const bool want_bands = quality_mode > 0;
     // Per-band iteration so the expensive std::pow(2.0, ...) sf_d term is
     // computed 21 times instead of once per coefficient (576). Band ranges and
     // the per-coefficient reconstruction expression are kept identical to the
@@ -379,8 +399,7 @@ static double granule_mse(const GranuleInfo& gi, const double* mdct_in,
             }
             double err = mdct_in[i] - xr_hat;
             noise += err * err;
-            src_band[b] += mdct_in[i] * mdct_in[i];
-            rec_band[b] += xr_hat * xr_hat;
+            if (want_bands) rec_band[b] += xr_hat * xr_hat;
         }
     }
 
@@ -432,6 +451,11 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
     else if (quality_mode == 1) { factors = kNormal; nf = 6; }
     else                        { factors = kSpeed;  nf = 2; }
 
+    // Per-band source energy is factor-independent; compute it once for all
+    // granule_mse calls below (only read when quality_mode > 0).
+    double src_band[21];
+    if (quality_mode > 0) compute_src_band(mdct_in, sr_index, src_band);
+
     // Evaluate all nf candidate factors (each independent), then reduce in
     // ascending index order — same selection as the old sequential loop
     // (first/lowest-index minimum wins), so the result is byte-identical for
@@ -443,7 +467,8 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
         double scaled[576];
         for (int i = 0; i < 576; i++) scaled[i] = mdct_in[i] * f;
         results[fi] = quantize_base(scaled, available_bits, sr_index, short_block);
-        mses[fi] = granule_mse(results[fi], mdct_in, sr_index, quality_mode);
+        mses[fi] = granule_mse(results[fi], mdct_in, sr_index, quality_mode,
+                               src_band);
     });
 
     GranuleInfo best_result = results[0];
@@ -474,7 +499,8 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
             double scaled[576];
             for (int i = 0; i < 576; i++) scaled[i] = mdct_in[i] * cand[k];
             rres[k] = quantize_base(scaled, available_bits, sr_index, short_block);
-            rmse[k] = granule_mse(rres[k], mdct_in, sr_index, quality_mode);
+            rmse[k] = granule_mse(rres[k], mdct_in, sr_index, quality_mode,
+                                  src_band);
         });
         for (int k = 0; k < nc; k++) {
             if (rmse[k] < best_mse) { best_mse = rmse[k]; best_result = rres[k]; }
