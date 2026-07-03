@@ -733,7 +733,8 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                         granule_info[gr][ch] = quantize_granule(mdct_flat, gr_bits,
                                                                  enc->sr_index, enc->quality_mode,
                                                                  /*short_block=*/true,
-                                                                 gain_floor);
+                                                                 gain_floor,
+                                                                 !use_ms || ch == 0);
                     }
                     granule_info[gr][ch].block_type = 2;
                 } else {
@@ -756,7 +757,8 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                         granule_info[gr][ch] = quantize_granule(mdct_flat, gr_bits,
                                                                  enc->sr_index, enc->quality_mode,
                                                                  /*short_block=*/bt != 0,
-                                                                 gain_floor);
+                                                                 gain_floor,
+                                                                 !use_ms || ch == 0);
                     }
                     granule_info[gr][ch].block_type = bt;
                 }
@@ -851,7 +853,8 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                     granule_info[gr][ch] = quantize_granule(mdct_flat, gr_bits,
                                                              enc->sr_index, enc->quality_mode,
                                                              /*short_block=*/false,
-                                                             gain_floor);
+                                                             gain_floor,
+                                                             !use_ms || ch == 0);
                 }
                 total_main_bits += granule_info[gr][ch].part2_3_length;
             }
@@ -1086,7 +1089,8 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
                     granule_info[gr][ch] = quantize_granule(mdct_flat, gr_bits,
                                                              enc->sr_index, enc->quality_mode,
                                                              /*short_block=*/true,
-                                                             gain_floor);
+                                                             gain_floor,
+                                                             !use_ms || ch == 0);
                 }
                 granule_info[gr][ch].block_type = 2;
             } else {
@@ -1105,7 +1109,8 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
                     granule_info[gr][ch] = quantize_granule(mdct_flat, gr_bits,
                                                              enc->sr_index, enc->quality_mode,
                                                              /*short_block=*/bt != 0,
-                                                             gain_floor);
+                                                             gain_floor,
+                                                             !use_ms || ch == 0);
                 }
                 granule_info[gr][ch].block_type = bt;
             }
