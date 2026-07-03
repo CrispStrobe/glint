@@ -194,8 +194,17 @@ static void fill_quant_cache(QuantCache& cache, const double* mdct_in,
     int band = 0;
     for (int i = 0; i < 576; i++) {
         while (band < 21 && i >= sfb[band + 1]) band++;
-        int sf = scalefac[band];
-        if (preflag && band < 22) sf += tables::preemphasis[band];
+        // Bins at/above sfb[21] are the standard's "sfb21" region: no
+        // scalefactor is transmitted, so the decoder applies none — the
+        // encoder must not either. (This used to read scalefac[21], out of
+        // bounds — aliasing scalefac_compress in GranuleInfo and silently
+        // boosting everything above ~9 kHz by up to 29x with no decoder-side
+        // compensation.)
+        int sf = 0;
+        if (band < 21 && i < sfb[21]) {
+            sf = scalefac[band];
+            if (preflag) sf += tables::preemphasis[band];
+        }
         double sfs = (sf > 0 && sf < 16) ? sf_table[scalefac_scale][sf] : 1.0;
         cache.pow34_sf[i] = fast_pow34(std::fabs(mdct_in[i])) * sfs;
         cache.sign[i] = (mdct_in[i] < 0.0) ? -1 : 1;
@@ -230,8 +239,12 @@ static int quantize_and_count(const double* mdct_in, int16_t* ix,
         int band = 0;
         for (int i = 0; i < 576; i++) {
             while (band < 21 && i >= sfb[band + 1]) band++;
-            int sf = scalefac[band];
-            if (preflag && band < 22) sf += tables::preemphasis[band];
+            // sfb21 region (>= sfb[21]): no scalefactor (see fill_quant_cache)
+            int sf = 0;
+            if (band < 21 && i < sfb[21]) {
+                sf = scalefac[band];
+                if (preflag) sf += tables::preemphasis[band];
+            }
             double sf_scale = (sf > 0 && sf < 16) ? sf_table[scalefac_scale][sf] : 1.0;
             double abs_xr = std::fabs(mdct_in[i]);
             double pow34_val = fast_pow34(abs_xr);
@@ -270,29 +283,21 @@ static int encode_scalefac_compress(int slen1, int slen2) {
     return 0;
 }
 
-// MPEG-2/2.5 scalefac_compress encoding (9 bits).
-// For normal (non-intensity) stereo, long blocks:
-// sfc < 180: slen[0]=sfc/36, slen[1]=(sfc%36)/6, slen[2]=(sfc%36)%6, slen[3]=0
-//   band groups: [6, 5, 5, 5]
-// sfc 180..243: slen[0]=(sfc-180)%64/16, slen[1]=(sfc-180)%16/4, slen[2]=(sfc-180)%4, slen[3]=0
-//   band groups: [6, 5, 7, 3]
-// sfc 244..255: slen[0]=(sfc-244)/3, slen[1]=(sfc-244)%3, slen[2]=0, slen[3]=0
-//   band groups: [11, 10, 0, 0]
-//
-// We use the first range (sfc < 180) for simplicity.
-// Given 4 slen values, encode as: sfc = slen[0]*36 + slen[1]*6 + slen[2]
-// slen[3] must be 0 for this range.
+// MPEG-2/2.5 scalefac_compress encoding (9 bits), ISO 13818-3 mapping for
+// normal (non-intensity) long blocks, first range:
+//   sfc < 400: slen[0]=(sfc>>4)/5, slen[1]=(sfc>>4)%5,
+//              slen[2]=(sfc&15)>>2, slen[3]=sfc&3; band groups [6,5,5,5]
+// so sfc = ((slen0*5 + slen1) << 4) | (slen2 << 2) | slen3, valid for
+// slen0/1 <= 4 and slen2/3 <= 3 (max sfc 399 < 400 by construction).
+// (The previous custom mapping — sfc = slen0*36 + slen1*6 + slen2 — matched
+// the encoder's own emission code but NOT the standard, so every real
+// decoder derived different slens and misparsed the whole granule: MPEG-2
+// output measured -10 dB SNR. See PLAN.md item 7.)
 static int encode_scalefac_compress_m2(int slen0, int slen1, int slen2, int slen3) {
-    // If slen3==0 and all fit in range [0,4] for slen0, [0,5] for slen1/2:
-    if (slen3 == 0 && slen0 < 5 && slen1 < 6 && slen2 < 6) {
-        return slen0 * 36 + slen1 * 6 + slen2;
+    if (slen0 <= 4 && slen1 <= 4 && slen2 <= 3 && slen3 <= 3) {
+        return ((slen0 * 5 + slen1) << 4) | (slen2 << 2) | slen3;
     }
-    // Fallback: use range 244..255 (slen[0]*(3) + slen[1], only 2 groups)
-    // This is limited, so try range 180..243 (sfc-180 = s0*16 + s1*4 + s2)
-    if (slen3 == 0 && slen0 < 4 && slen1 < 4 && slen2 < 4) {
-        return 180 + slen0 * 16 + slen1 * 4 + slen2;
-    }
-    return 0;  // all zero
+    return -1;  // not representable in this range
 }
 
 // Thread-local psycho model for use by quantize_granule
@@ -383,17 +388,19 @@ static double granule_mse(const GranuleInfo& gi, const double* mdct_in,
     double decoder_gain = std::pow(2.0, 0.25 * (gi.global_gain - 210));
     double noise = 0.0;
     // Per-band iteration so the expensive std::pow(2.0, ...) sf_d term is
-    // computed 21 times instead of once per coefficient (576). Band ranges and
-    // the per-coefficient reconstruction expression are kept identical to the
-    // previous per-coefficient loop (band index capped at 20 — band 20 covers
-    // [sfb[20], 576) — and preflag for b < 22), so output is bit-identical.
-    for (int b = 0; b < 21; b++) {
+    // computed once per band instead of once per coefficient. "Band" 21 is
+    // the sfb21 region [sfb[21], 576): no scalefactor is transmitted there,
+    // so the decoder reconstructs with sf_d = 1 — mirror that exactly.
+    for (int b = 0; b < 22; b++) {
         int start = sfb[b];
-        int end = (b < 20) ? sfb[b + 1] : 576;
+        int end = (b < 21) ? sfb[b + 1] : 576;
         if (start >= end) continue;
-        int sf = gi.scalefac[b];
-        if (gi.preflag && b < 22) sf += tables::preemphasis[b];
-        double sf_d = std::pow(2.0, -0.5 * sf * (1 + gi.scalefac_scale));
+        double sf_d = 1.0;
+        if (b < 21) {
+            int sf = gi.scalefac[b];
+            if (gi.preflag) sf += tables::preemphasis[b];
+            sf_d = std::pow(2.0, -0.5 * sf * (1 + gi.scalefac_scale));
+        }
         for (int i = start; i < end; i++) {
             double xr_hat = 0.0;
             if (gi.ix[i] != 0) {
@@ -429,14 +436,20 @@ static void compute_band_noise(const GranuleInfo& gi, const double* mdct_in,
                                int sr_index, double noise_band[21]) {
     const int* sfb = tables::get_sfb_long_by_unified(sr_index);
     double decoder_gain = std::pow(2.0, 0.25 * (gi.global_gain - 210));
-    for (int b = 0; b < 21; b++) {
-        noise_band[b] = 0.0;
+    for (int b = 0; b < 21; b++) noise_band[b] = 0.0;
+    // Same band/sf_d handling as granule_mse (sfb21 region reconstructs with
+    // sf_d = 1); its noise is accounted to band 20 for scoring purposes.
+    for (int b = 0; b < 22; b++) {
         int start = sfb[b];
-        int end = (b < 20) ? sfb[b + 1] : 576;
+        int end = (b < 21) ? sfb[b + 1] : 576;
         if (start >= end) continue;
-        int sf = gi.scalefac[b];
-        if (gi.preflag && b < 22) sf += tables::preemphasis[b];
-        double sf_d = std::pow(2.0, -0.5 * sf * (1 + gi.scalefac_scale));
+        double sf_d = 1.0;
+        if (b < 21) {
+            int sf = gi.scalefac[b];
+            if (gi.preflag) sf += tables::preemphasis[b];
+            sf_d = std::pow(2.0, -0.5 * sf * (1 + gi.scalefac_scale));
+        }
+        double acc = 0.0;
         for (int i = start; i < end; i++) {
             double xr_hat = 0.0;
             if (gi.ix[i] != 0) {
@@ -446,8 +459,9 @@ static void compute_band_noise(const GranuleInfo& gi, const double* mdct_in,
                 xr_hat = std::copysign(a43 * decoder_gain * sf_d, mdct_in[i]);
             }
             double err = mdct_in[i] - xr_hat;
-            noise_band[b] += err * err;
+            acc += err * err;
         }
+        noise_band[(b < 21) ? b : 20] += acc;
     }
 }
 
@@ -685,19 +699,23 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
 static bool encode_scalefac_fields(GranuleInfo& info, int sr_index) {
     bool is_mpeg2 = (sr_index >= 3);
     if (is_mpeg2) {
+        // Band groups [6,5,5,5]; slen limits 4/4/3/3 in the sfc<400 range,
+        // i.e. sf <= 15 in groups 0-1 and sf <= 7 in groups 2-3.
         int max_sf[4] = {};
         for (int b = 0; b < 6; b++) max_sf[0] = std::max(max_sf[0], info.scalefac[b]);
         for (int b = 6; b < 11; b++) max_sf[1] = std::max(max_sf[1], info.scalefac[b]);
         for (int b = 11; b < 16; b++) max_sf[2] = std::max(max_sf[2], info.scalefac[b]);
         for (int b = 16; b < 21; b++) max_sf[3] = std::max(max_sf[3], info.scalefac[b]);
+        if (max_sf[0] > 15 || max_sf[1] > 15 || max_sf[2] > 7 || max_sf[3] > 7)
+            return false;
         int sl[4];
         for (int g = 0; g < 4; g++) {
             sl[g] = 0;
             while ((1 << sl[g]) <= max_sf[g]) sl[g]++;
-            if (sl[g] > 4) sl[g] = 4;
         }
-        info.scalefac_compress = encode_scalefac_compress_m2(
-            sl[0], sl[1], sl[2], sl[3]);
+        int sfc = encode_scalefac_compress_m2(sl[0], sl[1], sl[2], sl[3]);
+        if (sfc < 0) return false;
+        info.scalefac_compress = sfc;
         info.part2_length = sl[0]*6 + sl[1]*5 + sl[2]*5 + sl[3]*5;
     } else {
         int max_sf1 = 0, max_sf2 = 0;
@@ -866,7 +884,11 @@ static GranuleInfo quantize_base(const double* mdct_in, int available_bits,
                     if (sf > 0) { info.scalefac[band] = sf; any = true; }
                 }
             }
-            if (any) encode_scalefac_fields(info, sr_index);
+            if (any && !encode_scalefac_fields(info, sr_index)) {
+                // Not representable in the scalefac_compress range: drop the
+                // scalefactors rather than desync fields from values.
+                std::memset(info.scalefac, 0, sizeof(info.scalefac));
+            }
         }
     }
 

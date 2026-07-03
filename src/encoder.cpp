@@ -311,7 +311,10 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
         enc->padding = 1;
     }
 
-    int this_frame_size = enc->frame_size + enc->padding;
+    // VBR frames are emitted unpadded (vbr_pick_frame_size), so the
+    // quantization budget must not assume the padding byte — otherwise a
+    // full frame can need one byte more than the largest emitted frame.
+    int this_frame_size = enc->frame_size + (enc->vbr_mode ? 0 : enc->padding);
     int this_frame_bits = this_frame_size * 8 - 32 - enc->side_info_bits;
 
     // Bit reservoir disabled — each frame is self-contained.
@@ -680,20 +683,22 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                 int sfc = gi.scalefac_compress;
                 int slen[4] = {};
                 int nr[4] = {6, 5, 5, 5};
-                if (sfc < 180) {
-                    slen[0] = sfc / 36;
-                    slen[1] = (sfc % 36) / 6;
-                    slen[2] = (sfc % 36) % 6;
-                    slen[3] = 0;
-                } else if (sfc < 244) {
-                    int v = sfc - 180;
-                    slen[0] = v / 16;
-                    slen[1] = (v % 16) / 4;
-                    slen[2] = v % 4;
+                // ISO 13818-3 mapping (must match what real decoders derive;
+                // the encoder only ever emits the sfc < 400 range)
+                if (sfc < 400) {
+                    slen[0] = (sfc >> 4) / 5;
+                    slen[1] = (sfc >> 4) % 5;
+                    slen[2] = (sfc & 15) >> 2;
+                    slen[3] = sfc & 3;
+                } else if (sfc < 500) {
+                    int v = sfc - 400;
+                    slen[0] = (v >> 2) / 5;
+                    slen[1] = (v >> 2) % 5;
+                    slen[2] = v & 3;
                     slen[3] = 0;
                     nr[0] = 6; nr[1] = 5; nr[2] = 7; nr[3] = 3;
                 } else {
-                    int v = sfc - 244;
+                    int v = sfc - 500;
                     slen[0] = v / 3;
                     slen[1] = v % 3;
                     slen[2] = 0;
@@ -804,7 +809,10 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
         enc->padding = 1;
     }
 
-    int this_frame_size = enc->frame_size + enc->padding;
+    // VBR frames are emitted unpadded (vbr_pick_frame_size), so the
+    // quantization budget must not assume the padding byte — otherwise a
+    // full frame can need one byte more than the largest emitted frame.
+    int this_frame_size = enc->frame_size + (enc->vbr_mode ? 0 : enc->padding);
     int this_frame_bits = this_frame_size * 8 - 32 - enc->side_info_bits;
 
     int reservoir_bytes = 0;
@@ -1008,20 +1016,22 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
                 int sfc = gi.scalefac_compress;
                 int slen[4] = {};
                 int nr[4] = {6, 5, 5, 5};
-                if (sfc < 180) {
-                    slen[0] = sfc / 36;
-                    slen[1] = (sfc % 36) / 6;
-                    slen[2] = (sfc % 36) % 6;
-                    slen[3] = 0;
-                } else if (sfc < 244) {
-                    int v = sfc - 180;
-                    slen[0] = v / 16;
-                    slen[1] = (v % 16) / 4;
-                    slen[2] = v % 4;
+                // ISO 13818-3 mapping (must match what real decoders derive;
+                // the encoder only ever emits the sfc < 400 range)
+                if (sfc < 400) {
+                    slen[0] = (sfc >> 4) / 5;
+                    slen[1] = (sfc >> 4) % 5;
+                    slen[2] = (sfc & 15) >> 2;
+                    slen[3] = sfc & 3;
+                } else if (sfc < 500) {
+                    int v = sfc - 400;
+                    slen[0] = (v >> 2) / 5;
+                    slen[1] = (v >> 2) % 5;
+                    slen[2] = v & 3;
                     slen[3] = 0;
                     nr[0] = 6; nr[1] = 5; nr[2] = 7; nr[3] = 3;
                 } else {
-                    int v = sfc - 244;
+                    int v = sfc - 500;
                     slen[0] = v / 3;
                     slen[1] = v % 3;
                     slen[2] = 0;
