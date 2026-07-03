@@ -18,6 +18,9 @@ path needs only 50 KB RAM and no FPU.
   (`-s auto|avx|sse2|neon|none`)
 - **Quality tiers** (`-q speed|normal|best`): per-granule scale search that
   matches the source's level and bandwidth, trading encode time for SNR
+- **Bit reservoir + rate control** (CBR) and **short blocks with proper
+  start/stop transition windows** and one-granule lookahead for transients
+  (MPEG-1 rates)
 - **All sample rates**: 8-48 kHz (MPEG-1, MPEG-2, MPEG-2.5)
 - **All WAV formats**: PCM 8/16/24/32-bit, IEEE float 32/64, A-law,
   mu-law, WAVE_FORMAT_EXTENSIBLE, raw PCM (`-r`)
@@ -183,9 +186,9 @@ PCM input → Subband Analysis → MDCT → Alias Reduction → Quantization
 ```
 
 - **Subband**: 512-point polyphase filter bank (AVX/SSE2/NEON vectorized)
-- **MDCT**: 36-point (long) with sine window, /288 normalization, transposed
-  cosine table for SIMD (12-point short blocks implemented but gated off — see
-  roadmap)
+- **MDCT**: 36-point long/start/stop windows and 12-point short blocks
+  (3 windows), /288 normalization, transposed cosine table for SIMD; window
+  scheduling with one granule of encoder lookahead (+576 samples latency)
 - **Quantization**: exact x^0.75 companding, anti-clipping gain bounds,
   binary-search gain to the bit budget (`quantize_base`), wrapped in a
   per-granule input-scale search that minimizes decoder-reconstruction MSE
