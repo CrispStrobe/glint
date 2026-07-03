@@ -430,6 +430,166 @@ static double granule_mse(const GranuleInfo& gi, const double* mdct_in,
 // the per-granule scale search.
 static GranuleInfo quantize_base(const double* mdct_in, int available_bits,
                                  int sr_index, bool short_block);
+static void gain_search_with_scalefacs(GranuleInfo& info, const double* mdct_in,
+                                       int available_bits, int sr_index,
+                                       bool short_block);
+static bool encode_scalefac_fields(GranuleInfo& info, int sr_index);
+
+// Per-band decoder-reconstruction noise vs the original MDCT (same
+// reconstruction expression as granule_mse).
+static void compute_band_noise(const GranuleInfo& gi, const double* mdct_in,
+                               int sr_index, double noise_band[21]) {
+    const int* sfb = tables::get_sfb_long_by_unified(sr_index);
+    double decoder_gain = std::pow(2.0, 0.25 * (gi.global_gain - 210));
+    for (int b = 0; b < 21; b++) {
+        noise_band[b] = 0.0;
+        int start = sfb[b];
+        int end = (b < 20) ? sfb[b + 1] : 576;
+        if (start >= end) continue;
+        int sf = gi.scalefac[b];
+        if (gi.preflag && b < 22) sf += tables::preemphasis[b];
+        double sf_d = std::pow(2.0, -0.5 * sf * (1 + gi.scalefac_scale));
+        for (int i = start; i < end; i++) {
+            double xr_hat = 0.0;
+            if (gi.ix[i] != 0) {
+                int a = std::abs(static_cast<int>(gi.ix[i]));
+                double a43 = (a < 8192) ? cbrt_lut[a]
+                                        : static_cast<double>(a) * std::cbrt(static_cast<double>(a));
+                xr_hat = std::copysign(a43 * decoder_gain * sf_d, mdct_in[i]);
+            }
+            double err = mdct_in[i] - xr_hat;
+            noise_band[b] += err * err;
+        }
+    }
+}
+
+// Per-band masking thresholds for the outer loop, from the per-band source
+// energies. Self-masking at -20 dB SMR plus neighbor spreading with a steep
+// 15 dB/band decay, floored at an ATH-shaped term. (The PsychoModel in
+// psycho.cpp is intentionally NOT used here: its 1.5-3 dB/Bark slopes and
+// excluded self-masking are tuned for conservative coefficient pruning in
+// VBR — as an allocation target they let a loud low band "mask" the entire
+// spectrum, and the loop then trades away 30 dB of low-band SNR.)
+static void compute_band_masks(const double* src_band, double mask_band[21]) {
+    static const double kSMR = 1e-2;  // -20 dB signal-to-mask within a band
+    for (int b = 0; b < 21; b++) {
+        double m = src_band[b];
+        for (int j = 0; j < 21; j++) {
+            if (j == b) continue;
+            m += src_band[j] * std::pow(10.0, -1.5 * std::abs(b - j));
+        }
+        // ATH floor in MDCT-energy domain (see compute_headroom_scalefactors)
+        double ath_linear = std::pow(10.0, (tables::ath_cb[std::min(b, 24)] - 96.0) / 10.0);
+        ath_linear /= (288.0 * 288.0);
+        mask_band[b] = std::max(m * kSMR, ath_linear);
+    }
+}
+
+// Perceptual score for the outer loop: (number of bands whose noise exceeds
+// the mask, summed log-excess of those bands). Lexicographic — fewer audible
+// bands always wins; ties broken by total excess.
+static void nmr_score(const GranuleInfo& gi, const double* mdct_in,
+                      int sr_index, const double* mask_band,
+                      int* over_count, double* over_sum) {
+    double noise_band[21];
+    compute_band_noise(gi, mdct_in, sr_index, noise_band);
+    int oc = 0;
+    double os = 0.0;
+    for (int b = 0; b < 21; b++) {
+        if (mask_band[b] <= 0.0) continue;
+        if (noise_band[b] > mask_band[b]) {
+            oc++;
+            os += std::log(noise_band[b] / mask_band[b]);
+        }
+    }
+    *over_count = oc;
+    *over_sum = os;
+}
+
+// NMR-driven outer loop (LAME-style noise shaping): amplify the scalefactors
+// of bands whose reconstruction noise exceeds the masking threshold, then
+// re-run the gain search so global_gain coarsens to pay for it — noise moves
+// from audible bands into masked ones instead of being added on top. This is
+// the mechanism the failed iterative-sf-amplify / smr-sf-amplify branches
+// lacked: they kept the gain fixed, so with a full bit budget every boost
+// was reverted (see CLAUDE.md history). Keeps the best iterate by
+// (over_count, over_sum); returns `start` untouched if nothing improves.
+// MPEG-1 long blocks only (the MPEG-2 scalefac_compress ranges are narrower
+// and the m2 field encoding can't represent nonzero bands 16-20).
+static GranuleInfo nmr_outer_loop(const GranuleInfo& start, double factor,
+                                  const double* mdct_in, int available_bits,
+                                  int sr_index, int max_iters,
+                                  const double* src_band) {
+    double scaled[576];
+    for (int i = 0; i < 576; i++) scaled[i] = mdct_in[i] * factor;
+
+    double mask_band[21];
+    compute_band_masks(src_band, mask_band);
+
+    GranuleInfo best = start;
+    int best_oc;
+    double best_os;
+    nmr_score(start, mdct_in, sr_index, mask_band, &best_oc, &best_os);
+    if (best_oc == 0) return best;
+
+    // Total-noise guard: the loop may only REDISTRIBUTE noise, never blow it
+    // up — a candidate whose total noise exceeds the start's by more than
+    // this factor is rejected regardless of its NMR score. Without it the
+    // loop trades tens of dB of loud-band SNR for the last few "audible"
+    // bands.
+    static const double kNoiseGuard = 1.15;
+    double noise0[21];
+    compute_band_noise(start, mdct_in, sr_index, noise0);
+    double total0 = 0.0;
+    for (int b = 0; b < 21; b++) total0 += noise0[b];
+
+    // MPEG-1 slen field limits: bands 0-10 max 15, bands 11-20 max 7.
+    static const int kSfMax[21] = { 15,15,15,15,15,15,15,15,15,15,15,
+                                    7,7,7,7,7,7,7,7,7,7 };
+
+    GranuleInfo cur = start;
+    for (int iter = 0; iter < max_iters; iter++) {
+        double noise_band[21];
+        compute_band_noise(cur, mdct_in, sr_index, noise_band);
+        GranuleInfo cand = cur;
+        bool amplified = false;
+        for (int b = 0; b < 21; b++) {
+            if (mask_band[b] > 0.0 && noise_band[b] > mask_band[b] &&
+                cand.scalefac[b] < kSfMax[b]) {
+                cand.scalefac[b]++;
+                amplified = true;
+            }
+        }
+        if (!amplified) break;
+        if (!encode_scalefac_fields(cand, sr_index)) break;
+        gain_search_with_scalefacs(cand, scaled, available_bits, sr_index,
+                                   /*short_block=*/false);
+
+        double cand_noise[21];
+        compute_band_noise(cand, mdct_in, sr_index, cand_noise);
+        double cand_total = 0.0;
+        for (int b = 0; b < 21; b++) cand_total += cand_noise[b];
+
+        int oc = 0;
+        double os = 0.0;
+        for (int b = 0; b < 21; b++) {
+            if (mask_band[b] <= 0.0) continue;
+            if (cand_noise[b] > mask_band[b]) {
+                oc++;
+                os += std::log(cand_noise[b] / mask_band[b]);
+            }
+        }
+        if (cand_total <= total0 * kNoiseGuard &&
+            (oc < best_oc || (oc == best_oc && os < best_os))) {
+            best_oc = oc;
+            best_os = os;
+            best = cand;
+        }
+        if (oc == 0 || cand_total > total0 * kNoiseGuard) break;
+        cur = cand;
+    }
+    return best;
+}
 
 // Per-granule scale search (all quality tiers).
 //
@@ -506,8 +666,21 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
                                   src_band);
         });
         for (int k = 0; k < nc; k++) {
-            if (rmse[k] < best_mse) { best_mse = rmse[k]; best_result = rres[k]; }
+            if (rmse[k] < best_mse) {
+                best_mse = rmse[k];
+                best_result = rres[k];
+                best_factor = cand[k];
+            }
         }
+    }
+
+    // NMR-driven noise shaping on the winning candidate (MPEG-1 long blocks;
+    // see nmr_outer_loop). Runs once per granule, after the scale search.
+    if (quality_mode >= 2 && sr_index < 3 && !short_block) {
+        int max_iters = 10;
+        best_result = nmr_outer_loop(best_result, best_factor, mdct_in,
+                                     available_bits, sr_index, max_iters,
+                                     src_band);
     }
     return best_result;
 }
