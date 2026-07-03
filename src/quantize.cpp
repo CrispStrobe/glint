@@ -161,9 +161,11 @@ static double fast_pow34(double x) {
     return std::pow(x, 0.75);
 }
 
-// Window index of each reordered short-spectrum coefficient (block_type 2:
-// wire order is [sfb band][window][line]); lazily built per sample rate.
-struct ShortWindowMap { uint8_t win[576]; };
+// Window and short-sfb-band index of each reordered short-spectrum
+// coefficient (block_type 2: wire order is [sfb band][window][line]);
+// lazily built per sample rate. Band 12 is the untransmitted tail (the
+// short analog of sfb21 — no scalefactor).
+struct ShortWindowMap { uint8_t win[576]; uint8_t band[576]; };
 static const ShortWindowMap* get_short_window_map(int sr_index) {
     static ShortWindowMap maps[6];
     static bool init[6] = {};
@@ -174,10 +176,17 @@ static const ShortWindowMap* get_short_window_map(int sr_index) {
         for (int b = 0; b < 13; b++) {
             int len = sfb[b + 1] - sfb[b];
             for (int w = 0; w < 3; w++)
-                for (int j = 0; j < len && idx < 576; j++)
-                    maps[sr_index].win[idx++] = static_cast<uint8_t>(w);
+                for (int j = 0; j < len && idx < 576; j++) {
+                    maps[sr_index].win[idx] = static_cast<uint8_t>(w);
+                    maps[sr_index].band[idx] = static_cast<uint8_t>(b);
+                    idx++;
+                }
         }
-        while (idx < 576) maps[sr_index].win[idx++] = 2;
+        while (idx < 576) {
+            maps[sr_index].win[idx] = 2;
+            maps[sr_index].band[idx] = 12;
+            idx++;
+        }
         init[sr_index] = true;
     }
     return &maps[sr_index];
@@ -213,7 +222,8 @@ static void fill_quant_cache(QuantCache& cache, const double* mdct_in,
                               const int scalefac[21], int scalefac_scale,
                               int preflag, int sr_index,
                               int block_type = 0,
-                              const int* subblock_gain = nullptr) {
+                              const int* subblock_gain = nullptr,
+                              const int (*scalefac_s)[3] = nullptr) {
     const int* sfb = tables::get_sfb_long_by_unified(sr_index);
     // Per-window quantizer boost for short transforms: the decoder scales
     // window w by 2^(-2*subblock_gain[w]), so the encoder pre-boosts by
@@ -221,10 +231,13 @@ static void fill_quant_cache(QuantCache& cache, const double* mdct_in,
     // the same global_gain at no side-info cost.
     double sbg_boost[3] = { 1.0, 1.0, 1.0 };
     const uint8_t* wmap = nullptr;
+    const uint8_t* bmap = nullptr;
     if (block_type == 2 && subblock_gain) {
         for (int w = 0; w < 3; w++)
             sbg_boost[w] = std::pow(2.0, 1.5 * subblock_gain[w]);
-        wmap = get_short_window_map(sr_index)->win;
+        const ShortWindowMap* m = get_short_window_map(sr_index);
+        wmap = m->win;
+        bmap = m->band;
     }
     int band = 0;
     for (int i = 0; i < 576; i++) {
@@ -236,7 +249,11 @@ static void fill_quant_cache(QuantCache& cache, const double* mdct_in,
         // boosting everything above ~9 kHz by up to 29x with no decoder-side
         // compensation.)
         int sf = 0;
-        if (band < 21 && i < sfb[21]) {
+        if (wmap) {
+            // Short transform: per-(band,window) scalefactor; band 12 (the
+            // short sfb21 analog) carries none.
+            if (scalefac_s && bmap[i] < 12) sf = scalefac_s[bmap[i]][wmap[i]];
+        } else if (band < 21 && i < sfb[21]) {
             sf = scalefac[band];
             if (preflag) sf += tables::preemphasis[band];
         }
@@ -423,12 +440,22 @@ static double granule_mse(const GranuleInfo& gi, const double* mdct_in,
     const int* sfb = tables::get_sfb_long_by_unified(sr_index);
     double decoder_gain = std::pow(2.0, 0.25 * (gi.global_gain - 210));
     // Short transforms: the decoder scales window w by 2^(-2*subblock_gain[w])
+    // and applies the per-(band,window) short scalefactor.
     double sbg_fac[3] = { 1.0, 1.0, 1.0 };
+    double sfd_s[13][3];
     const uint8_t* wmap = nullptr;
+    const uint8_t* bmap = nullptr;
     if (gi.block_type == 2) {
-        for (int w = 0; w < 3; w++)
+        for (int w = 0; w < 3; w++) {
             sbg_fac[w] = std::pow(2.0, -2.0 * gi.subblock_gain[w]);
-        wmap = get_short_window_map(sr_index)->win;
+            for (int b = 0; b < 12; b++)
+                sfd_s[b][w] = std::pow(2.0, -0.5 * gi.scalefac_s[b][w] *
+                                              (1 + gi.scalefac_scale));
+            sfd_s[12][w] = 1.0;
+        }
+        const ShortWindowMap* m = get_short_window_map(sr_index);
+        wmap = m->win;
+        bmap = m->band;
     }
     double noise = 0.0;
     // Per-band iteration so the expensive std::pow(2.0, ...) sf_d term is
@@ -453,8 +480,10 @@ static double granule_mse(const GranuleInfo& gi, const double* mdct_in,
                 int a = std::abs(static_cast<int>(gi.ix[i]));
                 double a43 = (a < 8192) ? cbrt_lut[a]
                                         : static_cast<double>(a) * std::cbrt(static_cast<double>(a));
-                double g = wmap ? decoder_gain * sbg_fac[wmap[i]] : decoder_gain;
-                xr_hat = std::copysign(a43 * g * sf_d, mdct_in[i]);
+                double g = wmap ? decoder_gain * sbg_fac[wmap[i]] *
+                                      sfd_s[bmap[i]][wmap[i]]
+                                : decoder_gain * sf_d;
+                xr_hat = std::copysign(a43 * g, mdct_in[i]);
             }
             double err = mdct_in[i] - xr_hat;
             noise += err * err;
@@ -482,11 +511,20 @@ static void compute_band_noise(const GranuleInfo& gi, const double* mdct_in,
     const int* sfb = tables::get_sfb_long_by_unified(sr_index);
     double decoder_gain = std::pow(2.0, 0.25 * (gi.global_gain - 210));
     double sbg_fac[3] = { 1.0, 1.0, 1.0 };
+    double sfd_s[13][3];
     const uint8_t* wmap = nullptr;
+    const uint8_t* bmap = nullptr;
     if (gi.block_type == 2) {
-        for (int w = 0; w < 3; w++)
+        for (int w = 0; w < 3; w++) {
             sbg_fac[w] = std::pow(2.0, -2.0 * gi.subblock_gain[w]);
-        wmap = get_short_window_map(sr_index)->win;
+            for (int b = 0; b < 12; b++)
+                sfd_s[b][w] = std::pow(2.0, -0.5 * gi.scalefac_s[b][w] *
+                                              (1 + gi.scalefac_scale));
+            sfd_s[12][w] = 1.0;
+        }
+        const ShortWindowMap* m = get_short_window_map(sr_index);
+        wmap = m->win;
+        bmap = m->band;
     }
     for (int b = 0; b < 21; b++) noise_band[b] = 0.0;
     // Same band/sf_d handling as granule_mse (sfb21 region reconstructs with
@@ -508,8 +546,10 @@ static void compute_band_noise(const GranuleInfo& gi, const double* mdct_in,
                 int a = std::abs(static_cast<int>(gi.ix[i]));
                 double a43 = (a < 8192) ? cbrt_lut[a]
                                         : static_cast<double>(a) * std::cbrt(static_cast<double>(a));
-                double g = wmap ? decoder_gain * sbg_fac[wmap[i]] : decoder_gain;
-                xr_hat = std::copysign(a43 * g * sf_d, mdct_in[i]);
+                double g = wmap ? decoder_gain * sbg_fac[wmap[i]] *
+                                      sfd_s[bmap[i]][wmap[i]]
+                                : decoder_gain * sf_d;
+                xr_hat = std::copysign(a43 * g, mdct_in[i]);
             }
             double err = mdct_in[i] - xr_hat;
             acc += err * err;
@@ -571,6 +611,164 @@ static void compute_band_masks(const double* src_band, int sr_index,
             acc += src_band[j] * m->spread[b][j];
         mask_band[b] = std::max(acc * kOffset, m->ath[b]);
     }
+}
+
+// Short-block mask model: Schroeder-Bark spreading across the 13 short
+// sfbs of one window (temporal masking between the 3 windows is ignored).
+struct ShortMaskModel { double spread[13][13]; double ath[13]; };
+static const ShortMaskModel* get_short_mask_model(int sr_index) {
+    static ShortMaskModel models[6];
+    static bool init[6] = {};
+    if (sr_index < 0 || sr_index > 5) sr_index = 0;
+    if (!init[sr_index]) {
+        ShortMaskModel& m = models[sr_index];
+        static const int rates[6] = { 44100, 48000, 32000, 22050, 24000, 16000 };
+        double srate = rates[sr_index];
+        const int* sfb = tables::get_sfb_short_by_unified(sr_index);
+        double z[13];
+        for (int b = 0; b < 13; b++) {
+            double fc = 0.5 * (sfb[b] + sfb[b + 1]) * (srate / 2.0) / 192.0;
+            z[b] = 13.0 * std::atan(0.00076 * fc) +
+                   3.5 * std::atan((fc / 7500.0) * (fc / 7500.0));
+            double ath_db = tables::ath_cb[std::min(b * 2, 24)];
+            m.ath[b] = std::pow(10.0, (ath_db - 96.0) / 10.0) / (288.0 * 288.0);
+        }
+        for (int b = 0; b < 13; b++)
+            for (int j = 0; j < 13; j++) {
+                double dz = z[b] - z[j];
+                double s_db = 15.81 + 7.5 * (dz + 0.474) -
+                              17.5 * std::sqrt(1.0 + (dz + 0.474) * (dz + 0.474));
+                m.spread[b][j] = std::pow(10.0, s_db / 10.0);
+            }
+        init[sr_index] = true;
+    }
+    return &models[sr_index];
+}
+
+// Per-(band,window) noise of a short granule's reconstruction vs the
+// (reordered) source, and the matching masks from per-cell source energy.
+static void compute_cell_noise(const GranuleInfo& gi, const double* mdct_in,
+                               int sr_index, double noise[13][3]) {
+    const ShortWindowMap* map = get_short_window_map(sr_index);
+    double decoder_gain = std::pow(2.0, 0.25 * (gi.global_gain - 210));
+    double sbg_fac[3];
+    double sfd_s[13][3];
+    for (int w = 0; w < 3; w++) {
+        sbg_fac[w] = std::pow(2.0, -2.0 * gi.subblock_gain[w]);
+        for (int b = 0; b < 12; b++)
+            sfd_s[b][w] = std::pow(2.0, -0.5 * gi.scalefac_s[b][w] *
+                                          (1 + gi.scalefac_scale));
+        sfd_s[12][w] = 1.0;
+    }
+    for (int b = 0; b < 13; b++)
+        for (int w = 0; w < 3; w++) noise[b][w] = 0.0;
+    for (int i = 0; i < 576; i++) {
+        int b = map->band[i], w = map->win[i];
+        double xr_hat = 0.0;
+        if (gi.ix[i] != 0) {
+            int a = std::abs(static_cast<int>(gi.ix[i]));
+            double a43 = (a < 8192) ? cbrt_lut[a]
+                                    : static_cast<double>(a) * std::cbrt(static_cast<double>(a));
+            xr_hat = std::copysign(a43 * decoder_gain * sbg_fac[w] * sfd_s[b][w],
+                                   mdct_in[i]);
+        }
+        double err = mdct_in[i] - xr_hat;
+        noise[b][w] += err * err;
+    }
+}
+
+static void compute_cell_masks(const double* mdct_in, int sr_index,
+                               double mask[13][3]) {
+    const ShortWindowMap* map = get_short_window_map(sr_index);
+    const ShortMaskModel* m = get_short_mask_model(sr_index);
+    static const double kOffset = std::pow(10.0, -14.0 / 10.0);
+    double e[13][3] = {};
+    for (int i = 0; i < 576; i++)
+        e[map->band[i]][map->win[i]] += mdct_in[i] * mdct_in[i];
+    for (int w = 0; w < 3; w++)
+        for (int b = 0; b < 13; b++) {
+            double acc = 0.0;
+            for (int j = 0; j < 13; j++)
+                acc += e[j][w] * m->spread[b][j];
+            mask[b][w] = std::max(acc * kOffset, m->ath[b]);
+        }
+}
+
+// Short-granule shaping: same idea as nmr_outer_loop, over the 13x3
+// (band,window) cells; band 12 counts toward the objective but has no
+// scalefactor to amplify.
+static GranuleInfo nmr_outer_loop_short(const GranuleInfo& start, double factor,
+                                        const double* mdct_in,
+                                        int available_bits, int sr_index,
+                                        int max_iters, int gain_floor) {
+    double mask[13][3];
+    compute_cell_masks(mdct_in, sr_index, mask);
+
+    double noise0[13][3];
+    compute_cell_noise(start, mdct_in, sr_index, noise0);
+    double j_best = 0.0, total0 = 0.0;
+    for (int b = 0; b < 13; b++)
+        for (int w = 0; w < 3; w++) {
+            if (mask[b][w] > 0.0) j_best += noise0[b][w] / mask[b][w];
+            total0 += noise0[b][w];
+        }
+    if (j_best < 0.5) return start;
+
+    double scaled[576];
+    for (int i = 0; i < 576; i++) scaled[i] = mdct_in[i] * factor;
+
+    static const double kNoiseGuard = 1.25;
+
+    GranuleInfo best = start;
+    GranuleInfo cur = start;
+    double cur_noise[13][3];
+    std::memcpy(cur_noise, noise0, sizeof(cur_noise));
+
+    for (int iter = 0; iter < max_iters; iter++) {
+        double worst = 0.0;
+        for (int b = 0; b < 13; b++)
+            for (int w = 0; w < 3; w++) {
+                if (mask[b][w] <= 0.0) continue;
+                double r = cur_noise[b][w] / mask[b][w];
+                if (r > worst) worst = r;
+            }
+        if (worst <= 1.0) break;
+        double thresh = std::max(1.0, worst * 0.25);
+
+        GranuleInfo cand = cur;
+        bool amplified = false;
+        for (int b = 0; b < 12; b++)
+            for (int w = 0; w < 3; w++) {
+                if (mask[b][w] <= 0.0) continue;
+                int cap = (b < 6) ? 15 : 7;
+                if (cur_noise[b][w] / mask[b][w] >= thresh &&
+                    cand.scalefac_s[b][w] < cap) {
+                    cand.scalefac_s[b][w]++;
+                    amplified = true;
+                }
+            }
+        if (!amplified) break;
+        if (!encode_scalefac_fields(cand, sr_index)) break;
+        gain_search_with_scalefacs(cand, scaled, available_bits, sr_index,
+                                   /*block_type=*/2, gain_floor);
+
+        double cand_noise[13][3];
+        compute_cell_noise(cand, mdct_in, sr_index, cand_noise);
+        double j_cand = 0.0, cand_total = 0.0;
+        for (int b = 0; b < 13; b++)
+            for (int w = 0; w < 3; w++) {
+                if (mask[b][w] > 0.0) j_cand += cand_noise[b][w] / mask[b][w];
+                cand_total += cand_noise[b][w];
+            }
+
+        if (j_cand < j_best && cand_total <= total0 * kNoiseGuard) {
+            j_best = j_cand;
+            best = cand;
+        }
+        cur = cand;
+        std::memcpy(cur_noise, cand_noise, sizeof(cur_noise));
+    }
+    return best;
 }
 
 // Outer-loop objective, aligned with the measurement metric: total linear
@@ -774,19 +972,56 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
     // see nmr_outer_loop). The masks mirror the measurement metric's model
     // (Schroeder spreading, -14 dB offset, ATH floor); granules already
     // comfortably below the mask skip the loop.
-    if (allow_psy && quality_mode >= 1 && sr_index < 3 && block_type == 0) {
+    if (allow_psy && quality_mode >= 1 && sr_index < 3) {
         int max_iters = (quality_mode >= 2) ? 20 : 8;
-        best_result = nmr_outer_loop(best_result, best_factor, mdct_in,
-                                     available_bits, sr_index, max_iters,
-                                     src_band, gain_floor);
+        if (block_type == 2) {
+            best_result = nmr_outer_loop_short(best_result, best_factor,
+                                               mdct_in, available_bits,
+                                               sr_index, max_iters, gain_floor);
+        } else if (block_type == 0) {
+            best_result = nmr_outer_loop(best_result, best_factor, mdct_in,
+                                         available_bits, sr_index, max_iters,
+                                         src_band, gain_floor);
+        }
+        // Types 1/3 (start/stop) are deliberately NOT shaped: their masks
+        // would come from attack-dominated spectra and measured +3 dB NMR
+        // on the castanet clip when tried.
     }
     return best_result;
 }
 
-// Encode info.scalefac into scalefac_compress/part2_length (slen selection).
-// Returns false when the scalefactors cannot be represented (a band exceeds
-// its slen field's range), leaving the fields untouched.
+// Encode the granule's scalefactors into scalefac_compress/part2_length
+// (slen selection). Short granules (block_type 2) use scalefac_s: 12 short
+// sfbs x 3 windows, slen1 for bands 0-5 and slen2 for 6-11, 18 values per
+// slen group. Returns false when the scalefactors cannot be represented.
 static bool encode_scalefac_fields(GranuleInfo& info, int sr_index) {
+    static const int kSlenTableS[16][2] = {
+        {0,0},{0,1},{0,2},{0,3},{3,0},{1,1},{1,2},{1,3},
+        {2,1},{2,2},{2,3},{3,1},{3,2},{3,3},{4,2},{4,3}
+    };
+    if (info.block_type == 2) {
+        int max_sf1 = 0, max_sf2 = 0;
+        for (int b = 0; b < 6; b++)
+            for (int w = 0; w < 3; w++)
+                max_sf1 = std::max(max_sf1, info.scalefac_s[b][w]);
+        for (int b = 6; b < 12; b++)
+            for (int w = 0; w < 3; w++)
+                max_sf2 = std::max(max_sf2, info.scalefac_s[b][w]);
+        if (max_sf1 > 15 || max_sf2 > 7) return false;
+        int slen1 = 0; while ((1 << slen1) <= max_sf1) slen1++;
+        int slen2 = 0; while ((1 << slen2) <= max_sf2) slen2++;
+        int best_sfc = -1, best_cost = 1 << 30;
+        for (int i = 0; i < 16; i++) {
+            if (kSlenTableS[i][0] >= slen1 && kSlenTableS[i][1] >= slen2) {
+                int cost = (kSlenTableS[i][0] + kSlenTableS[i][1]) * 18;
+                if (cost < best_cost) { best_cost = cost; best_sfc = i; }
+            }
+        }
+        if (best_sfc < 0) return false;
+        info.scalefac_compress = best_sfc;
+        info.part2_length = best_cost;
+        return true;
+    }
     bool is_mpeg2 = (sr_index >= 3);
     if (is_mpeg2) {
         // Band groups [6,5,5,5]; slen limits 4/4/3/3 in the sfc<400 range,
@@ -853,7 +1088,8 @@ static void gain_search_with_scalefacs(GranuleInfo& info, const double* mdct_in,
     // budget-guarantee loop below (scalefactors no longer change here).
     QuantCache cache;
     fill_quant_cache(cache, mdct_in, info.scalefac, info.scalefac_scale,
-                     info.preflag, sr_index, block_type, info.subblock_gain);
+                     info.preflag, sr_index, block_type, info.subblock_gain,
+                     info.scalefac_s);
 
     // Gain bounds are computed from the cache's actual quantizer input —
     // pow34(|xr|) INCLUDING the per-band scalefactor boost. Computing them

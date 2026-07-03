@@ -475,6 +475,18 @@ static const uint8_t* finish_frame(glint_t enc, GranuleInfo granule_info[2][2],
                             md.write_bits(gi.scalefac[b], slen[g]);
                     }
                 }
+            } else if (gi.block_type == 2) {
+                // MPEG-1 short-block scalefactors: 12 short sfbs x 3 windows
+                // in wire order [band][window]; slen1 covers bands 0-5,
+                // slen2 bands 6-11 (no SCFSI for window-switching granules).
+                int slen1 = slen_table_m1[gi.scalefac_compress][0];
+                int slen2 = slen_table_m1[gi.scalefac_compress][1];
+                for (int b = 0; b < 6; b++)
+                    for (int w = 0; w < 3; w++)
+                        if (slen1 > 0) md.write_bits(gi.scalefac_s[b][w], slen1);
+                for (int b = 6; b < 12; b++)
+                    for (int w = 0; w < 3; w++)
+                        if (slen2 > 0) md.write_bits(gi.scalefac_s[b][w], slen2);
             } else {
                 // MPEG-1 scalefactor encoding
                 int slen1 = slen_table_m1[gi.scalefac_compress][0];

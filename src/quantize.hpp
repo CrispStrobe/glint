@@ -14,6 +14,9 @@ struct GranuleInfo {
     int global_gain;
     int scalefac[21];
     int subblock_gain[3];  // per-window gain relief (block_type 2 only)
+    int scalefac_s[12][3]; // short-window scalefactors (block_type 2 only):
+                           // 12 transmitted short sfbs x 3 windows (band 12,
+                           // the short sfb21 analog, has no scalefactor)
     int scalefac_compress;
     int part2_3_length;
     int part2_length;
