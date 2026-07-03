@@ -6,12 +6,15 @@ vs −16.1, audible band-frames 0.3% vs 0.0%; electronic 43.0 vs 44.5 / NMR
 −12.4 vs −15.8; quartet 44.1 vs 46.0 / −9.3 vs −11.1 (audible 1.0%);
 castanets-128k NMR 10.2 vs 4.8 (256k: −0.5 — at the mask). MPEG-2 64k
 **21.4 vs 17.6** (glint ahead). VBR V4 40.3 dB @ 265 kbps.
-**Remaining LAME gaps**: mean NMR tail (−12 vs −16 on speech; its psymodel
-shapes deeper — next: preflag, mask-offset tuning, per-band-frame outlier
-control), short-window **scalefactors** for short granules (the
-castanet-128k gap: 10.1 vs 4.8 — subblock_gain and the reservoir are in
-place, the missing tool is per-(band,window) shaping + its emission
-format), LSF short blocks.
+**Remaining LAME gaps**: mean NMR tail (−12 vs −16 on speech; next:
+preflag, mask-offset tuning, per-band-frame outlier control), the
+castanet-128k gap (10.0 vs 4.8 — **all structural tools now in place**:
+short-window scalefactors + per-(band,window) shaping landed and
+wire-validated on two decoders, subblock_gain, reservoir; what remains
+looks like attack-region bit allocation / transient scheduling breadth —
+try 2–3 short granules per attack and cross-frame bit planning), LSF
+short blocks. Do NOT shape start/stop granules (types 1/3): masks from
+attack-dominated spectra mislead the loop, measured +3 dB NMR.
 Done since: scalefac_scale=1 escalation (gated to bands >6 dB over mask at
 their sf cap; helps ≤128k, neutral above), energy-based subblock_gain
 (castanets 256k NMR −0.50 → −0.72; peak-based selection measured a no-op).
