@@ -68,6 +68,17 @@ HuffRegions huffman_determine_regions_short_from_bounds(const int16_t* ix,
 // Returns table_id that minimizes bit count
 int select_best_table(const int16_t* ix, int start, int end);
 
+// Fused long-block region/table selection + bit count for the quantization
+// hot path: determines regions, picks each sub-region's cheapest candidate
+// table and the count1 table, and returns the total bit count — all in one
+// pass over the spectrum. bit_limit >= 0 enables early exit (returns a value
+// greater than bit_limit; region/table fields in *out are then partial and
+// must not be used for encoding). Equivalent to
+// huffman_determine_regions_from_bounds + huffman_count_bits_limited.
+int huffman_select_and_count(const int16_t* ix, int sr_index, int rzero,
+                             int count1_start, int bit_limit,
+                             HuffRegions* out);
+
 } // namespace glint
 
 #endif // GLINT_HUFFMAN_HPP

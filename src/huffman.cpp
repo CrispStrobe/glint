@@ -63,9 +63,53 @@ inline int count1_mask(const int16_t* q) {
            ((q[2] != 0) << 1) | (q[3] != 0);
 }
 
+// Exact bit count for one region under one candidate table (LUT-driven; the
+// pair_cost ESC clamp keeps this exact for values >= 15 as well).
+inline int count_region_bits(const int16_t* ix, int start, int end, int t) {
+    const uint8_t* lut = kPairCost.cost[t];
+    const bool esc = t >= 16;
+    int total = 0;
+    for (int i = start; i < end; i += 2) {
+        int y = (i + 1 < end) ? ix[i + 1] : 0;
+        total += pair_cost(lut, esc, ix[i], y);
+    }
+    return total;
+}
+
+// Candidate tables whose encodable range covers max_val. Tables in the same
+// range group differ only by code-length distribution shape; for ESC ranges
+// the two linbits families (16-23 vs 24-31) both get their smallest
+// sufficient member. Every group contains the old choose_huff_table pick, so
+// the first-minimum reduction can never do worse than the heuristic.
+inline int table_candidates(int max_val, int cand[3]) {
+    if (max_val <= 1)  { cand[0] = 1;  cand[1] = 2;  cand[2] = 3;  return 3; }
+    if (max_val <= 2)  { cand[0] = 2;  cand[1] = 3;  return 2; }
+    if (max_val <= 3)  { cand[0] = 5;  cand[1] = 6;  return 2; }
+    if (max_val <= 5)  { cand[0] = 7;  cand[1] = 8;  cand[2] = 9;  return 3; }
+    if (max_val <= 7)  { cand[0] = 10; cand[1] = 11; cand[2] = 12; return 3; }
+    if (max_val <= 15) { cand[0] = 13; cand[1] = 15; return 2; }
+    int bits_needed = 0;
+    int tmp = max_val - 15;
+    while (tmp > 0) { bits_needed++; tmp >>= 1; }
+    int nc = 0;
+    for (int t = 16; t < 24; ++t)
+        if (tables::kLinbits[t - 16] >= bits_needed) { cand[nc++] = t; break; }
+    for (int t = 24; t < 32; ++t)
+        if (tables::kLinbits[t - 16] >= bits_needed) { cand[nc++] = t; break; }
+    if (nc == 0) { cand[0] = 24; nc = 1; }  // unreachable (13 linbits cover int16)
+    return nc;
+}
+
 } // namespace
 
-// Find the best Huffman table for a region via max-value-indexed lookup.
+// Find the best Huffman table for a region: identify the candidate tables
+// whose encodable range covers the region's max value, count actual bits for
+// each, and keep the cheapest (first minimum wins, so selection is
+// deterministic). Tables in the same range group differ by code-length
+// distribution shape (e.g. 7 vs 8 vs 9), which the old max-value-only lookup
+// ignored; for ESC ranges the two linbits families (16-23 vs 24-31) are
+// compared the same way. Fewer Huffman bits at the same coefficients lets the
+// gain search land on a finer global_gain within the same budget.
 int select_best_table(const int16_t* ix, int start, int end) {
     if (start >= end) return 0;
     int max_val = 0;
@@ -73,7 +117,127 @@ int select_best_table(const int16_t* ix, int start, int end) {
         int v = std::abs(ix[i]);
         if (v > max_val) max_val = v;
     }
-    return tables::choose_huff_table(max_val);
+    if (max_val == 0) return 0;
+
+    int cand[3];
+    int nc = table_candidates(max_val, cand);
+    int best = cand[0];
+    int best_bits = count_region_bits(ix, start, end, cand[0]);
+    for (int c = 1; c < nc; c++) {
+        int bits = count_region_bits(ix, start, end, cand[c]);
+        if (bits < best_bits) { best_bits = bits; best = cand[c]; }
+    }
+    return best;
+}
+
+// Fused region determination + table selection + bit count for the long-block
+// quantization hot path. One pass per region accumulates every candidate
+// table's total simultaneously; the running minimum across candidates is a
+// lower bound of the final count, so the bit_limit early exit stays exact
+// (any return over the limit is only compared against the limit — the caller
+// never uses partial regions for encoding).
+int huffman_select_and_count(const int16_t* ix, int sr_index, int rzero,
+                             int count1_start, int bit_limit,
+                             HuffRegions* out) {
+    HuffRegions r{};
+    r.big_values = count1_start / 2;
+    r.count1 = (rzero - count1_start) / 4;
+    if (r.count1 < 0) r.count1 = 0;
+    r.rzero = rzero;
+
+    const int* sfb = tables::get_sfb_long_by_unified(sr_index);
+    int big_values_end = count1_start;
+    const bool use_limit = bit_limit >= 0;
+    int total = 0;
+
+    if (big_values_end == 0) {
+        r.region0_count = 0;
+        r.region1_count = 0;
+    } else {
+        // Region boundary logic identical to
+        // huffman_determine_regions_from_bounds.
+        int max_band = 0;
+        for (int b = 0; b < 22; b++) {
+            if (sfb[b] >= big_values_end) { max_band = b; break; }
+            if (b == 21) max_band = 22;
+        }
+        if (max_band <= 1) {
+            r.region0_count = max_band;
+            r.region1_count = 0;
+        } else if (max_band <= 10) {
+            r.region0_count = (max_band + 1) / 2;
+            r.region1_count = max_band - r.region0_count - 1;
+        } else {
+            r.region0_count = 7;
+            r.region1_count = max_band > 8 ? std::min(max_band - 8, 14) - 1 : 0;
+        }
+        if (r.region0_count > 15) r.region0_count = 15;
+        if (r.region1_count > 7) r.region1_count = 7;
+
+        int region0_end = sfb[r.region0_count + 1];
+        if (region0_end > big_values_end) region0_end = big_values_end;
+        int region1_end = sfb[r.region0_count + 1 + r.region1_count + 1];
+        if (region1_end > big_values_end) region1_end = big_values_end;
+
+        const int region_start[3] = { 0, region0_end, region1_end };
+        const int region_end[3] = { region0_end, region1_end, big_values_end };
+        for (int reg = 0; reg < 3; reg++) {
+            int start = region_start[reg], end = region_end[reg];
+            if (start >= end) { r.table_select[reg] = 0; continue; }
+            int max_val = 0;
+            for (int i = start; i < end; i++) {
+                int v = std::abs(ix[i]);
+                if (v > max_val) max_val = v;
+            }
+            if (max_val == 0) { r.table_select[reg] = 0; continue; }
+
+            int cand[3];
+            int nc = table_candidates(max_val, cand);
+            const uint8_t* lut[3];
+            bool esc[3];
+            int tot[3] = { 0, 0, 0 };
+            for (int c = 0; c < nc; c++) {
+                lut[c] = kPairCost.cost[cand[c]];
+                esc[c] = cand[c] >= 16;
+            }
+            for (int i = start; i < end; i += 2) {
+                int x = ix[i];
+                int y = (i + 1 < end) ? ix[i + 1] : 0;
+                int m = tot[0] += pair_cost(lut[0], esc[0], x, y);
+                for (int c = 1; c < nc; c++) {
+                    tot[c] += pair_cost(lut[c], esc[c], x, y);
+                    if (tot[c] < m) m = tot[c];
+                }
+                if (use_limit && total + m > bit_limit) {
+                    if (out) *out = r;
+                    return total + m;
+                }
+            }
+            int best = 0;
+            for (int c = 1; c < nc; c++)
+                if (tot[c] < tot[best]) best = c;
+            r.table_select[reg] = cand[best];
+            total += tot[best];
+        }
+    }
+
+    // count1: accumulate both tables' totals in one pass; min(A,B) is a lower
+    // bound of the final choice, keeping the early exit exact.
+    int bits_a = 0, bits_b = 0;
+    for (int i = count1_start; i + 3 < rzero; i += 4) {
+        int m = count1_mask(ix + i);
+        bits_a += kCount1Cost.cost[0][m];
+        bits_b += kCount1Cost.cost[1][m];
+        if (use_limit && total + std::min(bits_a, bits_b) > bit_limit) {
+            if (out) *out = r;
+            return total + std::min(bits_a, bits_b);
+        }
+    }
+    r.count1table = (bits_b < bits_a) ? 1 : 0;
+    total += std::min(bits_a, bits_b);
+
+    if (out) *out = r;
+    return total;
 }
 
 static int find_count1_start(const int16_t* ix, int rzero) {

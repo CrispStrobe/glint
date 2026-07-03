@@ -244,11 +244,14 @@ static int quantize_and_count(const double* mdct_in, int16_t* ix,
     // Short blocks use a different region layout; the gain search must count
     // bits with the same layout the encoder will actually use.
     int count1_start = find_count1_start(ix, rzero);
-    HuffRegions regions = short_block
-        ? huffman_determine_regions_short_from_bounds(ix, sr_index, rzero,
-                                                      count1_start)
-        : huffman_determine_regions_from_bounds(ix, sr_index, rzero,
-                                                count1_start);
+    if (!short_block) {
+        // Fused region/table selection + count: one pass picks each region's
+        // cheapest candidate table and returns the total.
+        return huffman_select_and_count(ix, sr_index, rzero, count1_start,
+                                        bit_limit, out_regions);
+    }
+    HuffRegions regions = huffman_determine_regions_short_from_bounds(
+        ix, sr_index, rzero, count1_start);
     if (out_regions) *out_regions = regions;
     return bit_limit >= 0 ? huffman_count_bits_limited(ix, regions, sr_index,
                                                        bit_limit)
