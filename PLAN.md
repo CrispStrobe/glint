@@ -1,5 +1,37 @@
 # Quality improvement plan
 
+## 0. THE headline problem — ~15 dB SNR ceiling vs LAME's ~37-46 dB (TODO, investigate first)
+
+Measured on identical inputs at 256 kbps CBR (LAME via ffmpeg libmp3lame,
+`tests/measure_audio.py`, NMR metric):
+
+| clip (60 s, 44.1k stereo) | metric | LAME | glint `-q best` |
+|---|---|---|---|
+| speech ref | SNR / LSD / mean NMR | 36.9 / 4.6 / **−16.1** | 14.9 / 12.0 / **+5.1** |
+| electronic (bass-heavy) | SNR / mean NMR | 44.5 / −15.8 | 14.7 / +6.3 |
+| string quartet | SNR / mean NMR | 46.0 / −11.1 | 14.2 / +5.3 |
+
+256 kbps stereo should be near-transparent; glint plateaus ~14-15 dB SNR on
+every content type while spending the same bits. This is structural, not
+tuning. Diagnostic signatures to chase:
+- **Mid-band starvation**: bandSNR 1-4 kHz is 3.5-8 dB on music (LAME: 24)
+  even though little total error power sits there — the 1-4k content is
+  simply gone. Rolloff on the quartet: 603 Hz vs 1141 Hz source; on speech
+  it's fine (tuned there). The envelope-retention penalty and scale search
+  were tuned on speech and do not generalize.
+- **Noise placement is inverted vs LAME**: glint puts 64-85% of error power
+  in 0-1 kHz; LAME pushes ~50% above 8 kHz where masking absorbs it.
+- **`-q speed` collapses on bass-heavy content**: 6.7 dB SNR (electronic).
+- The per-granule input-scale search (factors 1.0-4.2) reconstructs ≈ f·x
+  and relies on dead-zone down-bias to land near the right level — check
+  whether a systematic MDCT/quantizer normalization mismatch is being
+  papered over by the factor search; if so small coefficients die in the
+  dead zone by construction and no amount of scalefactor work will fix it.
+- Check per-granule budget utilization (sum part2_3_length vs
+  available_bits): if utilization is high, the bits are being spent on the
+  wrong things (huge low-band ix values?); if low, the gain search is
+  leaving budget on the table.
+
 Prioritized quality (not speed) work. Anchor facts from the 256 kbps speech
 measurements: 65–74% of all error power sits in 0–1 kHz, and several standard
 MP3 bitstream tools are unused (`preflag`/`scalefac_scale` never set, Huffman
@@ -43,6 +75,8 @@ LSD −0.5 dB at all tiers, rolloff +23/+70 Hz (normal/best).
   only). Extending it from best-only to normal was measured and regressed
   (joint normal −0.05 dB SNR, seg-SNR and LSD worse), so it stays best-only
   with the 30/70 clamp.
+- Music check (electronic + string quartet, see item 0): joint ≈ stereo on
+  both clips, so the 45/55 clamp holds up beyond speech.
 
 ## 3. Outer-loop noise shaping (NMR-driven) — DONE at `-q best` (merged)
 
