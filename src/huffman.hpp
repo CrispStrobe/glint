@@ -19,6 +19,12 @@ struct HuffRegions {
     int region1_count;   // scalefactor bands in region 1
     int table_select[3]; // Huffman table for each big-values sub-region
     int count1table;     // 0 = table A (32), 1 = table B (33)
+    // Window-switching layout (block_type != 0): the decoder hardwires
+    // region0_end = 36 and region1_end = big_values*2 (there is no region2
+    // and no region count fields in that side-info format). Encode/count
+    // MUST use the same boundaries or every coefficient past the long-sfb
+    // boundary is silently dropped while the decoder keeps reading.
+    int window_switching;
 };
 
 // Count bits needed to encode the quantized spectrum (dry run)

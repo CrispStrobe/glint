@@ -26,6 +26,11 @@ namespace glint {
 // Fused window * cosine * (1/288) table: eliminates separate windowing
 // loop and per-output division from the MDCT inner loop.
 static double mdct_wincos_d[36][18];
+// Same, for the start (block_type 1) and stop (block_type 3) transition
+// windows. These granules are rare (one per long<->short switch), so they
+// use the scalar loop — no transposed SIMD copies.
+static double mdct_wincos_start_d[36][18];
+static double mdct_wincos_stop_d[36][18];
 #if defined(__AVX2__) || defined(__AVX__) || defined(__SSE2__) || (defined(__ARM_NEON) && defined(__aarch64__))
 static double mdct_wincos_d_t[18][36];  // transposed for SIMD contiguous access
 #endif
@@ -37,8 +42,23 @@ static void init_mdct_d() {
     constexpr double PI = 3.14159265358979323846;
     for (int n = 0; n < 36; n++) {
         double win = std::sin(PI / 36.0 * (n + 0.5));
-        for (int k = 0; k < 18; k++)
-            mdct_wincos_d[n][k] = win * std::cos(PI / 72.0 * (2.0*n + 19.0) * (2.0*k + 1.0)) / 288.0;
+        // ISO 11172-3 transition windows: start keeps the long rise, holds 1,
+        // then falls with the short half-window; stop is the mirror image.
+        double win_start, win_stop;
+        if (n < 18)      win_start = win;
+        else if (n < 24) win_start = 1.0;
+        else if (n < 30) win_start = std::sin(PI / 12.0 * (n - 18 + 0.5));
+        else             win_start = 0.0;
+        if (n < 6)       win_stop = 0.0;
+        else if (n < 12) win_stop = std::sin(PI / 12.0 * (n - 6 + 0.5));
+        else if (n < 18) win_stop = 1.0;
+        else             win_stop = win;
+        for (int k = 0; k < 18; k++) {
+            double c = std::cos(PI / 72.0 * (2.0*n + 19.0) * (2.0*k + 1.0)) / 288.0;
+            mdct_wincos_d[n][k] = win * c;
+            mdct_wincos_start_d[n][k] = win_start * c;
+            mdct_wincos_stop_d[n][k] = win_stop * c;
+        }
     }
 #if defined(__AVX2__) || defined(__AVX__) || defined(__SSE2__) || (defined(__ARM_NEON) && defined(__aarch64__))
     for (int n = 0; n < 36; n++)
@@ -130,9 +150,13 @@ void MDCT::process(const double subband[32][18], double mdct_out[32][18]) {
 }
 
 void MDCT::process_strided(const double subband_out[32][36], int slot_offset,
-                           double mdct_out[32][18]) {
+                           double mdct_out[32][18], int block_type) {
     // Read directly from subband_out with stride 36, applying frequency
     // inversion inline: negate odd subbands at odd time slots.
+    const double (*wincos)[18] =
+        (block_type == 1) ? mdct_wincos_start_d :
+        (block_type == 3) ? mdct_wincos_stop_d : mdct_wincos_d;
+    const bool fast = (block_type == 0);
     for (int sb = 0; sb < 32; sb++) {
         double x[36];
         bool invert = (sb & 1);
@@ -146,7 +170,16 @@ void MDCT::process_strided(const double subband_out[32][36], int slot_offset,
                 x[18 + ts] = subband_out[sb][slot_offset + ts];
         }
 
-        // Fused MDCT (same as process())
+        // Fused MDCT (same as process()); transition windows use the
+        // scalar path (rare granules).
+        if (!fast) {
+            for (int k = 0; k < 18; k++) {
+                double sum = 0.0;
+                for (int n = 0; n < 36; n++)
+                    sum += x[n] * wincos[n][k];
+                mdct_out[sb][k] = sum;
+            }
+        } else
         for (int k = 0; k < 18; k++) {
 #if defined(__AVX2__) || defined(__AVX__)
             __m256d vsum0 = _mm256_setzero_pd();

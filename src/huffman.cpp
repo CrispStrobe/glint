@@ -371,6 +371,7 @@ HuffRegions huffman_determine_regions_short_from_bounds(const int16_t* ix,
     }
     r.region0_count = r0c;
     r.region1_count = 0;
+    r.window_switching = 1;
 
     int region0_end = 36;
     if (region0_end > count1_start) region0_end = count1_start;
@@ -410,7 +411,9 @@ int huffman_count_bits_limited(const int16_t* ix, const HuffRegions& regions,
         int region0_end = sfb[regions.region0_count + 1];
         if (region0_end > big_values_end) region0_end = big_values_end;
 
-        int region1_end = sfb[regions.region0_count + 1 + regions.region1_count + 1];
+        int region1_end = regions.window_switching
+            ? big_values_end
+            : sfb[regions.region0_count + 1 + regions.region1_count + 1];
         if (region1_end > big_values_end) region1_end = big_values_end;
 
         const int region_start[3] = { 0, region0_end, region1_end };
@@ -544,7 +547,9 @@ void huffman_encode(const int16_t* ix, const HuffRegions& regions,
         int region0_end = sfb[regions.region0_count + 1];
         if (region0_end > big_values_end) region0_end = big_values_end;
 
-        int region1_end = sfb[regions.region0_count + 1 + regions.region1_count + 1];
+        int region1_end = regions.window_switching
+            ? big_values_end
+            : sfb[regions.region0_count + 1 + regions.region1_count + 1];
         if (region1_end > big_values_end) region1_end = big_values_end;
 
         // Region 0

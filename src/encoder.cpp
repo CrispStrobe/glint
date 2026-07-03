@@ -49,24 +49,63 @@ static void reorder_short_blocks(const double mdct_short[32][3][6],
     }
 }
 
-// Transient detection: compares energy between consecutive granules.
-// Returns true if a transient (>9 dB energy jump) is detected.
-static bool detect_transient(const double subband_out[32][36], int gr,
-                             bool prev_energy_valid, double* prev_energy) {
-    double energy = 0;
-    int t0 = gr * 18;
-    for (int sb = 0; sb < 32; sb++)
-        for (int ts = t0; ts < t0 + 18; ts++)
-            energy += subband_out[sb][ts] * subband_out[sb][ts];
-
-    bool transient = false;
-    if (prev_energy_valid && *prev_energy > 0) {
-        double ratio = energy / *prev_energy;
-        if (ratio > 8.0) transient = true;  // 9 dB jump = transient
+// Per-frame block-type scheduler. Decides one window type per granule of
+// the frame being emitted, shared by both channels (required for M/S
+// coding), keeping the ISO window chain valid:
+//   ... long, START(1), SHORT(2)..., STOP(3), long ...
+// gr_energy holds num_gr+1 entries: the frame's granules plus the held
+// lookahead granule. Thanks to the one-granule encoder delay, a transient in
+// ANY granule gets a proper START on the granule before it (the lookahead
+// entry schedules a START on this frame's last granule when the held granule
+// is transient; the carry then makes it SHORT next frame).
+static void schedule_block_types(glint_context* enc,
+                                 const double gr_energy[3], int num_gr,
+                                 int types[2]) {
+    bool want[3] = { false, false, false };
+    for (int g = 0; g < num_gr + 1; g++) {
+        if (enc->sched_energy_valid && enc->sched_prev_energy > 0.0 &&
+            gr_energy[g] > 8.0 * enc->sched_prev_energy)
+            want[g] = true;   // >9 dB energy jump = transient
+        enc->sched_prev_energy = gr_energy[g];
+        enc->sched_energy_valid = true;
     }
-    *prev_energy = energy;
-    return transient;
+    // Next call re-evaluates the lookahead granule as its first work granule
+    // against the energy of the granule before it.
+    enc->sched_prev_energy = gr_energy[num_gr - 1];
+
+    for (int g = 0; g < num_gr; g++) types[g] = 0;
+
+    // Carry-in from the previous frame's window chain.
+    if (enc->next_block_carry == 2) types[0] = 2;
+    else if (enc->next_block_carry == 3) types[0] = want[0] ? 2 : 3;
+
+    for (int g = 0; g < num_gr; g++) {
+        if (types[g] != 0 || !want[g]) continue;
+        int prev = (g > 0) ? types[g - 1] : -1;  // -1: previous frame (long)
+        if (prev == 1 || prev == 2) types[g] = 2;
+        else if (prev == 0) { types[g - 1] = 1; types[g] = 2; }
+        else types[g] = 1;  // start now, short next (right after a STOP etc.)
+    }
+    // Lookahead: the held granule is transient — give it a START now.
+    if (want[num_gr] && types[num_gr - 1] == 0) types[num_gr - 1] = 1;
+
+    // Enforce the forward chain inside the frame.
+    for (int g = 1; g < num_gr; g++) {
+        if (types[g - 1] == 1 && types[g] != 2) types[g] = 2;
+        else if (types[g - 1] == 2 && types[g] == 0) types[g] = 3;
+    }
+
+    int last = types[num_gr - 1];
+    enc->next_block_carry = (last == 1) ? 2 : (last == 2) ? 3 : 0;
+
+    // TEMP DIAG: force every granule short
+    if (getenv("GLINT_FORCE_SHORT"))
+        for (int g = 0; g < num_gr; g++) types[g] = 2;
 }
+
+// Short blocks: enabled together with the transition-window scheduler above.
+static constexpr bool kShortBlocksEnabled = true;
+
 #endif // double-precision path helpers
 
 int glint_check_config(int sample_rate, int bitrate) {
@@ -168,9 +207,13 @@ glint_t glint_create(const glint_config* cfg) {
     ctx->use_fixed_point = false;
 #endif
 
-    ctx->prev_granule_energy[0] = 0;
-    ctx->prev_granule_energy[1] = 0;
-    ctx->prev_energy_valid = false;
+    ctx->sched_prev_energy = 0.0;
+    ctx->sched_energy_valid = false;
+    ctx->next_block_carry = 0;
+#if !defined(GLINT_FIXED_POINT) || defined(GLINT_BOTH_PATHS)
+    std::memset(ctx->held_sub_d, 0, sizeof(ctx->held_sub_d));
+    ctx->have_held = false;
+#endif
 
     ctx->write_cb = nullptr;
     ctx->write_cb_data = nullptr;
@@ -549,9 +592,54 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
 #if !defined(GLINT_FIXED_POINT) || defined(GLINT_BOTH_PATHS)
     // Helper lambda: encode one frame through the double-precision path
     auto encode_double = [&]() {
+        double sb_new[2][32][36];
+        for (int ch = 0; ch < nch; ch++)
+            enc->subband[ch].analyze(channel_data[ch], sb_new[ch], num_slots);
+
+        // One-granule encoder delay: the emitted frame is the held granule
+        // followed by this call's granules except the last, which becomes the
+        // new held (lookahead) granule. This is what lets the scheduler place
+        // a START window on the granule BEFORE every transient. glint_flush
+        // releases the final held granule.
         double subband_out_d[2][32][36];
         for (int ch = 0; ch < nch; ch++)
-            enc->subband[ch].analyze(channel_data[ch], subband_out_d[ch], num_slots);
+            for (int sb = 0; sb < 32; sb++) {
+                for (int ts = 0; ts < 18; ts++)
+                    subband_out_d[ch][sb][ts] =
+                        enc->have_held ? enc->held_sub_d[ch][sb][ts] : 0.0;
+                for (int g = 1; g < num_gr; g++)
+                    for (int ts = 0; ts < 18; ts++)
+                        subband_out_d[ch][sb][g * 18 + ts] =
+                            sb_new[ch][sb][(g - 1) * 18 + ts];
+                for (int ts = 0; ts < 18; ts++)
+                    enc->held_sub_d[ch][sb][ts] =
+                        sb_new[ch][sb][(num_gr - 1) * 18 + ts];
+            }
+        enc->have_held = true;
+
+        // Block-type scheduling from pre-M/S granule energies (M/S preserves
+        // total energy, and both channels must share a window type anyway).
+        int btypes[2] = { 0, 0 };
+        // MPEG-1 only: LSF (MPEG-2/2.5) short blocks use different
+        // scalefac_compress semantics that are not implemented yet — enabling
+        // them measured 20.8 -> 8.6 dB at 22.05 kHz.
+        if (kShortBlocksEnabled && enc->quality_mode >= 1 && enc->sr_index < 3) {
+            double gr_energy[3] = { 0.0, 0.0, 0.0 };
+            for (int g = 0; g < num_gr; g++)
+                for (int ch = 0; ch < nch; ch++)
+                    for (int sb = 0; sb < 32; sb++)
+                        for (int ts = g * 18; ts < g * 18 + 18; ts++) {
+                            double v = subband_out_d[ch][sb][ts];
+                            gr_energy[g] += v * v;
+                        }
+            for (int ch = 0; ch < nch; ch++)
+                for (int sb = 0; sb < 32; sb++)
+                    for (int ts = 0; ts < 18; ts++) {
+                        double v = enc->held_sub_d[ch][sb][ts];
+                        gr_energy[num_gr] += v * v;
+                    }
+            schedule_block_types(enc, gr_energy, num_gr, btypes);
+        }
 
         // Inter-granule bit redistribution for quality_mode >= 2 (best).
         // Compute per-granule energy and allocate more bits to higher-energy
@@ -614,23 +702,8 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
             for (int ch = 0; ch < nch; ch++) {
                 int gr_bits = bits_ch[ch];
 
-                // Transient detection on subband output
-                bool transient_detected = detect_transient(
-                    subband_out_d[ch], gr,
-                    enc->prev_energy_valid, &enc->prev_granule_energy[ch]);
-
-                // Short blocks are disabled while the bit reservoir is
-                // disabled. A transient frame wants far more bits than a single
-                // frame's budget; with no reservoir to borrow from it gets
-                // coarsened so hard that quality drops 4-9 dB below the
-                // long-block path (and short blocks were the source of the
-                // part2_3_length overflow). Transient detection still runs so
-                // prev_granule_energy stays warm for when this is re-enabled.
-                static constexpr bool kShortBlocksEnabled = false;
-                bool use_short = kShortBlocksEnabled && transient_detected &&
-                                 enc->quality_mode >= 1;
-
-                if (use_short) {
+                int bt = btypes[gr];
+                if (bt == 2) {
                     // Short-block path needs sub_gr copy (freq inversion)
                     double sub_gr[32][18];
                     for (int sb = 0; sb < 32; sb++)
@@ -664,31 +737,33 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                     }
                     granule_info[gr][ch].block_type = 2;
                 } else {
-                    // Long-block path: fused freq inversion + MDCT
+                    // Long / start / stop path: fused freq inversion + MDCT
+                    // with the block type's window. Start/stop granules use
+                    // the window-switching side-info layout, so they quantize
+                    // under the short region layout (short_block=true).
                     double mdct_out[32][18];
-                    enc->mdct[ch].process_strided(subband_out_d[ch], t0, mdct_out);
+                    enc->mdct[ch].process_strided(subband_out_d[ch], t0,
+                                                  mdct_out, bt);
                     alias_reduce_d(mdct_out);
 
                     double* mdct_flat = &mdct_out[0][0];
 
-
                     if (enc->vbr_mode) {
                         granule_info[gr][ch] = quantize_granule_vbr(mdct_flat, gr_bits,
-                            enc->sr_index, enc->quality_mode, enc->vbr_quality);
+                            enc->sr_index, enc->quality_mode, enc->vbr_quality,
+                            /*short_block=*/bt != 0);
                     } else {
                         granule_info[gr][ch] = quantize_granule(mdct_flat, gr_bits,
                                                                  enc->sr_index, enc->quality_mode,
-                                                                 /*short_block=*/false,
+                                                                 /*short_block=*/bt != 0,
                                                                  gain_floor);
                     }
-                    granule_info[gr][ch].block_type = 0;
+                    granule_info[gr][ch].block_type = bt;
                 }
 
                 total_main_bits += granule_info[gr][ch].part2_3_length;
             }
         }
-        // Mark energy as valid after first frame
-        enc->prev_energy_valid = true;
     };
 #endif // double-precision path
 
@@ -907,9 +982,54 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
     int mode_ext = 0;
 
     // Subband analysis using float input (no int16 truncation)
+    double sb_new[2][32][36];
+    for (int ch = 0; ch < nch; ch++)
+        enc->subband[ch].analyze_float(channel_data[ch], sb_new[ch], num_slots);
+
+    // One-granule encoder delay: the emitted frame is the held granule
+    // followed by this call's granules except the last, which becomes the
+    // new held (lookahead) granule. This is what lets the scheduler place
+    // a START window on the granule BEFORE every transient. glint_flush
+    // releases the final held granule.
     double subband_out_d[2][32][36];
     for (int ch = 0; ch < nch; ch++)
-        enc->subband[ch].analyze_float(channel_data[ch], subband_out_d[ch], num_slots);
+        for (int sb = 0; sb < 32; sb++) {
+            for (int ts = 0; ts < 18; ts++)
+                subband_out_d[ch][sb][ts] =
+                    enc->have_held ? enc->held_sub_d[ch][sb][ts] : 0.0;
+            for (int g = 1; g < num_gr; g++)
+                for (int ts = 0; ts < 18; ts++)
+                    subband_out_d[ch][sb][g * 18 + ts] =
+                        sb_new[ch][sb][(g - 1) * 18 + ts];
+            for (int ts = 0; ts < 18; ts++)
+                enc->held_sub_d[ch][sb][ts] =
+                    sb_new[ch][sb][(num_gr - 1) * 18 + ts];
+        }
+    enc->have_held = true;
+
+    // Block-type scheduling from pre-M/S granule energies (M/S preserves
+    // total energy, and both channels must share a window type anyway).
+    int btypes[2] = { 0, 0 };
+    // MPEG-1 only: LSF (MPEG-2/2.5) short blocks use different
+        // scalefac_compress semantics that are not implemented yet — enabling
+        // them measured 20.8 -> 8.6 dB at 22.05 kHz.
+        if (kShortBlocksEnabled && enc->quality_mode >= 1 && enc->sr_index < 3) {
+        double gr_energy[3] = { 0.0, 0.0, 0.0 };
+        for (int g = 0; g < num_gr; g++)
+            for (int ch = 0; ch < nch; ch++)
+                for (int sb = 0; sb < 32; sb++)
+                    for (int ts = g * 18; ts < g * 18 + 18; ts++) {
+                        double v = subband_out_d[ch][sb][ts];
+                        gr_energy[g] += v * v;
+                    }
+        for (int ch = 0; ch < nch; ch++)
+            for (int sb = 0; sb < 32; sb++)
+                for (int ts = 0; ts < 18; ts++) {
+                    double v = enc->held_sub_d[ch][sb][ts];
+                    gr_energy[num_gr] += v * v;
+                }
+        schedule_block_types(enc, gr_energy, num_gr, btypes);
+    }
 
     int bits_gr[2] = { bits_per_granule, bits_per_granule };
     if (kGranuleRedistribution && enc->quality_mode >= 2 && num_gr == 2 && !enc->vbr_mode) {
@@ -944,18 +1064,8 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
         for (int ch = 0; ch < nch; ch++) {
             int gr_bits = bits_gr[gr];
 
-            // Transient detection on subband output
-            bool transient_detected = detect_transient(
-                subband_out_d[ch], gr,
-                enc->prev_energy_valid, &enc->prev_granule_energy[ch]);
-
-            // Short blocks disabled while the reservoir is disabled (see the
-            // int16 path above for the rationale).
-            static constexpr bool kShortBlocksEnabled = false;
-            bool use_short = kShortBlocksEnabled && transient_detected &&
-                             enc->quality_mode >= 1;
-
-            if (use_short) {
+            int bt = btypes[gr];
+            if (bt == 2) {
                 double sub_gr[32][18];
                 for (int sb = 0; sb < 32; sb++)
                     for (int ts = 0; ts < 18; ts++) {
@@ -981,28 +1091,28 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
                 granule_info[gr][ch].block_type = 2;
             } else {
                 double mdct_out[32][18];
-                enc->mdct[ch].process_strided(subband_out_d[ch], t0, mdct_out);
+                enc->mdct[ch].process_strided(subband_out_d[ch], t0, mdct_out,
+                                              bt);
                 alias_reduce_d(mdct_out);
 
                 double* mdct_flat = &mdct_out[0][0];
 
                 if (enc->vbr_mode) {
                     granule_info[gr][ch] = quantize_granule_vbr(mdct_flat, gr_bits,
-                        enc->sr_index, enc->quality_mode, enc->vbr_quality);
+                        enc->sr_index, enc->quality_mode, enc->vbr_quality,
+                        /*short_block=*/bt != 0);
                 } else {
                     granule_info[gr][ch] = quantize_granule(mdct_flat, gr_bits,
                                                              enc->sr_index, enc->quality_mode,
-                                                             /*short_block=*/false,
+                                                             /*short_block=*/bt != 0,
                                                              gain_floor);
                 }
-                granule_info[gr][ch].block_type = 0;
+                granule_info[gr][ch].block_type = bt;
             }
 
             total_main_bits += granule_info[gr][ch].part2_3_length;
         }
     }
-    // Mark energy as valid after first frame
-    enc->prev_energy_valid = true;
 
     // --- Frame assembly (identical to glint_encode) ---
 
@@ -1059,13 +1169,35 @@ const uint8_t* glint_flush(glint_t enc, int* out_size) {
         if (out_size) *out_size = 0;
         return nullptr;
     }
+    int total = 0;
+
+#if !defined(GLINT_FIXED_POINT) || defined(GLINT_BOTH_PATHS)
+    // Release the one-granule lookahead: encode a final frame of silence so
+    // the held granule is emitted (the granule of silence it holds back in
+    // turn is dropped). The callback, if any, fires inside glint_encode.
+    if (enc->have_held && !enc->use_fixed_point) {
+        int spf = glint_samples_per_frame(enc);
+        int16_t* silence = new int16_t[spf]();
+        const int16_t* ptrs[2] = { silence, silence };
+        int sz = 0;
+        glint_encode(enc, ptrs, &sz);
+        delete[] silence;
+        enc->have_held = false;
+        total = sz;  // already at the start of output_buf
+    }
+#endif
+
     // Release the reservoir's buffered frames (CBR; VBR frames are emitted
     // immediately and there is nothing to drain).
-    *out_size = enc->vbr_mode ? 0
-                              : enc->reservoir.flush(enc->output_buf,
-                                                     sizeof(enc->output_buf));
-    if (enc->write_cb && *out_size > 0)
-        enc->write_cb(enc->output_buf, *out_size, enc->write_cb_data);
+    if (!enc->vbr_mode) {
+        int drained = enc->reservoir.flush(
+            enc->output_buf + total,
+            static_cast<int>(sizeof(enc->output_buf)) - total);
+        if (enc->write_cb && drained > 0)
+            enc->write_cb(enc->output_buf + total, drained, enc->write_cb_data);
+        total += drained;
+    }
+    *out_size = total;
     return enc->output_buf;
 }
 

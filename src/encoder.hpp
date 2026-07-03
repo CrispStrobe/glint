@@ -65,9 +65,22 @@ struct glint_context {
     // Psychoacoustic model (quality_mode >= 2)
     glint::PsychoModel psycho;
 
-    // Transient detection state (per channel)
-    double prev_granule_energy[2];  // per channel
-    bool prev_energy_valid;
+    // Block-type scheduler state (shared across channels: both channels of
+    // a granule always use the same window type, which M/S coding requires).
+    double sched_prev_energy;   // previous granule's total energy
+    bool sched_energy_valid;
+    int next_block_carry;       // window chain carry into the next frame:
+                                // 0 none, 2 next granule must be SHORT,
+                                // 3 next granule must be STOP (or SHORT)
+
+#if !defined(GLINT_FIXED_POINT) || defined(GLINT_BOTH_PATHS)
+    // One-granule encoder lookahead (double/float paths): the last input
+    // granule's subband slots are held back so a START window can always be
+    // scheduled on the granule *before* a transient. Adds 576 samples of
+    // encoder latency; glint_flush releases the held granule.
+    double held_sub_d[2][32][18];
+    bool have_held;
+#endif
 
     // Streaming callback (optional)
     glint_write_cb write_cb;

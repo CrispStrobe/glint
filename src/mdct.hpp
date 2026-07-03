@@ -16,8 +16,12 @@ public:
     void process(const double subband[32][18], double mdct_out[32][18]);
     // Read directly from subband_out[32][36] at slot offset, applying
     // frequency inversion inline. Eliminates the sub_gr copy.
+    // block_type selects the analysis window: 0 = long (sine), 1 = start,
+    // 3 = stop (the hybrid transition windows that keep MDCT time-domain
+    // alias cancellation valid across a long<->short switch). Type 2 is the
+    // 3x12 short transform — use process_short for that.
     void process_strided(const double subband_out[32][36], int slot_offset,
-                         double mdct_out[32][18]);
+                         double mdct_out[32][18], int block_type = 0);
     void process_short(const double subband[32][18], double mdct_out[32][3][6]);
     void reset();
 private:
