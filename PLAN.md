@@ -4,7 +4,7 @@
 pow34/sfb21/m2 fixes): speech 35.1 vs 36.9 dB SNR, electronic 39.7 vs 44.5,
 quartet 44.4 vs 46.0; NMR −8.8 vs −16.1 dB. VBR V0 319 kbps/39.2 dB → V9
 53 kbps/23.3 dB. MPEG-2 22.05k CBR-64k 18.8 vs LAME 17.6.
-**Next big lever: item 5 (bit reservoir → short blocks).**
+**Item 5 (reservoir + short blocks) is done for MPEG-1; next: NMR-aware anchor tuning, LSF short blocks, short-block scalefactors.**
 
 ## 0. ~15 dB SNR ceiling — RESOLVED (pow34 curve bug, fixed on main)
 
@@ -166,21 +166,35 @@ joint 35.1 → 37.3 dB (now above LAME 256k's 36.9 on this clip), 128k +2.5,
 18.8 → 20.8 (LAME: 17.6). Soft spot: stereo-speech mean NMR eased
 −8.8 → −7.2 while SNR rose; consider an NMR-aware anchor.
 
-**Short blocks — measured, still blocked.** Flipping `kShortBlocksEnabled`
-(with scalefactors forced 0 for short granules) on a castanet click-train:
-SNR collapses to 1.0/−0.3 dB at 128/256k (error > signal — the aliasing
-signature). Root cause: glint switches long↔short directly with **no
-start/stop transition windows** (block_type 1/3 don't exist in mdct.cpp), so
-MDCT time-domain alias cancellation breaks at every switch. A real
-implementation needs: (a) start/stop window shapes in the MDCT, (b)
-**one-granule lookahead** so the start window lands on the granule *before*
-the transient, (c) short-block scalefactor structure (12 sfb × 3 windows —
-the emission currently writes long-layout scalefactors for every granule;
-until then short granules must keep sf=0, now enforced in quantize_base),
-and (d) a short-aware `granule_mse`. Note the pre-echo reality: on the
-castanet clip glint long-blocks *beat* LAME on SNR (12.9 vs 7.1 at 128k) but
-lose badly on NMR (28.9 vs 4.8) — the smearing is perceptual, SNR can't see
-it. Judge short-block work by NMR/p95, not SNR.
+**Short blocks — DONE for MPEG-1 (merged).** The blocker was a
+region-layout bug: window-switching side info has no region counts and only
+two table_selects (decoder hardwires region1 = [36, big_values·2)), but the
+encoder computed region1_end = 44 from the long-sfb tables and encoded
+everything past it as region2 with table 0 — which writes *nothing*. Every
+coefficient above wire index 44 was silently dropped while decoders kept
+reading. With the `window_switching` flag in HuffRegions forcing the
+decoder's boundaries, an all-short sine encodes at 80.7 dB (long path: 79).
+The forward transforms (long/start/short/stop windows, both MDCTs, TDAC
+across every transition) were proven exact with a Python
+perfect-reconstruction harness first — the math was never the problem.
+
+Landed with it: START/STOP transition windows in the MDCT, a per-frame
+window scheduler (shared across channels, as M/S requires), and a
+**one-granule encoder lookahead** (last granule held back; glint_flush
+releases it, +576 samples latency) so a START always precedes the transient.
+Castanets at 256k: mean NMR 17.5 → −0.2 dB (noise at the masking threshold);
+at 128k: 28.9 → 10.7 (LAME: 4.8 — remaining gap is bits). SNR drops on
+transients by design (LAME shows the same signature); judge by NMR. Steady
+content within 0.4 dB at unchanged NMR.
+
+**Still open here:**
+- MPEG-2/LSF short blocks (different scalefac_compress semantics; enabling
+  naively measured 20.8 → 8.6 dB — gated to MPEG-1 for now).
+- Short-block scalefactors (currently forced 0; the 12-sfb × 3-window
+  structure is unimplemented in emission) and subblock_gain.
+- 128k castanet NMR gap vs LAME (10.7 vs 4.8): likely wants more reservoir
+  borrow for transient frames and/or 2 short granules per attack.
+- `GLINT_FORCE_SHORT=1` forces all-short for diagnostics.
 
 ## 6. Perceptual measurement — DONE (NMR in measure_audio.py, merged)
 
