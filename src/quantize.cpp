@@ -638,23 +638,44 @@ static GranuleInfo quantize_base(const double* mdct_in, int available_bits,
     fill_quant_cache(cache, mdct_in, info.scalefac, info.scalefac_scale,
                      info.preflag, sr_index);
 
+    // When a search iteration accepts a gain (bits <= target_bits), its bit
+    // count ran to completion (the early exit only fires when over the limit),
+    // so that iteration's ix[]/regions/count are exactly what a fresh
+    // quantize at that gain would produce. Snapshot the last accepted state
+    // and skip the redundant final quantize+count.
     int lo = min_gain, hi = max_gain, best_gain = max_gain;
+    int best_bits = -1;
+    HuffRegions best_regions{};
+    int16_t best_ix[576];
     for (int iter = 0; iter < 8 && lo <= hi; iter++) {
         int gain = (lo + hi) / 2;
+        HuffRegions regs;
         int bits = quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
                                        info.scalefac_scale, info.preflag, sr_index,
-                                       nullptr, &cache, short_block, target_bits);
-        if (bits <= target_bits) { hi = gain - 1; best_gain = gain; }
+                                       &regs, &cache, short_block, target_bits);
+        if (bits <= target_bits) {
+            hi = gain - 1; best_gain = gain;
+            best_bits = bits;
+            best_regions = regs;
+            std::memcpy(best_ix, info.ix, sizeof(best_ix));
+        }
         else { lo = gain + 1; }
     }
     info.global_gain = best_gain;
 
-    // Final quantize to populate ix[] with the chosen gain and scalefactors,
-    // and cache the regions to avoid a redundant huffman_determine_regions call.
-    int huff_bits = quantize_and_count(mdct_in, info.ix, best_gain,
+    int huff_bits;
+    if (best_bits >= 0) {
+        std::memcpy(info.ix, best_ix, sizeof(best_ix));
+        info.regions = best_regions;
+        huff_bits = best_bits;
+    } else {
+        // No gain in the search range fit the budget (or the range was empty):
+        // quantize at the fallback max_gain the search never evaluated.
+        huff_bits = quantize_and_count(mdct_in, info.ix, best_gain,
                                        info.scalefac, info.scalefac_scale,
                                        info.preflag, sr_index, &info.regions,
                                        &cache, short_block);
+    }
     info.part2_3_length = info.part2_length + huff_bits;
 
     // Budget guarantee: part2_3_length must fit both the per-granule bit
