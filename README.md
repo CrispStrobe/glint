@@ -35,18 +35,24 @@ with `tests/measure_audio.py`; `double` and `fixed` paths are identical):
 
 | Mode | SNR | seg-SNR | centroid | %E>10 kHz | 95% rolloff | RMS vs src | speed |
 |---|---|---|---|---|---|---|---|
-| -q speed | 36.1 dB | 37.6 dB | 881 Hz | 0.69% | 5.32 kHz | ±0.2 dB | ~136× |
-| **-q normal** | **36.1 dB** | **37.6 dB** | 884 Hz | 0.70% | 5.37 kHz | ±0.2 dB | ~72× |
-| -q best | 36.2 dB | 37.6 dB | 892 Hz | 0.71% | 5.44 kHz | ±0.2 dB | ~36× |
+| -q speed | 36.7 dB | 38.0 dB | 881 Hz | 0.69% | 5.32 kHz | ±0.2 dB | ~190× |
+| **-q normal** | **36.5 dB** | **37.9 dB** | 884 Hz | 0.70% | 5.37 kHz | ±0.2 dB | ~85× |
+| -q best | 36.5 dB | 37.9 dB | 892 Hz | 0.71% | 5.44 kHz | ±0.2 dB | ~40× |
 
-Source rolloff 5.4 kHz, centroid 892 Hz, %E>10 kHz 0.72%. LAME at 256 kbps
-measures 36.9 dB SNR on the same clip (glint joint mode: 37.3 dB). On music
-(256 kbps joint, 60 s clips): electronic 43.2 dB (LAME 44.5), string quartet
-45.2 dB (LAME 46.0). VBR: V0 319 kbps/39.2 dB down to V9 53 kbps/23.3 dB
-with real variable-size frames. MPEG-2 rates work (22.05 kHz CBR-64k:
-20.8 dB vs LAME's 17.6). These figures follow the pow34-curve, sfb21 and
-MPEG-2 scalefac_compress fixes plus the bit reservoir with buffer-feedback
-rate control; see PLAN.md items 0, 5 and 7. Both signal paths
+Source rolloff 5.4 kHz, centroid 892 Hz, %E>10 kHz 0.72%. **In joint mode
+glint measures ahead of LAME on this clip: 37.7 dB SNR vs LAME 256k's
+36.9**, with mean noise-to-mask −12.2 dB (LAME −16.1) and 0.3% of Bark
+band-frames above the estimated mask (LAME 0.0%). Music (256 kbps joint):
+electronic 43.0 dB / NMR −12.4 (LAME 44.5 / −15.8), string quartet 44.1 /
+−9.3 (LAME 46.0 / −11.1). Transients: on a castanet click-train at 256 kbps
+the noise sits at the masking threshold (mean NMR −0.5 dB; long-blocks-only
+measured +17.5). VBR: V0 319 kbps/39.2 dB down to V9 53 kbps/23.3 dB with
+real variable-size frames. MPEG-2 rates work and beat LAME (22.05 kHz
+CBR-64k: 21.4 dB vs 17.6). The machinery behind this: exact pow34
+companding, bit reservoir with buffer-feedback rate control, short blocks
+with start/stop transition windows and one-granule lookahead, and
+psychoacoustic bit allocation (Schroeder-Bark masks driving a
+scalefactor outer loop); see PLAN.md. Both signal paths
 are metrics-identical. Apple M1, 256 kbps stereo, single-threaded (`-j1`),
 measured under moderate load — re-measure absolutes on an idle machine. The
 optional threaded scale-factor search (`-j N`, byte-identical output) helps
