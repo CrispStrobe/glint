@@ -19,8 +19,10 @@ path needs only 50 KB RAM and no FPU.
 - **Quality tiers** (`-q speed|normal|best`): per-granule scale search that
   matches the source's level and bandwidth, trading encode time for SNR
 - **Bit reservoir + rate control** (CBR) and **short blocks with proper
-  start/stop transition windows** and one-granule lookahead for transients
-  (MPEG-1 rates)
+  start/stop transition windows**, one-granule lookahead, per-window
+  `subblock_gain` and short-window scalefactors (MPEG-1 rates)
+- **Psychoacoustic bit allocation**: Schroeder-Bark masking model driving a
+  scalefactor noise-shaping loop (long and short granules)
 - **All sample rates**: 8-48 kHz (MPEG-1, MPEG-2, MPEG-2.5)
 - **All WAV formats**: PCM 8/16/24/32-bit, IEEE float 32/64, A-law,
   mu-law, WAVE_FORMAT_EXTENSIBLE, raw PCM (`-r`)
@@ -41,18 +43,20 @@ with `tests/measure_audio.py`; `double` and `fixed` paths are identical):
 
 Source rolloff 5.4 kHz, centroid 892 Hz, %E>10 kHz 0.72%. **In joint mode
 glint measures ahead of LAME on this clip: 37.7 dB SNR vs LAME 256k's
-36.9**, with mean noise-to-mask −12.2 dB (LAME −16.1) and 0.3% of Bark
+36.9**, with mean noise-to-mask −12.1 dB (LAME −16.1) and 0.3% of Bark
 band-frames above the estimated mask (LAME 0.0%). Music (256 kbps joint):
-electronic 43.0 dB / NMR −12.4 (LAME 44.5 / −15.8), string quartet 44.1 /
-−9.3 (LAME 46.0 / −11.1). Transients: on a castanet click-train at 256 kbps
-the noise sits at the masking threshold (mean NMR −0.5 dB; long-blocks-only
-measured +17.5). VBR: V0 319 kbps/39.2 dB down to V9 53 kbps/23.3 dB with
-real variable-size frames. MPEG-2 rates work and beat LAME (22.05 kHz
-CBR-64k: 21.4 dB vs 17.6). The machinery behind this: exact pow34
-companding, bit reservoir with buffer-feedback rate control, short blocks
-with start/stop transition windows and one-granule lookahead, and
-psychoacoustic bit allocation (Schroeder-Bark masks driving a
-scalefactor outer loop); see PLAN.md. Both signal paths
+electronic 43.0 dB / NMR −12.3 (LAME 44.5 / −15.8), string quartet 43.8 /
+−9.2 with 1.0% audible (LAME 46.0 / −11.1). Transients: on a castanet
+click-train at 256 kbps the noise sits below the masking threshold (mean
+NMR −0.7 dB; long-blocks-only measured +17.5). VBR with real variable-size
+frames: V0 319 kbps / 40.4 dB / NMR −15.2, V4 257 kbps / 40.3 dB, V9
+45 kbps / 22.0 dB. MPEG-2 rates work and beat LAME (22.05 kHz CBR-64k:
+21.4 dB vs 17.6). The machinery behind this: exact pow34 companding, bit
+reservoir with buffer-feedback rate control, short blocks with start/stop
+transition windows, one-granule lookahead, subblock_gain and short-window
+scalefactors, and psychoacoustic bit allocation (Schroeder-Bark masks
+driving scalefactor noise-shaping loops for long and short granules); see
+PLAN.md. Both signal paths
 are metrics-identical. Apple M1, 256 kbps stereo, single-threaded (`-j1`),
 measured under moderate load — re-measure absolutes on an idle machine. The
 optional threaded scale-factor search (`-j N`, byte-identical output) helps
@@ -199,7 +203,10 @@ PCM input → Subband Analysis → MDCT → Alias Reduction → Quantization
 - **Quantization**: exact x^0.75 companding, anti-clipping gain bounds,
   binary-search gain to the bit budget (`quantize_base`), wrapped in a
   per-granule input-scale search that minimizes decoder-reconstruction MSE
-  (`quantize_granule`); CBR rate control via a constant-quality gain anchor
+  (`quantize_granule`); CBR rate control via a constant-quality gain anchor;
+  NMR-driven scalefactor noise shaping against a Schroeder-Bark mask model
+  (per-band for long granules, per-(band,window) for short, with
+  scalefac_scale escalation and energy-based subblock_gain)
 - **Huffman**: table choice by actual bit count (fused select+count),
   34 ISO tables, SCFSI
 - **Bitstream**: 32-bit accumulator; bit reservoir as a continuous main-data

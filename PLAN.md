@@ -1,11 +1,13 @@
 # Quality improvement plan
 
 **Scoreboard** (256 kbps joint, `-q best`, vs LAME on identical inputs,
-after psy allocation): speech SNR **37.7 vs 36.9** (glint ahead), NMR −12.2
-vs −16.1, audible band-frames 0.3% vs 0.0%; electronic 43.0 vs 44.5 / NMR
-−12.4 vs −15.8; quartet 44.1 vs 46.0 / −9.3 vs −11.1 (audible 1.0%);
-castanets-128k NMR 10.2 vs 4.8 (256k: −0.5 — at the mask). MPEG-2 64k
-**21.4 vs 17.6** (glint ahead). VBR V4 40.3 dB @ 265 kbps.
+after psy allocation + short-window scalefactors): speech SNR **37.7 vs
+36.9** (glint ahead), NMR −12.1 vs −16.1, audible band-frames 0.3% vs 0.0%;
+electronic 43.0 vs 44.5 / NMR −12.3 vs −15.8; quartet 43.8 vs 46.0 / −9.2
+vs −11.1 (audible 1.0%); castanets-128k NMR 10.0 vs 4.8 (256k: **−0.7** —
+below the mask). MPEG-2 64k **21.4 vs 17.6** (glint ahead). VBR: V0
+319 kbps / 40.4 dB / **NMR −15.2** (essentially LAME-level), V4 257 kbps /
+40.3 dB, V9 45 kbps / 22.0 dB.
 **Remaining LAME gaps**: mean NMR tail (−12 vs −16 on speech; next:
 preflag, mask-offset tuning, per-band-frame outlier control), the
 castanet-128k gap (10.0 vs 4.8 — **all structural tools now in place**:
