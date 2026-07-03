@@ -165,6 +165,26 @@ Ranks tiers correctly (speed 6.6 > normal 5.3 > best 5.1 dB mean at
 256 kbps). Calibration is relative — compare builds on the same reference.
 Still open: ViSQOL/PEAQ for a MOS-like score; A/B against LAME at 256 kbps.
 
+## 7. MPEG-2/2.5 path is broken — TODO (pre-existing, all rates ≤ 24 kHz)
+
+CBR at 22050 Hz measures **−10 dB SNR** (decoded audio is garbage),
+reproduced on pre-quality-work main — long-standing, not caused by recent
+changes. Prime suspect: `encode_scalefac_compress_m2` returns 0 (encodes
+nothing) whenever bands 16–20 carry a nonzero scalefactor (slen3 ≠ 0 fails
+both supported sfc ranges), so written scalefactors and the decoder's
+readback disagree. VBR at m2 rates additionally emits an occasional
+backstep frame. The unit tests pass without catching it — they don't
+decode-verify m2 output; add a decode-based m2 test when fixing.
+
+## 8. VBR — DONE for MPEG-1 (merged), see item 7 for m2
+
+Real variable-size frames (smallest bitrate index that fits), unified with
+the CBR quantizer path via a gain floor, target-gain table recalibrated
+post-pow34-fix, and a budget bug fixed (VBR quantized under the caller's
+default 128k frame budget instead of 320k). Speech ladder: V0 319 kbps /
+39.2 dB / NMR −13.4 → V9 53 kbps / 23.3 dB. Follow-up: write a Xing/VBRI
+header so players show correct duration/seek for VBR files.
+
 ## Smaller dials (experiment-sized)
 
 - Per-frame M/S vs L/R decision (estimate bits/NMR both ways, pick per frame).
