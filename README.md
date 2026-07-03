@@ -32,18 +32,18 @@ with `tests/measure_audio.py`; `double` and `fixed` paths are identical):
 
 | Mode | SNR | seg-SNR | centroid | %E>10 kHz | 95% rolloff | RMS vs src | speed |
 |---|---|---|---|---|---|---|---|
-| -q speed | 12.5 dB | 10.8 dB | 744 Hz | 0.34% | 3.4 kHz | ±0.2 dB | ~230× |
-| **-q normal** | **14.1 dB** | **13.2 dB** | 830 Hz | 0.48% | 5.3 kHz | ±0.2 dB | ~115× |
-| -q best | 14.7 dB | 13.8 dB | 820 Hz | 0.47% | 5.1 kHz | ±0.2 dB | ~54× |
+| -q speed | 34.5 dB | 37.4 dB | 881 Hz | 0.69% | 5.32 kHz | ±0.2 dB | ~136× |
+| **-q normal** | **34.6 dB** | **37.4 dB** | 884 Hz | 0.70% | 5.37 kHz | ±0.2 dB | ~72× |
+| -q best | 34.7 dB | 37.5 dB | 892 Hz | 0.71% | 5.44 kHz | ±0.2 dB | ~36× |
 
-Source rolloff 5.4 kHz, centroid 892 Hz, %E>10 kHz 0.72%. Both signal paths
-are numerically identical. Apple M1, 256 kbps stereo, single-threaded (`-j1`).
-Speed figures are the pre-pass-3 idle-machine measurements scaled by the
-perf-pass-3 deltas (−19%/−23%/−27% encode time, interleaved A/B, p<0.002,
-byte-identical output); re-measure absolutes on an idle machine. The optional
-threaded scale-factor search (`-j N`, byte-identical output) reaches roughly
-**~175× normal / ~105× best at `-j4`** on the M1's four
-performance cores; `-j8` regresses past that. Quality metrics are unaffected by
+Source rolloff 5.4 kHz, centroid 892 Hz, %E>10 kHz 0.72%. LAME at 256 kbps
+measures 36.9 dB SNR on the same clip — glint is within ~2.4 dB. (These
+figures follow the pow34-curve fix that removed a ~15 dB whole-encoder SNR
+ceiling; see PLAN.md item 0.) Both signal paths are metrics-identical. Apple
+M1, 256 kbps stereo, single-threaded (`-j1`), measured under moderate load —
+re-measure absolutes on an idle machine. The optional threaded scale-factor
+search (`-j N`, byte-identical output) helps most at `-q best`; `-j8`
+regresses past `-j4`. Quality metrics are unaffected by
 thread count. For a deterministic local speed/quality run without external
 audio, use `python tests/benchmark_encoder.py build/glint_cli`; to A/B two
 builds with statistics, byte-identity, and quality regression flags, use
@@ -53,15 +53,14 @@ builds with statistics, byte-identity, and quality regression flags, use
 
 | Mode | 0–1 kHz | 1–4 kHz | 4–8 kHz | 8–16 kHz |
 |---|---|---|---|---|
-| -q speed | 13.2 dB | 8.9 dB | 10.9 dB | 9.8 dB |
-| -q normal | 15.1 dB | 9.6 dB | 11.7 dB | 10.9 dB |
-| -q best | 16.0 dB | 9.8 dB | 12.0 dB | 11.1 dB |
+| -q speed | 44.4 dB | 29.8 dB | 26.6 dB | 22.2 dB |
+| -q normal | 44.4 dB | 29.9 dB | 26.6 dB | 22.2 dB |
+| -q best | 44.6 dB | 30.0 dB | 26.7 dB | 22.3 dB |
 
-Normal/best use an envelope-aware scale-search objective that penalizes decoded
-scalefactor bands whose energy collapses relative to the source. This closes
-most of the source rolloff gap without pre-emphasizing the input spectrum.
-Noise still concentrates in the 0–1 kHz band (~62–74% of total error power at
-all tiers); HF above 16 kHz is absent (quantizer dead-zone at 256 kbps speech).
+Noise now sits where masking absorbs it: ~40% of total error power above
+8 kHz and only ~9% in 0–1 kHz. A Bark-band noise-to-mask metric
+(`tests/measure_audio.py`) measures mean NMR −8.6 dB with 1.9% of band-frames
+above the estimated mask (LAME: −16.1 dB / 0%).
 
 **Footprint**:
 
@@ -245,6 +244,11 @@ passes. Measured on a 1-min 256 kbps stereo speech clip (`double`==`fixed`):
 | 95% rolloff          | 1031 / 1031 / 4359 Hz | 3422 / 5344 / 5133 Hz |
 | overall SNR          | 5.1 / 10.1 / 15.0 dB  | 12.5 / 14.1 / 14.7 dB |
 | encode speed         | —                     | ~230× / 115× / 54× realtime (Apple M1, `-j1`) |
+
+(Historical table. The dead-zone loss the scale search fought turned out to
+be a symptom of a broken pow34 quantization curve; fixing that — see PLAN.md
+item 0 — lifted all tiers to ~34.5 dB SNR and re-centered the scale search
+around f = 1.0. The Benchmarks section above has the current numbers.)
 
 Verify with `python tests/measure_audio.py original.wav out.mp3` (want RMS
 within ~0.5 dB of source, rolloff near source, `double`==`fixed`) and

@@ -1,6 +1,41 @@
 # Quality improvement plan
 
-## 0. THE headline problem — ~15 dB SNR ceiling vs LAME's ~37-46 dB (TODO, investigate first)
+## 0. ~15 dB SNR ceiling — RESOLVED (pow34 curve bug, fixed on main)
+
+**Root cause:** `fast_pow34` interpolated x^0.75 on an *integer* grid, but
+quantizer inputs are fractional MDCT coefficients — on (0,1) it degenerated
+to pow34(x)=x, so ix was linear in x and the decoder's ix^(4/3) warped the
+spectrum by x^(4/3). Signal-proportional error ⇒ SNR flat vs bitrate. The
+scale-search grids (1.3–4.2) and the old "288/194 gain correction" existed to
+compensate this curve. Secondary bug fixed too: gain clipping bounds ignored
+the scalefactor boost in the quant cache.
+
+**After the fix** (256 kbps speech): SNR 34.5–34.7 dB all tiers (was
+12.5–14.7), seg-SNR 37.4, LSD 6.7, mean NMR −8.6 dB / 1.9% audible, rolloff
+= source. Music: electronic 29.2 dB, quartet 27.2 dB. A 441 Hz sine: 79 dB.
+LAME on the same clips: 36.9/44.5/46.0 SNR, NMR −16/−15.8/−11.1 — glint is
+now in the same league, ~2–15 dB behind depending on content.
+
+**Follow-ups opened by the fix:**
+- The tiers barely differ now (34.51/34.55/34.69) — the extra `-q best`
+  machinery was compensation. Re-differentiate the tiers with real work
+  (items 3/5).
+- `kNmrOuterLoop` and `kGranuleRedistribution` disabled — both regressed
+  post-fix (−0.7 / −1.9 dB); re-tune to the new noise floor before
+  re-enabling.
+- `fast_pow34` is now plain `std::pow` — restore a fast path (frexp-based
+  mantissa table) if profiling shows it hot; encode times were unchanged.
+- VBR is mis-calibrated post-fix (`vbr_target_gain` tuned for the old
+  curve): 20.6 dB / NMR +5.3 on speech. Recalibrate the target-gain table.
+- White-noise pathology: full-scale white noise decodes +11 dB hot and
+  clipped (pre-existing; LAME also only manages 10 dB here). Suspect the
+  +0.4054 rounding bias at ultra-coarse quantization when the 4095-bit cap
+  binds, times the scale search. Edge case, but worth a look with item 5.
+- Re-tune post-fix: envelope-retention penalty in granule_mse, the
+  45/55 channel-split clamp, and the scale-search grids/tier widths were
+  all tuned against the broken curve.
+
+### Original diagnosis (kept for the record)
 
 Measured on identical inputs at 256 kbps CBR (LAME via ffmpeg libmp3lame,
 `tests/measure_audio.py`, NMR metric):
