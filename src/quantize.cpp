@@ -369,17 +369,19 @@ static void compute_src_band(const double* mdct_in, int sr_index,
 
 // Decoder-reconstruction MSE for a quantized granule vs the original MDCT.
 // Used to pick the per-granule input scale ("factor") that best preserves the
-// spectrum through the quantizer dead-zone. src_band is the precomputed
-// per-band source energy (see compute_src_band); it is only read when
-// quality_mode > 0 and may be null otherwise.
+// spectrum through the quantizer dead-zone.
+//
+// This used to add an envelope-retention penalty (log-loss on bands whose
+// decoded energy fell below 90% of the source, HF-weighted) to fight the
+// "dull" rolloff collapse. That collapse was a symptom of the pow34 curve
+// bug; with the curve fixed the penalty measured as a no-op on music and
+// -0.05..-0.13 dB SNR on speech at 256k/128k, so it was removed. Pure
+// reconstruction MSE is the objective now.
 static double granule_mse(const GranuleInfo& gi, const double* mdct_in,
-                          int sr_index, int quality_mode,
-                          const double* src_band) {
+                          int sr_index) {
     const int* sfb = tables::get_sfb_long_by_unified(sr_index);
     double decoder_gain = std::pow(2.0, 0.25 * (gi.global_gain - 210));
     double noise = 0.0;
-    double rec_band[21] = {};
-    const bool want_bands = quality_mode > 0;
     // Per-band iteration so the expensive std::pow(2.0, ...) sf_d term is
     // computed 21 times instead of once per coefficient (576). Band ranges and
     // the per-coefficient reconstruction expression are kept identical to the
@@ -404,27 +406,9 @@ static double granule_mse(const GranuleInfo& gi, const double* mdct_in,
             }
             double err = mdct_in[i] - xr_hat;
             noise += err * err;
-            if (want_bands) rec_band[b] += xr_hat * xr_hat;
         }
     }
-
-    if (quality_mode <= 0) return noise;
-
-    double total = 0.0;
-    for (int band = 0; band < 21; band++)
-        total += src_band[band];
-    if (total <= 0.0) return noise;
-
-    double envelope_penalty = 0.0;
-    for (int band = 0; band < 21; band++) {
-        if (src_band[band] < total * 1e-4) continue;
-        double retention = rec_band[band] / (src_band[band] + 1e-18);
-        if (retention >= 0.9) continue;
-        double loss = std::log(0.9 / std::max(retention, 1e-6));
-        double band_weight = (band >= 12) ? 3.0 : 0.75;
-        envelope_penalty += band_weight * src_band[band] * loss * loss;
-    }
-    return noise + 0.15 * envelope_penalty;
+    return noise;
 }
 
 // Base quantizer: gain search to the bit budget + energy-based scalefactors.
@@ -593,38 +577,36 @@ static GranuleInfo nmr_outer_loop(const GranuleInfo& start, double factor,
     return best;
 }
 
-// Per-granule scale search (all quality tiers).
+// Per-granule scale search (normal/best tiers).
 //
 // The quantizer is is = int(|xr|^0.75 * step + 0.4054); coefficients whose
-// scaled magnitude is below the ~0.6 dead-zone round to zero. Small (mostly
-// high-frequency) coefficients are lost, which both dulls the signal and drops
-// its level. A single global gain cannot fix this because the right pre-scale
-// depends on each granule's spectral shape — so we search input scale factors
-// and keep the one whose decoder reconstruction best matches the original (min
-// MSE). This replaces the older fixed 288/194 "gain correction" and the
-// (measurably no-op) headroom/pruning passes. Wider search = higher quality and
-// more CPU: speed=2 factors, normal=6, best=12 + a fine refinement.
+// scaled magnitude is below the ~0.6 dead-zone round to zero. With the pow34
+// curve fixed, reconstruction is level-exact at f=1.0; small boosts >1 only
+// serve to rescue dead-zone coefficients (at a matching level cost the MSE
+// weighs), so the grids sit tightly above 1.0. The old grids (1.3..4.2, and
+// the fixed 288/194 "gain correction" before them) existed to compensate the
+// broken pow34 curve — post-fix they are pure level errors. -q speed skips
+// the search entirely: f=1.0 wins almost always, and the tier's contract is
+// throughput.
 GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
                               int sr_index, int quality_mode, bool short_block) {
     init_quant_tables();
-    // Candidate input scales. With the pow34 curve fixed, reconstruction is
-    // level-exact at f=1.0; small boosts >1 only serve to rescue dead-zone
-    // coefficients (at a matching level cost the MSE weighs). The old grids
-    // (1.3..4.2) existed to compensate the broken pow34 curve — with it
-    // fixed they are pure level errors.
-    static const double kSpeed[]  = { 1.0, 1.12 };
+
+    if (quality_mode <= 0) {
+        return quantize_base(mdct_in, available_bits, sr_index, short_block);
+    }
+
     static const double kNormal[] = { 1.0, 1.04, 1.09, 1.15, 1.22, 1.30 };
     static const double kBest[]   = {
         1.0, 1.02, 1.05, 1.08, 1.11, 1.15, 1.19, 1.24, 1.30, 1.38, 1.48, 1.60 };
     const double* factors; int nf;
-    if (quality_mode >= 2)      { factors = kBest;   nf = 12; }
-    else if (quality_mode == 1) { factors = kNormal; nf = 6; }
-    else                        { factors = kSpeed;  nf = 2; }
+    if (quality_mode >= 2) { factors = kBest;   nf = 12; }
+    else                   { factors = kNormal; nf = 6; }
 
-    // Per-band source energy is factor-independent; compute it once for all
-    // granule_mse calls below (only read when quality_mode > 0).
+    // Per-band source energy is factor-independent; compute it once (used by
+    // the NMR outer loop when enabled).
     double src_band[21];
-    if (quality_mode > 0) compute_src_band(mdct_in, sr_index, src_band);
+    compute_src_band(mdct_in, sr_index, src_band);
 
     // Evaluate all nf candidate factors (each independent), then reduce in
     // ascending index order — same selection as the old sequential loop
@@ -637,8 +619,7 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
         double scaled[576];
         for (int i = 0; i < 576; i++) scaled[i] = mdct_in[i] * f;
         results[fi] = quantize_base(scaled, available_bits, sr_index, short_block);
-        mses[fi] = granule_mse(results[fi], mdct_in, sr_index, quality_mode,
-                               src_band);
+        mses[fi] = granule_mse(results[fi], mdct_in, sr_index);
     });
 
     GranuleInfo best_result = results[0];
@@ -669,8 +650,7 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
             double scaled[576];
             for (int i = 0; i < 576; i++) scaled[i] = mdct_in[i] * cand[k];
             rres[k] = quantize_base(scaled, available_bits, sr_index, short_block);
-            rmse[k] = granule_mse(rres[k], mdct_in, sr_index, quality_mode,
-                                  src_band);
+            rmse[k] = granule_mse(rres[k], mdct_in, sr_index);
         });
         for (int k = 0; k < nc; k++) {
             if (rmse[k] < best_mse) {
