@@ -153,9 +153,9 @@ glint_t glint_create(const glint_config* cfg) {
     int total_frame_bits = ctx->frame_size * 8;
     ctx->mean_bits_per_frame = total_frame_bits - 32 - ctx->side_info_bits;
 
-    ctx->reservoir.init(ctx->mean_bits_per_frame);
-    ctx->reservoir_buf_write = 0;
-    ctx->reservoir_buf_size = 0;
+    // Reservoir capacity = what the main_data_begin field can express:
+    // 9 bits (511 bytes) for MPEG-1, 8 bits (255) for MPEG-2/2.5.
+    ctx->reservoir.init(ctx->mpeg_version == 1 ? 511 : 255);
 
     // Determine signal path
 #ifdef GLINT_BOTH_PATHS
@@ -290,6 +290,196 @@ static int vbr_pick_frame_size(const glint_context* enc, int total_main_bits,
 static constexpr double kChSplitLo = 0.45;
 static constexpr double kChSplitHi = 0.55;
 
+// Shared frame-emission tail for all encode paths: SCFSI, header, side info,
+// main data, then either the bit-reservoir stream (CBR: frames are buffered
+// and released once their slot is full, so *out_size may be 0 or cover
+// several frames) or a direct self-contained frame (VBR). granule_info is
+// mutated by the SCFSI adjustment.
+static const uint8_t* finish_frame(glint_t enc, GranuleInfo granule_info[2][2],
+                                   int num_gr, int nch, int mode_ext,
+                                   int this_frame_size, int total_main_bits,
+                                   int* out_size) {
+    // Compute SCFSI: share scalefactors between granules when identical
+    // (MPEG-1 only). Groups: 0=bands 0-5, 1=6-10, 2=11-15, 3=16-20.
+    static const int scfsi_band[5] = {0, 6, 11, 16, 21};
+    int scfsi[2][4] = {};
+    if (num_gr == 2) {
+        for (int ch = 0; ch < nch; ch++) {
+            // SCFSI not allowed when either granule uses short blocks
+            bool has_short = (granule_info[0][ch].block_type != 0) ||
+                             (granule_info[1][ch].block_type != 0);
+            for (int group = 0; group < 4; group++) {
+                bool match = !has_short;
+                if (match) {
+                    for (int b = scfsi_band[group]; b < scfsi_band[group+1] && b < 21; b++) {
+                        if (granule_info[0][ch].scalefac[b] != granule_info[1][ch].scalefac[b]) {
+                            match = false;
+                            break;
+                        }
+                    }
+                }
+                scfsi[ch][group] = match ? 1 : 0;
+            }
+            // Adjust granule 1's part2_length: omit shared scalefactor bits
+            if (granule_info[1][ch].part2_length > 0) {
+                static const int slen_table_scfsi[16][2] = {
+                    {0,0},{0,1},{0,2},{0,3},{3,0},{1,1},{1,2},{1,3},
+                    {2,1},{2,2},{2,3},{3,1},{3,2},{3,3},{4,2},{4,3}
+                };
+                int slen1 = slen_table_scfsi[granule_info[1][ch].scalefac_compress][0];
+                int slen2 = slen_table_scfsi[granule_info[1][ch].scalefac_compress][1];
+                int saved = 0;
+                if (scfsi[ch][0]) saved += slen1 * 6;
+                if (scfsi[ch][1]) saved += slen1 * 5;
+                if (scfsi[ch][2]) saved += slen2 * 5;
+                if (scfsi[ch][3]) saved += slen2 * 5;
+                granule_info[1][ch].part2_length -= saved;
+                granule_info[1][ch].part2_3_length -= saved;
+                total_main_bits -= saved;
+            }
+        }
+    }
+
+    // Write frame header (the header needs the 2-bit sample rate index)
+    int channel_mode = mode_to_mpeg(enc->config.mode);
+    int hdr_sr_index = (enc->sr_index < 3) ? enc->sr_index : (enc->sr_index - 3);
+    enc->frame_asm.reset();
+    int hdr_br_index = enc->br_index;
+    int hdr_padding = enc->padding;
+    if (enc->vbr_mode) {
+        hdr_br_index = vbr_pick_frame_size(enc, total_main_bits,
+                                           &this_frame_size);
+        hdr_padding = 0;
+    }
+    enc->frame_asm.write_header(hdr_br_index, hdr_sr_index,
+                                 hdr_padding, channel_mode, mode_ext,
+                                 enc->mpeg_version);
+
+    // Side info, including this frame's main_data_begin (VBR frames are
+    // self-contained: 0).
+    BitstreamWriter& si = enc->frame_asm.side_info();
+    si.reset();
+    int main_data_begin = enc->vbr_mode ? 0 : enc->reservoir.main_data_begin();
+
+    if (enc->mpeg_version == 1) {
+        si.write_bits(main_data_begin, 9);
+        if (nch == 1) si.write_bits(0, 5); else si.write_bits(0, 3);
+        for (int ch = 0; ch < nch; ch++) {
+            si.write_bits(scfsi[ch][0], 1);
+            si.write_bits(scfsi[ch][1], 1);
+            si.write_bits(scfsi[ch][2], 1);
+            si.write_bits(scfsi[ch][3], 1);
+        }
+        for (int gr = 0; gr < 2; gr++)
+            for (int ch = 0; ch < nch; ch++)
+                write_granule_side_info(si, granule_info[gr][ch], enc->mpeg_version);
+    } else {
+        si.write_bits(main_data_begin, 8);
+        if (nch == 1) si.write_bits(0, 1); else si.write_bits(0, 2);
+        for (int ch = 0; ch < nch; ch++)
+            write_granule_side_info(si, granule_info[0][ch], enc->mpeg_version);
+    }
+    si.byte_align();
+
+    // Main data: scalefactors + Huffman for each granule/channel.
+    BitstreamWriter& md = enc->frame_asm.main_data();
+    md.reset();
+
+    static const int slen_table_m1[16][2] = {
+        {0,0},{0,1},{0,2},{0,3},{3,0},{1,1},{1,2},{1,3},
+        {2,1},{2,2},{2,3},{3,1},{3,2},{3,3},{4,2},{4,3}
+    };
+
+    for (int gr = 0; gr < num_gr; gr++) {
+        for (int ch = 0; ch < nch; ch++) {
+            const GranuleInfo& gi = granule_info[gr][ch];
+
+            if (enc->mpeg_version != 1) {
+                // MPEG-2/2.5: decode 9-bit scalefac_compress to 4 slen values
+                int sfc = gi.scalefac_compress;
+                int slen[4] = {};
+                int nr[4] = {6, 5, 5, 5};
+                // ISO 13818-3 mapping (must match what real decoders derive;
+                // the encoder only ever emits the sfc < 400 range)
+                if (sfc < 400) {
+                    slen[0] = (sfc >> 4) / 5;
+                    slen[1] = (sfc >> 4) % 5;
+                    slen[2] = (sfc & 15) >> 2;
+                    slen[3] = sfc & 3;
+                } else if (sfc < 500) {
+                    int v = sfc - 400;
+                    slen[0] = (v >> 2) / 5;
+                    slen[1] = (v >> 2) % 5;
+                    slen[2] = v & 3;
+                    slen[3] = 0;
+                    nr[0] = 6; nr[1] = 5; nr[2] = 7; nr[3] = 3;
+                } else {
+                    int v = sfc - 500;
+                    slen[0] = v / 3;
+                    slen[1] = v % 3;
+                    slen[2] = 0;
+                    slen[3] = 0;
+                    nr[0] = 11; nr[1] = 10; nr[2] = 0; nr[3] = 0;
+                }
+                int b = 0;
+                for (int g = 0; g < 4; g++) {
+                    for (int i = 0; i < nr[g] && b < 21; i++, b++) {
+                        if (slen[g] > 0)
+                            md.write_bits(gi.scalefac[b], slen[g]);
+                    }
+                }
+            } else {
+                // MPEG-1 scalefactor encoding
+                int slen1 = slen_table_m1[gi.scalefac_compress][0];
+                int slen2 = slen_table_m1[gi.scalefac_compress][1];
+
+                if (gr == 0) {
+                    for (int b = 0; b < 11; b++)
+                        if (slen1 > 0) md.write_bits(gi.scalefac[b], slen1);
+                    for (int b = 11; b < 21; b++)
+                        if (slen2 > 0) md.write_bits(gi.scalefac[b], slen2);
+                } else {
+                    // Granule 1: skip groups where scfsi=1
+                    for (int b = 0; b < 6; b++)
+                        if (slen1 > 0 && !scfsi[ch][0]) md.write_bits(gi.scalefac[b], slen1);
+                    for (int b = 6; b < 11; b++)
+                        if (slen1 > 0 && !scfsi[ch][1]) md.write_bits(gi.scalefac[b], slen1);
+                    for (int b = 11; b < 16; b++)
+                        if (slen2 > 0 && !scfsi[ch][2]) md.write_bits(gi.scalefac[b], slen2);
+                    for (int b = 16; b < 21; b++)
+                        if (slen2 > 0 && !scfsi[ch][3]) md.write_bits(gi.scalefac[b], slen2);
+                }
+            }
+
+            huffman_encode(gi.ix, gi.regions, enc->sr_index, md);
+        }
+    }
+    md.flush();
+
+    if (enc->vbr_mode) {
+        // VBR: each frame is self-contained.
+        const uint8_t* frame = enc->frame_asm.assemble(this_frame_size, out_size);
+        std::memcpy(enc->output_buf, frame, *out_size);
+    } else {
+        // CBR: append to the reservoir stream; complete slots are released.
+        uint8_t hs[64];
+        std::memcpy(hs, enc->frame_asm.header().data(), 4);
+        int si_bytes = si.byte_count();
+        std::memcpy(hs + 4, si.data(), si_bytes);
+        int hs_len = 4 + si_bytes;
+        int slot_md = this_frame_size - hs_len;
+        *out_size = enc->reservoir.add_frame(hs, hs_len, md.data(),
+                                             md.byte_count(), slot_md,
+                                             enc->output_buf,
+                                             sizeof(enc->output_buf));
+    }
+
+    enc->frame_count++;
+    if (enc->write_cb && *out_size > 0)
+        enc->write_cb(enc->output_buf, *out_size, enc->write_cb_data);
+    return enc->output_buf;
+}
+
 const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                               int* out_size) {
     if (!enc || !channel_data || !out_size) {
@@ -317,10 +507,13 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
     int this_frame_size = enc->frame_size + (enc->vbr_mode ? 0 : enc->padding);
     int this_frame_bits = this_frame_size * 8 - 32 - enc->side_info_bits;
 
-    // Bit reservoir disabled — each frame is self-contained.
-    // The reservoir implementation has backstep alignment issues; disabled
-    // until properly debugged.
-    int reservoir_bytes = 0;
+    // Bit reservoir: the mechanism (continuous main-data stream + deferred
+    // frame emission, see reservoir.hpp) is active for CBR. The allocation
+    // policy is conservative for now: each frame targets its own slot, and
+    // the reservoir absorbs natural under-use (easy frames whose finest
+    // useful gain needs fewer bits than the slot). Borrowing beyond the slot
+    // requires a demand-driven policy — a naive "spend the whole reservoir"
+    // was measured to regress badly (see PLAN.md item 5).
     int available_bits = this_frame_bits;
 
     int num_gr = enc->num_granules;
@@ -577,190 +770,8 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
     encode_double();
 #endif
 
-    // Compute SCFSI: share scalefactors between granules when identical (MPEG-1 only)
-    // Groups: 0=bands 0-5, 1=bands 6-10, 2=bands 11-15, 3=bands 16-20
-    static const int scfsi_band[5] = {0, 6, 11, 16, 21};
-    int scfsi[2][4] = {};
-    if (num_gr == 2) {
-        for (int ch = 0; ch < nch; ch++) {
-            // SCFSI not allowed when either granule uses short blocks
-            bool has_short = (granule_info[0][ch].block_type != 0) ||
-                             (granule_info[1][ch].block_type != 0);
-            for (int group = 0; group < 4; group++) {
-                bool match = !has_short;
-                if (match) {
-                    for (int b = scfsi_band[group]; b < scfsi_band[group+1] && b < 21; b++) {
-                        if (granule_info[0][ch].scalefac[b] != granule_info[1][ch].scalefac[b]) {
-                            match = false;
-                            break;
-                        }
-                    }
-                }
-                scfsi[ch][group] = match ? 1 : 0;
-            }
-            // Adjust granule 1's part2_length: omit shared scalefactor bits
-            if (granule_info[1][ch].part2_length > 0) {
-                static const int slen_table_scfsi[16][2] = {
-                    {0,0},{0,1},{0,2},{0,3},{3,0},{1,1},{1,2},{1,3},
-                    {2,1},{2,2},{2,3},{3,1},{3,2},{3,3},{4,2},{4,3}
-                };
-                int slen1 = slen_table_scfsi[granule_info[1][ch].scalefac_compress][0];
-                int slen2 = slen_table_scfsi[granule_info[1][ch].scalefac_compress][1];
-                int saved = 0;
-                // Group 0 (bands 0-5) and Group 1 (bands 6-10) use slen1
-                if (scfsi[ch][0]) saved += slen1 * 6;
-                if (scfsi[ch][1]) saved += slen1 * 5;
-                // Group 2 (bands 11-15) and Group 3 (bands 16-20) use slen2
-                if (scfsi[ch][2]) saved += slen2 * 5;
-                if (scfsi[ch][3]) saved += slen2 * 5;
-                granule_info[1][ch].part2_length -= saved;
-                granule_info[1][ch].part2_3_length -= saved;
-                total_main_bits -= saved;
-            }
-        }
-    }
-
-    // Write frame header
-    int channel_mode = mode_to_mpeg(enc->config.mode);
-    // The header needs the 2-bit sample rate index (0-2), not the unified one
-    int hdr_sr_index = (enc->sr_index < 3) ? enc->sr_index : (enc->sr_index - 3);
-    enc->frame_asm.reset();
-    int hdr_br_index = enc->br_index;
-    int hdr_padding = enc->padding;
-    if (enc->vbr_mode) {
-        hdr_br_index = vbr_pick_frame_size(enc, total_main_bits,
-                                           &this_frame_size);
-        hdr_padding = 0;
-    }
-    enc->frame_asm.write_header(hdr_br_index, hdr_sr_index,
-                                 hdr_padding, channel_mode, mode_ext,
-                                 enc->mpeg_version);
-
-    // Write side information
-    BitstreamWriter& si = enc->frame_asm.side_info();
-    si.reset();
-    int main_data_begin = std::min(reservoir_bytes, enc->reservoir_buf_size);
-
-    if (enc->mpeg_version == 1) {
-        // MPEG-1 side info
-        si.write_bits(main_data_begin, 9);
-        if (nch == 1) si.write_bits(0, 5); else si.write_bits(0, 3); // private bits
-        for (int ch = 0; ch < nch; ch++) {
-            si.write_bits(scfsi[ch][0], 1);
-            si.write_bits(scfsi[ch][1], 1);
-            si.write_bits(scfsi[ch][2], 1);
-            si.write_bits(scfsi[ch][3], 1);
-        }
-        for (int gr = 0; gr < 2; gr++)
-            for (int ch = 0; ch < nch; ch++)
-                write_granule_side_info(si, granule_info[gr][ch], enc->mpeg_version);
-    } else {
-        // MPEG-2/2.5 side info
-        si.write_bits(main_data_begin, 8); // 8 bits for MPEG-2
-        if (nch == 1) si.write_bits(0, 1); else si.write_bits(0, 2); // private bits
-        // No scfsi for MPEG-2
-        for (int ch = 0; ch < nch; ch++)
-            write_granule_side_info(si, granule_info[0][ch], enc->mpeg_version);
-    }
-
-    // Write main data
-    BitstreamWriter& md = enc->frame_asm.main_data();
-    md.reset();
-
-    static const int slen_table_m1[16][2] = {
-        {0,0},{0,1},{0,2},{0,3},{3,0},{1,1},{1,2},{1,3},
-        {2,1},{2,2},{2,3},{3,1},{3,2},{3,3},{4,2},{4,3}
-    };
-
-    for (int gr = 0; gr < num_gr; gr++) {
-        for (int ch = 0; ch < nch; ch++) {
-            const GranuleInfo& gi = granule_info[gr][ch];
-
-            if (enc->mpeg_version != 1) {
-                // MPEG-2/2.5: decode 9-bit scalefac_compress to 4 slen values
-                // Range 0..179: slen[0]=sfc/36, slen[1]=(sfc%36)/6, slen[2]=(sfc%36)%6, slen[3]=0
-                //   band groups: [6, 5, 5, 5]
-                int sfc = gi.scalefac_compress;
-                int slen[4] = {};
-                int nr[4] = {6, 5, 5, 5};
-                // ISO 13818-3 mapping (must match what real decoders derive;
-                // the encoder only ever emits the sfc < 400 range)
-                if (sfc < 400) {
-                    slen[0] = (sfc >> 4) / 5;
-                    slen[1] = (sfc >> 4) % 5;
-                    slen[2] = (sfc & 15) >> 2;
-                    slen[3] = sfc & 3;
-                } else if (sfc < 500) {
-                    int v = sfc - 400;
-                    slen[0] = (v >> 2) / 5;
-                    slen[1] = (v >> 2) % 5;
-                    slen[2] = v & 3;
-                    slen[3] = 0;
-                    nr[0] = 6; nr[1] = 5; nr[2] = 7; nr[3] = 3;
-                } else {
-                    int v = sfc - 500;
-                    slen[0] = v / 3;
-                    slen[1] = v % 3;
-                    slen[2] = 0;
-                    slen[3] = 0;
-                    nr[0] = 11; nr[1] = 10; nr[2] = 0; nr[3] = 0;
-                }
-                // Write scalefactors in 4 groups
-                int b = 0;
-                for (int g = 0; g < 4; g++) {
-                    for (int i = 0; i < nr[g] && b < 21; i++, b++) {
-                        if (slen[g] > 0)
-                            md.write_bits(gi.scalefac[b], slen[g]);
-                    }
-                }
-            } else {
-                // MPEG-1 scalefactor encoding
-                int slen1 = slen_table_m1[gi.scalefac_compress][0];
-                int slen2 = slen_table_m1[gi.scalefac_compress][1];
-
-                if (gr == 0) {
-                    // Granule 0: always write all scalefactors
-                    for (int b = 0; b < 11; b++)
-                        if (slen1 > 0) md.write_bits(gi.scalefac[b], slen1);
-                    for (int b = 11; b < 21; b++)
-                        if (slen2 > 0) md.write_bits(gi.scalefac[b], slen2);
-                } else {
-                    // Granule 1: skip groups where scfsi=1
-                    for (int b = 0; b < 6; b++)
-                        if (slen1 > 0 && !scfsi[ch][0]) md.write_bits(gi.scalefac[b], slen1);
-                    for (int b = 6; b < 11; b++)
-                        if (slen1 > 0 && !scfsi[ch][1]) md.write_bits(gi.scalefac[b], slen1);
-                    for (int b = 11; b < 16; b++)
-                        if (slen2 > 0 && !scfsi[ch][2]) md.write_bits(gi.scalefac[b], slen2);
-                    for (int b = 16; b < 21; b++)
-                        if (slen2 > 0 && !scfsi[ch][3]) md.write_bits(gi.scalefac[b], slen2);
-                }
-            }
-
-            huffman_encode(gi.ix, gi.regions, enc->sr_index, md);
-        }
-    }
-
-    // Flush main data writer and get the encoded main data bytes
-    md.flush();
-    int md_bytes = md.byte_count();
-
-    // Update bit reservoir with actual usage
-    enc->reservoir.update(total_main_bits);
-
-    // Assemble frame: header + side_info + main_data + zero padding
-    const uint8_t* frame = enc->frame_asm.assemble(this_frame_size, out_size);
-    std::memcpy(enc->output_buf, frame, *out_size);
-    enc->reservoir_buf_size = std::min(enc->reservoir_buf_size + md_bytes, 8192);
-
-    enc->frame_count++;
-
-    // Invoke streaming callback if set
-    if (enc->write_cb && *out_size > 0) {
-        enc->write_cb(enc->output_buf, *out_size, enc->write_cb_data);
-    }
-
-    return enc->output_buf;
+    return finish_frame(enc, granule_info, num_gr, nch, mode_ext,
+                        this_frame_size, total_main_bits, out_size);
 }
 
 const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
@@ -815,7 +826,13 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
     int this_frame_size = enc->frame_size + (enc->vbr_mode ? 0 : enc->padding);
     int this_frame_bits = this_frame_size * 8 - 32 - enc->side_info_bits;
 
-    int reservoir_bytes = 0;
+    // Bit reservoir: the mechanism (continuous main-data stream + deferred
+    // frame emission, see reservoir.hpp) is active for CBR. The allocation
+    // policy is conservative for now: each frame targets its own slot, and
+    // the reservoir absorbs natural under-use (easy frames whose finest
+    // useful gain needs fewer bits than the slot). Borrowing beyond the slot
+    // requires a demand-driven policy — a naive "spend the whole reservoir"
+    // was measured to regress badly (see PLAN.md item 5).
     int available_bits = this_frame_bits;
 
     int num_gr = enc->num_granules;
@@ -924,169 +941,8 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
 
     // --- Frame assembly (identical to glint_encode) ---
 
-    // Compute SCFSI
-    static const int scfsi_band[5] = {0, 6, 11, 16, 21};
-    int scfsi[2][4] = {};
-    if (num_gr == 2) {
-        for (int ch = 0; ch < nch; ch++) {
-            bool has_short = (granule_info[0][ch].block_type != 0) ||
-                             (granule_info[1][ch].block_type != 0);
-            for (int group = 0; group < 4; group++) {
-                bool match = !has_short;
-                if (match) {
-                    for (int b = scfsi_band[group]; b < scfsi_band[group+1] && b < 21; b++) {
-                        if (granule_info[0][ch].scalefac[b] != granule_info[1][ch].scalefac[b]) {
-                            match = false;
-                            break;
-                        }
-                    }
-                }
-                scfsi[ch][group] = match ? 1 : 0;
-            }
-            if (granule_info[1][ch].part2_length > 0) {
-                static const int slen_table_scfsi[16][2] = {
-                    {0,0},{0,1},{0,2},{0,3},{3,0},{1,1},{1,2},{1,3},
-                    {2,1},{2,2},{2,3},{3,1},{3,2},{3,3},{4,2},{4,3}
-                };
-                int slen1 = slen_table_scfsi[granule_info[1][ch].scalefac_compress][0];
-                int slen2 = slen_table_scfsi[granule_info[1][ch].scalefac_compress][1];
-                int saved = 0;
-                if (scfsi[ch][0]) saved += slen1 * 6;
-                if (scfsi[ch][1]) saved += slen1 * 5;
-                if (scfsi[ch][2]) saved += slen2 * 5;
-                if (scfsi[ch][3]) saved += slen2 * 5;
-                granule_info[1][ch].part2_length -= saved;
-                granule_info[1][ch].part2_3_length -= saved;
-                total_main_bits -= saved;
-            }
-        }
-    }
-
-    int channel_mode = mode_to_mpeg(enc->config.mode);
-    int hdr_sr_index = (enc->sr_index < 3) ? enc->sr_index : (enc->sr_index - 3);
-    enc->frame_asm.reset();
-    int hdr_br_index = enc->br_index;
-    int hdr_padding = enc->padding;
-    if (enc->vbr_mode) {
-        hdr_br_index = vbr_pick_frame_size(enc, total_main_bits,
-                                           &this_frame_size);
-        hdr_padding = 0;
-    }
-    enc->frame_asm.write_header(hdr_br_index, hdr_sr_index,
-                                 hdr_padding, channel_mode, mode_ext,
-                                 enc->mpeg_version);
-
-    BitstreamWriter& si = enc->frame_asm.side_info();
-    si.reset();
-    int main_data_begin = std::min(reservoir_bytes, enc->reservoir_buf_size);
-
-    if (enc->mpeg_version == 1) {
-        si.write_bits(main_data_begin, 9);
-        if (nch == 1) si.write_bits(0, 5); else si.write_bits(0, 3);
-        for (int ch = 0; ch < nch; ch++) {
-            si.write_bits(scfsi[ch][0], 1);
-            si.write_bits(scfsi[ch][1], 1);
-            si.write_bits(scfsi[ch][2], 1);
-            si.write_bits(scfsi[ch][3], 1);
-        }
-        for (int gr = 0; gr < 2; gr++)
-            for (int ch = 0; ch < nch; ch++)
-                write_granule_side_info(si, granule_info[gr][ch], enc->mpeg_version);
-    } else {
-        si.write_bits(main_data_begin, 8);
-        if (nch == 1) si.write_bits(0, 1); else si.write_bits(0, 2);
-        for (int ch = 0; ch < nch; ch++)
-            write_granule_side_info(si, granule_info[0][ch], enc->mpeg_version);
-    }
-
-    BitstreamWriter& md = enc->frame_asm.main_data();
-    md.reset();
-
-    static const int slen_table_m1f[16][2] = {
-        {0,0},{0,1},{0,2},{0,3},{3,0},{1,1},{1,2},{1,3},
-        {2,1},{2,2},{2,3},{3,1},{3,2},{3,3},{4,2},{4,3}
-    };
-
-    for (int gr = 0; gr < num_gr; gr++) {
-        for (int ch = 0; ch < nch; ch++) {
-            const GranuleInfo& gi = granule_info[gr][ch];
-
-            if (enc->mpeg_version != 1) {
-                // MPEG-2/2.5: decode 9-bit scalefac_compress to 4 slen values
-                int sfc = gi.scalefac_compress;
-                int slen[4] = {};
-                int nr[4] = {6, 5, 5, 5};
-                // ISO 13818-3 mapping (must match what real decoders derive;
-                // the encoder only ever emits the sfc < 400 range)
-                if (sfc < 400) {
-                    slen[0] = (sfc >> 4) / 5;
-                    slen[1] = (sfc >> 4) % 5;
-                    slen[2] = (sfc & 15) >> 2;
-                    slen[3] = sfc & 3;
-                } else if (sfc < 500) {
-                    int v = sfc - 400;
-                    slen[0] = (v >> 2) / 5;
-                    slen[1] = (v >> 2) % 5;
-                    slen[2] = v & 3;
-                    slen[3] = 0;
-                    nr[0] = 6; nr[1] = 5; nr[2] = 7; nr[3] = 3;
-                } else {
-                    int v = sfc - 500;
-                    slen[0] = v / 3;
-                    slen[1] = v % 3;
-                    slen[2] = 0;
-                    slen[3] = 0;
-                    nr[0] = 11; nr[1] = 10; nr[2] = 0; nr[3] = 0;
-                }
-                int b = 0;
-                for (int g = 0; g < 4; g++) {
-                    for (int i = 0; i < nr[g] && b < 21; i++, b++) {
-                        if (slen[g] > 0)
-                            md.write_bits(gi.scalefac[b], slen[g]);
-                    }
-                }
-            } else {
-                int slen1 = slen_table_m1f[gi.scalefac_compress][0];
-                int slen2 = slen_table_m1f[gi.scalefac_compress][1];
-
-                if (gr == 0) {
-                    for (int b = 0; b < 11; b++)
-                        if (slen1 > 0) md.write_bits(gi.scalefac[b], slen1);
-                    for (int b = 11; b < 21; b++)
-                        if (slen2 > 0) md.write_bits(gi.scalefac[b], slen2);
-                } else {
-                    for (int b = 0; b < 6; b++)
-                        if (slen1 > 0 && !scfsi[ch][0]) md.write_bits(gi.scalefac[b], slen1);
-                    for (int b = 6; b < 11; b++)
-                        if (slen1 > 0 && !scfsi[ch][1]) md.write_bits(gi.scalefac[b], slen1);
-                    for (int b = 11; b < 16; b++)
-                        if (slen2 > 0 && !scfsi[ch][2]) md.write_bits(gi.scalefac[b], slen2);
-                    for (int b = 16; b < 21; b++)
-                        if (slen2 > 0 && !scfsi[ch][3]) md.write_bits(gi.scalefac[b], slen2);
-                }
-            }
-
-            huffman_encode(gi.ix, gi.regions, enc->sr_index, md);
-        }
-    }
-
-    md.flush();
-    int md_bytes = md.byte_count();
-
-    enc->reservoir.update(total_main_bits);
-
-    const uint8_t* frame = enc->frame_asm.assemble(this_frame_size, out_size);
-    std::memcpy(enc->output_buf, frame, *out_size);
-    enc->reservoir_buf_size = std::min(enc->reservoir_buf_size + md_bytes, 8192);
-
-    enc->frame_count++;
-
-    // Invoke streaming callback if set
-    if (enc->write_cb && *out_size > 0) {
-        enc->write_cb(enc->output_buf, *out_size, enc->write_cb_data);
-    }
-
-    return enc->output_buf;
+    return finish_frame(enc, granule_info, num_gr, nch, mode_ext,
+                        this_frame_size, total_main_bits, out_size);
 #else
     // Pure fixed-point build: should never reach here (handled above)
     *out_size = 0;
@@ -1121,7 +977,13 @@ const uint8_t* glint_flush(glint_t enc, int* out_size) {
         if (out_size) *out_size = 0;
         return nullptr;
     }
-    *out_size = 0;
+    // Release the reservoir's buffered frames (CBR; VBR frames are emitted
+    // immediately and there is nothing to drain).
+    *out_size = enc->vbr_mode ? 0
+                              : enc->reservoir.flush(enc->output_buf,
+                                                     sizeof(enc->output_buf));
+    if (enc->write_cb && *out_size > 0)
+        enc->write_cb(enc->output_buf, *out_size, enc->write_cb_data);
     return enc->output_buf;
 }
 

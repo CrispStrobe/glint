@@ -29,6 +29,39 @@ static int tests_passed = 0;
     else { std::fprintf(stderr, "  FAIL: %s (line %d)\n", msg, __LINE__); } \
 } while(0)
 
+// With the bit reservoir, a frame's main data can spill into a later frame's
+// slot, so output is deferred (a single glint_encode call may return 0 bytes).
+// These helpers encode several frames and flush, returning the full stream.
+#include <vector>
+static std::vector<uint8_t> encode_i16_frames(glint_t enc, const int16_t* pcm,
+                                              int n) {
+    std::vector<uint8_t> out;
+    const int16_t* ch[] = { pcm };
+    for (int f = 0; f < n; f++) {
+        int sz = 0;
+        const uint8_t* d = glint_encode(enc, ch, &sz);
+        if (d && sz > 0) out.insert(out.end(), d, d + sz);
+    }
+    int sz = 0;
+    const uint8_t* d = glint_flush(enc, &sz);
+    if (d && sz > 0) out.insert(out.end(), d, d + sz);
+    return out;
+}
+static std::vector<uint8_t> encode_float_frames(glint_t enc, const float* pcm,
+                                                int n) {
+    std::vector<uint8_t> out;
+    const float* ch[] = { pcm };
+    for (int f = 0; f < n; f++) {
+        int sz = 0;
+        const uint8_t* d = glint_encode_float(enc, ch, &sz);
+        if (d && sz > 0) out.insert(out.end(), d, d + sz);
+    }
+    int sz = 0;
+    const uint8_t* d = glint_flush(enc, &sz);
+    if (d && sz > 0) out.insert(out.end(), d, d + sz);
+    return out;
+}
+
 // --- Bitstream round-trip ---
 static void test_bitstream() {
     std::printf("Bitstream writer...\n");
@@ -167,16 +200,14 @@ static void test_api() {
     int spf = glint_samples_per_frame(enc);
     CHECK(spf == 1152, "samples_per_frame = 1152 for MPEG-1");
 
-    // Encode one frame of silence
+    // Encode a few frames of silence and flush (reservoir defers output).
     int16_t pcm[1152] = {};
-    const int16_t* ch[] = { pcm };
-    int out_size = 0;
-    const uint8_t* frame = glint_encode(enc, ch, &out_size);
-    CHECK(frame != nullptr, "encode returns non-null");
-    CHECK(out_size > 0, "encode returns data");
+    std::vector<uint8_t> out = encode_i16_frames(enc, pcm, 4);
+    CHECK(!out.empty(), "encode returns data");
 
-    // Check MP3 sync word
-    CHECK(frame[0] == 0xFF && (frame[1] & 0xE0) == 0xE0, "valid MP3 sync word");
+    // Check MP3 sync word at the start of the stream
+    CHECK(out.size() >= 2 && out[0] == 0xFF && (out[1] & 0xE0) == 0xE0,
+          "valid MP3 sync word");
 
     glint_destroy(enc);
 }
@@ -287,18 +318,11 @@ static void test_float_encode_api() {
     for (int i = 0; i < spf; i++)
         pcm[i] = static_cast<float>(std::sin(2.0 * 3.14159265 * 440.0 * i / 44100.0) * 0.5);
 
-    const float* ch[] = { pcm };
-    int out_size = 0;
-    const uint8_t* frame = glint_encode_float(enc, ch, &out_size);
-    CHECK(frame != nullptr, "float encode returns non-null");
-    CHECK(out_size > 0, "float encode returns data");
-    CHECK(frame[0] == 0xFF && (frame[1] & 0xE0) == 0xE0, "float encode produces valid MP3 sync word");
-
-    // Encode a second frame to verify state continuity
-    int out_size2 = 0;
-    const uint8_t* frame2 = glint_encode_float(enc, ch, &out_size2);
-    CHECK(frame2 != nullptr, "float encode second frame non-null");
-    CHECK(out_size2 > 0, "float encode second frame has data");
+    std::vector<uint8_t> out = encode_float_frames(enc, pcm, 4);
+    CHECK(!out.empty(), "float encode returns data");
+    CHECK(out.size() >= 2 && out[0] == 0xFF && (out[1] & 0xE0) == 0xE0,
+          "float encode produces valid MP3 sync word");
+    CHECK(out.size() > 100, "float encode produces continuous output");
 
     delete[] pcm;
     glint_destroy(enc);
@@ -323,10 +347,8 @@ static void test_float_vs_int16_encode() {
     for (int i = 0; i < spf; i++)
         pcm_float[i] = static_cast<float>(std::sin(2.0 * 3.14159265 * 1000.0 * i / 44100.0) * 0.8);
 
-    const float* ch_f[] = { pcm_float };
-    int out_f = 0;
-    const uint8_t* frame_f = glint_encode_float(enc_f, ch_f, &out_f);
-    CHECK(frame_f != nullptr && out_f > 0, "float path encode OK");
+    std::vector<uint8_t> out_float = encode_float_frames(enc_f, pcm_float, 4);
+    CHECK(!out_float.empty(), "float path encode OK");
 
     // Encode via int16 path (same signal converted to int16)
     glint_t enc_i = glint_create(&cfg);
@@ -338,13 +360,13 @@ static void test_float_vs_int16_encode() {
         pcm_int16[i] = static_cast<int16_t>(v);
     }
 
-    const int16_t* ch_i[] = { pcm_int16 };
-    int out_i = 0;
-    const uint8_t* frame_i = glint_encode(enc_i, ch_i, &out_i);
-    CHECK(frame_i != nullptr && out_i > 0, "int16 path encode OK");
+    std::vector<uint8_t> out_int = encode_i16_frames(enc_i, pcm_int16, 4);
+    CHECK(!out_int.empty(), "int16 path encode OK");
 
-    // Both should produce valid frames of same size (same bitrate/padding)
-    CHECK(out_f == out_i, "float and int16 paths produce same frame size");
+    // Both paths process the same frame count at the same bitrate, so the
+    // total emitted stream size must match.
+    CHECK(out_float.size() == out_int.size(),
+          "float and int16 paths produce same total size");
 
     delete[] pcm_float;
     delete[] pcm_int16;
