@@ -32,18 +32,22 @@ with `tests/measure_audio.py`; `double` and `fixed` paths are identical):
 
 | Mode | SNR | seg-SNR | centroid | %E>10 kHz | 95% rolloff | RMS vs src | speed |
 |---|---|---|---|---|---|---|---|
-| -q speed | 34.5 dB | 37.4 dB | 881 Hz | 0.69% | 5.32 kHz | ±0.2 dB | ~136× |
-| **-q normal** | **34.6 dB** | **37.4 dB** | 884 Hz | 0.70% | 5.37 kHz | ±0.2 dB | ~72× |
-| -q best | 34.7 dB | 37.5 dB | 892 Hz | 0.71% | 5.44 kHz | ±0.2 dB | ~36× |
+| -q speed | 34.9 dB | 37.8 dB | 881 Hz | 0.69% | 5.32 kHz | ±0.2 dB | ~136× |
+| **-q normal** | **34.9 dB** | **37.8 dB** | 884 Hz | 0.70% | 5.37 kHz | ±0.2 dB | ~72× |
+| -q best | 35.1 dB | 37.9 dB | 892 Hz | 0.71% | 5.44 kHz | ±0.2 dB | ~36× |
 
 Source rolloff 5.4 kHz, centroid 892 Hz, %E>10 kHz 0.72%. LAME at 256 kbps
-measures 36.9 dB SNR on the same clip — glint is within ~2.4 dB. (These
-figures follow the pow34-curve fix that removed a ~15 dB whole-encoder SNR
-ceiling; see PLAN.md item 0.) Both signal paths are metrics-identical. Apple
-M1, 256 kbps stereo, single-threaded (`-j1`), measured under moderate load —
-re-measure absolutes on an idle machine. The optional threaded scale-factor
-search (`-j N`, byte-identical output) helps most at `-q best`; `-j8`
-regresses past `-j4`. Quality metrics are unaffected by
+measures 36.9 dB SNR on the same clip — glint is within ~1.8 dB. On music
+(256 kbps joint, 60 s clips): electronic 39.7 dB (LAME 44.5), string quartet
+44.4 dB (LAME 46.0). VBR: V0 319 kbps/39.2 dB down to V9 53 kbps/23.3 dB
+with real variable-size frames. MPEG-2 rates work now (22.05 kHz CBR-64k:
+18.8 dB vs LAME's 17.6). These figures follow the pow34-curve, sfb21 and
+MPEG-2 scalefac_compress fixes that removed a ~15 dB whole-encoder SNR
+ceiling and a phantom HF boost; see PLAN.md items 0 and 7. Both signal paths
+are metrics-identical. Apple M1, 256 kbps stereo, single-threaded (`-j1`),
+measured under moderate load — re-measure absolutes on an idle machine. The
+optional threaded scale-factor search (`-j N`, byte-identical output) helps
+most at `-q best`; `-j8` regresses past `-j4`. Quality metrics are unaffected by
 thread count. For a deterministic local speed/quality run without external
 audio, use `python tests/benchmark_encoder.py build/glint_cli`; to A/B two
 builds with statistics, byte-identity, and quality regression flags, use
@@ -53,14 +57,12 @@ builds with statistics, byte-identity, and quality regression flags, use
 
 | Mode | 0–1 kHz | 1–4 kHz | 4–8 kHz | 8–16 kHz |
 |---|---|---|---|---|
-| -q speed | 44.4 dB | 29.8 dB | 26.6 dB | 22.2 dB |
-| -q normal | 44.4 dB | 29.9 dB | 26.6 dB | 22.2 dB |
-| -q best | 44.6 dB | 30.0 dB | 26.7 dB | 22.3 dB |
+| -q best | 44.6 dB | 30.1 dB | 26.9 dB | 22.4 dB |
 
-Noise now sits where masking absorbs it: ~40% of total error power above
-8 kHz and only ~9% in 0–1 kHz. A Bark-band noise-to-mask metric
-(`tests/measure_audio.py`) measures mean NMR −8.6 dB with 1.9% of band-frames
-above the estimated mask (LAME: −16.1 dB / 0%).
+(speed/normal within 0.2 dB of best per band.) Noise sits where masking
+absorbs it: most error power above 8 kHz, ~9% in 0–1 kHz. A Bark-band
+noise-to-mask metric (`tests/measure_audio.py`) measures mean NMR −8.8 dB
+with 1.7% of band-frames above the estimated mask (LAME: −16.1 dB / 0%).
 
 **Footprint**:
 

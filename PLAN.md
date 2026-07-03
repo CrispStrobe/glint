@@ -165,16 +165,24 @@ Ranks tiers correctly (speed 6.6 > normal 5.3 > best 5.1 dB mean at
 256 kbps). Calibration is relative — compare builds on the same reference.
 Still open: ViSQOL/PEAQ for a MOS-like score; A/B against LAME at 256 kbps.
 
-## 7. MPEG-2/2.5 path is broken — TODO (pre-existing, all rates ≤ 24 kHz)
+## 7. MPEG-2/2.5 path — FIXED (merged)
 
-CBR at 22050 Hz measures **−10 dB SNR** (decoded audio is garbage),
-reproduced on pre-quality-work main — long-standing, not caused by recent
-changes. Prime suspect: `encode_scalefac_compress_m2` returns 0 (encodes
-nothing) whenever bands 16–20 carry a nonzero scalefactor (slen3 ≠ 0 fails
-both supported sfc ranges), so written scalefactors and the decoder's
-readback disagree. VBR at m2 rates additionally emits an occasional
-backstep frame. The unit tests pass without catching it — they don't
-decode-verify m2 output; add a decode-based m2 test when fixing.
+Root cause was an invented `scalefac_compress` mapping
+(sfc = slen0·36 + slen1·6 + slen2), internally consistent between glint's
+encode and emission but not ISO 13818-3 — every real decoder derived
+different slens and misparsed the granule (−10 dB SNR garbage,
+long-standing). Both sides now use the standard sfc<400 mapping.
+Result: CBR-64k at 22.05 kHz measures 18.8 dB SNR (LAME 64k: 17.6 —
+glint ahead), VBR V4 31.5 dB, 0 backstep.
+
+**Bonus find while fixing:** the quantizer band loop read `scalefac[21]`
+out of bounds for the sfb21 region (bins ≥ sfb[21], ~9 kHz+ at 44.1k) —
+aliasing scalefac_compress as a phantom ~29× boost with no decoder-side
+compensation. Fixing it (sfb21 has no scalefactor, period) was worth
++0.3 dB/−1.4 LSD on speech and **+8 to +17 dB SNR on music**:
+electronic 29.2 → 39.7, quartet 27.2 → 44.4 dB (LAME: 44.5/46.0).
+Follow-up: add a decode-based m2 test — the unit suite never caught any
+of this.
 
 ## 8. VBR — DONE for MPEG-1 (merged), see item 7 for m2
 
