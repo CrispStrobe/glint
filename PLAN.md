@@ -1,5 +1,11 @@
 # Quality improvement plan
 
+**Scoreboard** (256 kbps, `-q best`, vs LAME on identical inputs, after the
+pow34/sfb21/m2 fixes): speech 35.1 vs 36.9 dB SNR, electronic 39.7 vs 44.5,
+quartet 44.4 vs 46.0; NMR −8.8 vs −16.1 dB. VBR V0 319 kbps/39.2 dB → V9
+53 kbps/23.3 dB. MPEG-2 22.05k CBR-64k 18.8 vs LAME 17.6.
+**Next big lever: item 5 (bit reservoir → short blocks).**
+
 ## 0. ~15 dB SNR ceiling — RESOLVED (pow34 curve bug, fixed on main)
 
 **Root cause:** `fast_pow34` interpolated x^0.75 on an *integer* grid, but
@@ -25,15 +31,15 @@ now in the same league, ~2–15 dB behind depending on content.
   re-enabling.
 - `fast_pow34` is now plain `std::pow` — restore a fast path (frexp-based
   mantissa table) if profiling shows it hot; encode times were unchanged.
-- VBR is mis-calibrated post-fix (`vbr_target_gain` tuned for the old
-  curve): 20.6 dB / NMR +5.3 on speech. Recalibrate the target-gain table.
+- ~~VBR mis-calibrated post-fix~~ — done, see item 8.
 - White-noise pathology: full-scale white noise decodes +11 dB hot and
   clipped (pre-existing; LAME also only manages 10 dB here). Suspect the
   +0.4054 rounding bias at ultra-coarse quantization when the 4095-bit cap
   binds, times the scale search. Edge case, but worth a look with item 5.
-- Re-tune post-fix: envelope-retention penalty in granule_mse, the
-  45/55 channel-split clamp, and the scale-search grids/tier widths were
-  all tuned against the broken curve.
+- ~~Re-tune envelope penalty~~ — measured obsolete post-fix and removed
+  (granule_mse is pure reconstruction MSE now); `-q speed` skips the scale
+  search entirely (f=1.0 always won). The 45/55 channel-split clamp holds on
+  the music clips.
 
 ### Original diagnosis (kept for the record)
 
@@ -184,14 +190,16 @@ electronic 29.2 → 39.7, quartet 27.2 → 44.4 dB (LAME: 44.5/46.0).
 Follow-up: add a decode-based m2 test — the unit suite never caught any
 of this.
 
-## 8. VBR — DONE for MPEG-1 (merged), see item 7 for m2
+## 8. VBR — DONE (merged), MPEG-1 and MPEG-2
 
 Real variable-size frames (smallest bitrate index that fits), unified with
 the CBR quantizer path via a gain floor, target-gain table recalibrated
-post-pow34-fix, and a budget bug fixed (VBR quantized under the caller's
-default 128k frame budget instead of 320k). Speech ladder: V0 319 kbps /
-39.2 dB / NMR −13.4 → V9 53 kbps / 23.3 dB. Follow-up: write a Xing/VBRI
-header so players show correct duration/seek for VBR files.
+post-pow34-fix, and two budget bugs fixed (VBR quantized under the caller's
+default 128k frame budget instead of the max; and budgets assumed the CBR
+padding byte, overflowing the largest unpadded frame ~2×/min). Speech
+ladder: V0 319 kbps / 39.2 dB / NMR −13.4 → V9 53 kbps / 23.3 dB; MPEG-2
+V4 at 22.05k: 31.5 dB. Follow-up: write a Xing/VBRI header so players show
+correct duration/seek for VBR files.
 
 ## Smaller dials (experiment-sized)
 
