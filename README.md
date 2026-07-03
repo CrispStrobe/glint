@@ -57,12 +57,12 @@ builds with statistics, byte-identity, and quality regression flags, use
 
 | Mode | 0–1 kHz | 1–4 kHz | 4–8 kHz | 8–16 kHz |
 |---|---|---|---|---|
-| -q best | 44.6 dB | 30.1 dB | 26.9 dB | 22.4 dB |
+| -q best | 45.5 dB | 31.1 dB | 28.0 dB | 23.6 dB |
 
 (speed/normal within 0.2 dB of best per band.) Noise sits where masking
 absorbs it: most error power above 8 kHz, ~9% in 0–1 kHz. A Bark-band
-noise-to-mask metric (`tests/measure_audio.py`) measures mean NMR −8.8 dB
-with 1.7% of band-frames above the estimated mask (LAME: −16.1 dB / 0%).
+noise-to-mask metric (`tests/measure_audio.py`) measures mean NMR −7.2 dB
+stereo / −10.3 dB joint (LAME: −16.1 dB).
 
 **Footprint**:
 
@@ -154,7 +154,7 @@ glint_destroy(enc);
 | `glint_encode(enc, int16**, &size)` | Encode from int16 |
 | `glint_encode_float(enc, float**, &size)` | Encode from float [-1,1] |
 | `glint_encode_int32(enc, int32**, &size)` | Encode from int32 |
-| `glint_flush(enc, &size)` | Flush final frame |
+| `glint_flush(enc, &size)` | Drain buffered frames — required at end of stream |
 | `glint_destroy(enc)` | Free encoder |
 | `glint_set_threads(n)` | Worker threads for the scale-factor search (process-global; output byte-identical for any `n`) |
 
@@ -186,12 +186,15 @@ PCM input → Subband Analysis → MDCT → Alias Reduction → Quantization
 - **MDCT**: 36-point (long) with sine window, /288 normalization, transposed
   cosine table for SIMD (12-point short blocks implemented but gated off — see
   roadmap)
-- **Quantization**: pow34 table lookup, anti-clipping gain floor, binary-search
-  gain to the bit budget (`quantize_base`), wrapped in a per-granule input-scale
-  search that minimizes decoder-reconstruction MSE (`quantize_granule`)
-- **Huffman**: O(1) max-value table selection, 34 ISO tables, SCFSI
-- **Bitstream**: 32-bit accumulator; each frame self-contained (bit reservoir
-  mechanism on the `feature/bit-reservoir` branch, off by default — see roadmap)
+- **Quantization**: exact x^0.75 companding, anti-clipping gain bounds,
+  binary-search gain to the bit budget (`quantize_base`), wrapped in a
+  per-granule input-scale search that minimizes decoder-reconstruction MSE
+  (`quantize_granule`); CBR rate control via a constant-quality gain anchor
+- **Huffman**: table choice by actual bit count (fused select+count),
+  34 ISO tables, SCFSI
+- **Bitstream**: 32-bit accumulator; bit reservoir as a continuous main-data
+  stream with deferred frame emission (`reservoir.hpp`); VBR frames
+  self-contained with per-frame bitrate selection
 
 ## Project structure
 
