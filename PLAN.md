@@ -1,10 +1,17 @@
 # Quality improvement plan
 
-**Scoreboard** (256 kbps, `-q best`, vs LAME on identical inputs, after the
-pow34/sfb21/m2 fixes): speech 35.1 vs 36.9 dB SNR, electronic 39.7 vs 44.5,
-quartet 44.4 vs 46.0; NMR −8.8 vs −16.1 dB. VBR V0 319 kbps/39.2 dB → V9
-53 kbps/23.3 dB. MPEG-2 22.05k CBR-64k 18.8 vs LAME 17.6.
-**Item 5 (reservoir + short blocks) is done for MPEG-1; next: NMR-aware anchor tuning, LSF short blocks, short-block scalefactors.**
+**Scoreboard** (256 kbps joint, `-q best`, vs LAME on identical inputs,
+after psy allocation): speech SNR **37.7 vs 36.9** (glint ahead), NMR −12.2
+vs −16.1, audible band-frames 0.3% vs 0.0%; electronic 43.0 vs 44.5 / NMR
+−12.4 vs −15.8; quartet 44.1 vs 46.0 / −9.3 vs −11.1 (audible 1.0%);
+castanets-128k NMR 10.2 vs 4.8 (256k: −0.5 — at the mask). MPEG-2 64k
+**21.4 vs 17.6** (glint ahead). VBR V4 40.3 dB @ 265 kbps.
+**Remaining LAME gaps**: mean NMR tail (its psymodel shapes deeper — try
+scalefac_scale=1 escalation, preflag, offset tuning), short-granule psy
+shaping + subblock_gain (the castanet-128k gap), LSF short blocks.
+Measured dead ends: transient frames taking the full reservoir + dropped
+gain floor (≈no-op for castanets, −0.9 dB NMR on speech); reservoir fill
+target 60–90% instead of 40–60% (+0.4 SNR but −0.9 NMR on speech).
 
 ## 0. ~15 dB SNR ceiling — RESOLVED (pow34 curve bug, fixed on main)
 
@@ -119,7 +126,13 @@ LSD −0.5 dB at all tiers, rolloff +23/+70 Hz (normal/best).
 - Music check (electronic + string quartet, see item 0): joint ≈ stereo on
   both clips, so the 45/55 clamp holds up beyond speech.
 
-## 3. Outer-loop noise shaping (NMR-driven) — DONE at `-q best` (merged)
+## 3. Outer-loop noise shaping — REBUILT as psy allocation (merged); see commit
+`quality: psychoacoustic bit allocation`. Schroeder-Bark masks aligned with
+the metric, Σ(noise/mask) objective, seedless start, side-channel excluded,
++9% encode time at best. The section below describes the FIRST version and
+its lessons; superseded.
+
+### First version (historical)
 
 `nmr_outer_loop` in quantize.cpp: amplify scalefactors of bands whose
 reconstruction noise exceeds a per-band mask, re-run the gain search so
