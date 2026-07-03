@@ -58,6 +58,14 @@ static void reorder_short_blocks(const double mdct_short[32][3][6],
 // ANY granule gets a proper START on the granule before it (the lookahead
 // entry schedules a START on this frame's last granule when the held granule
 // is transient; the carry then makes it SHORT next frame).
+// Attack-decay breadth: granules to keep SHORT after each transient, so the
+// burst decay stays in short windows too (a castanet burst decays over ~2
+// granules). Measured on castanets-128k: p95 NMR 9.5 -> 3.1 and audible
+// band-frames 10.8% -> 8.5% (2 extra granules; 1 got only 5.3/9.4). SNR
+// drops on the extended granules by design — judge transients by NMR.
+// Speech/music are untouched (no spurious extensions measured).
+static constexpr int kShortAttackExtend = 2;
+
 static void schedule_block_types(glint_context* enc,
                                  const double gr_energy[3], int num_gr,
                                  int types[2]) {
@@ -68,6 +76,15 @@ static void schedule_block_types(glint_context* enc,
             want[g] = true;   // >9 dB energy jump = transient
         enc->sched_prev_energy = gr_energy[g];
         enc->sched_energy_valid = true;
+    }
+    // Attack-decay breadth: keep the next kShortAttackExtend granules SHORT
+    // after a transient (the run carries across frames via sched_short_run).
+    for (int g = 0; g < num_gr; g++) {
+        if (want[g]) enc->sched_short_run = kShortAttackExtend;
+        else if (enc->sched_short_run > 0) {
+            want[g] = true;
+            enc->sched_short_run--;
+        }
     }
     // Next call re-evaluates the lookahead granule as its first work granule
     // against the energy of the granule before it.
@@ -107,6 +124,29 @@ static void schedule_block_types(glint_context* enc,
 static constexpr bool kShortBlocksEnabled = true;
 
 #endif // double-precision path helpers
+
+// Encoder-side lowpass at the sfb21 boundary (~15.8 kHz at 44.1k, ~10 kHz
+// at 22.05k): zero the region before quantization. The sfb21 region carries
+// NO scalefactor, so the psy loop cannot shape its noise — left alone the
+// quantizer sprays noise into it (measured -1 dB band-SNR above 16k on
+// castanets, i.e. more noise than signal, and audible hiss into EMPTY HF
+// bands on tonal music). Zeroing it improves mean NMR on every test clip
+// at every rate (castanets-128k 15.0 -> 8.7, quartet-256k -10.1 -> -15.1,
+// VBR V0 speech +0.27 dB SNR) and matches LAME's measured 128k spectrum
+// almost exactly (rolloff 15.1k vs 15.05k). Cost: content above the
+// boundary is dropped (LSD rises on clips that had any); at 256k LAME
+// keeps up to ~17.7k instead — revisit if a shapeable sfb21 alternative
+// (e.g. gain-region trades) ever lands. Applied in ALL modes and paths so
+// double==fixed metrics hold. Attack-only zeroing (window-switching
+// granules) kept the p95 win but lost the mean win — most spray comes from
+// LONG granules between transients.
+static void apply_sfb21_lowpass(double* mdct_flat, int sr_index,
+                                bool short_block) {
+    int start = short_block
+        ? tables::get_sfb_short_by_unified(sr_index)[12] * 3
+        : tables::get_sfb_long_by_unified(sr_index)[21];
+    for (int i = start; i < 576; i++) mdct_flat[i] = 0.0;
+}
 
 int glint_check_config(int sample_rate, int bitrate) {
     if (tables::samplerate_to_index(sample_rate) < 0) return -1;
@@ -210,6 +250,7 @@ glint_t glint_create(const glint_config* cfg) {
     ctx->sched_prev_energy = 0.0;
     ctx->sched_energy_valid = false;
     ctx->next_block_carry = 0;
+    ctx->sched_short_run = 0;
 #if !defined(GLINT_FIXED_POINT) || defined(GLINT_BOTH_PATHS)
     std::memset(ctx->held_sub_d, 0, sizeof(ctx->held_sub_d));
     ctx->have_held = false;
@@ -732,6 +773,7 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                     // Reorder to flat 576 array
                     double mdct_flat[576];
                     reorder_short_blocks(mdct_out_short, mdct_flat, enc->sr_index);
+                    apply_sfb21_lowpass(mdct_flat, enc->sr_index, true);
 
                     // Quantize with short-block region layout so the gain
                     // search fits the bit budget under the SAME layout the
@@ -762,6 +804,7 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                     alias_reduce_d(mdct_out);
 
                     double* mdct_flat = &mdct_out[0][0];
+                    apply_sfb21_lowpass(mdct_flat, enc->sr_index, false);
 
                     if (enc->vbr_mode) {
                         granule_info[gr][ch] = quantize_granule_vbr(mdct_flat, gr_bits,
@@ -859,6 +902,7 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                 // Outputs flat double[576] directly for the quantizer.
                 double mdct_flat[576];
                 enc->mdct_fp[ch].process_and_convert(sub_gr, mdct_flat);
+                apply_sfb21_lowpass(mdct_flat, enc->sr_index, false);
 
                 if (enc->vbr_mode) {
                     granule_info[gr][ch] = quantize_granule_vbr(mdct_flat, gr_bits,
@@ -1094,6 +1138,7 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
 
                 double mdct_flat[576];
                 reorder_short_blocks(mdct_out_short, mdct_flat, enc->sr_index);
+                apply_sfb21_lowpass(mdct_flat, enc->sr_index, true);
 
                 if (enc->vbr_mode) {
                     granule_info[gr][ch] = quantize_granule_vbr(mdct_flat, gr_bits,
@@ -1114,6 +1159,7 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
                 alias_reduce_d(mdct_out);
 
                 double* mdct_flat = &mdct_out[0][0];
+                apply_sfb21_lowpass(mdct_flat, enc->sr_index, false);
 
                 if (enc->vbr_mode) {
                     granule_info[gr][ch] = quantize_granule_vbr(mdct_flat, gr_bits,

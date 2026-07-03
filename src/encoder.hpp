@@ -72,6 +72,9 @@ struct glint_context {
     int next_block_carry;       // window chain carry into the next frame:
                                 // 0 none, 2 next granule must be SHORT,
                                 // 3 next granule must be STOP (or SHORT)
+    int sched_short_run;        // remaining granules to keep SHORT after an
+                                // attack (attack-decay breadth), carries
+                                // across frames
 
 #if !defined(GLINT_FIXED_POINT) || defined(GLINT_BOTH_PATHS)
     // One-granule encoder lookahead (double/float paths): the last input
