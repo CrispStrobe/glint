@@ -32,18 +32,18 @@ with `tests/measure_audio.py`; `double` and `fixed` paths are identical):
 
 | Mode | SNR | seg-SNR | centroid | %E>10 kHz | 95% rolloff | RMS vs src | speed |
 |---|---|---|---|---|---|---|---|
-| -q speed | 34.9 dB | 37.8 dB | 881 Hz | 0.69% | 5.32 kHz | ±0.2 dB | ~136× |
-| **-q normal** | **34.9 dB** | **37.8 dB** | 884 Hz | 0.70% | 5.37 kHz | ±0.2 dB | ~72× |
-| -q best | 35.1 dB | 37.9 dB | 892 Hz | 0.71% | 5.44 kHz | ±0.2 dB | ~36× |
+| -q speed | 36.1 dB | 37.6 dB | 881 Hz | 0.69% | 5.32 kHz | ±0.2 dB | ~136× |
+| **-q normal** | **36.1 dB** | **37.6 dB** | 884 Hz | 0.70% | 5.37 kHz | ±0.2 dB | ~72× |
+| -q best | 36.2 dB | 37.6 dB | 892 Hz | 0.71% | 5.44 kHz | ±0.2 dB | ~36× |
 
 Source rolloff 5.4 kHz, centroid 892 Hz, %E>10 kHz 0.72%. LAME at 256 kbps
-measures 36.9 dB SNR on the same clip — glint is within ~1.8 dB. On music
-(256 kbps joint, 60 s clips): electronic 39.7 dB (LAME 44.5), string quartet
-44.4 dB (LAME 46.0). VBR: V0 319 kbps/39.2 dB down to V9 53 kbps/23.3 dB
-with real variable-size frames. MPEG-2 rates work now (22.05 kHz CBR-64k:
-18.8 dB vs LAME's 17.6). These figures follow the pow34-curve, sfb21 and
-MPEG-2 scalefac_compress fixes that removed a ~15 dB whole-encoder SNR
-ceiling and a phantom HF boost; see PLAN.md items 0 and 7. Both signal paths
+measures 36.9 dB SNR on the same clip (glint joint mode: 37.3 dB). On music
+(256 kbps joint, 60 s clips): electronic 43.2 dB (LAME 44.5), string quartet
+45.2 dB (LAME 46.0). VBR: V0 319 kbps/39.2 dB down to V9 53 kbps/23.3 dB
+with real variable-size frames. MPEG-2 rates work (22.05 kHz CBR-64k:
+20.8 dB vs LAME's 17.6). These figures follow the pow34-curve, sfb21 and
+MPEG-2 scalefac_compress fixes plus the bit reservoir with buffer-feedback
+rate control; see PLAN.md items 0, 5 and 7. Both signal paths
 are metrics-identical. Apple M1, 256 kbps stereo, single-threaded (`-j1`),
 measured under moderate load — re-measure absolutes on an idle machine. The
 optional threaded scale-factor search (`-j N`, byte-identical output) helps
