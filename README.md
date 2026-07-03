@@ -32,14 +32,17 @@ with `tests/measure_audio.py`; `double` and `fixed` paths are identical):
 
 | Mode | SNR | seg-SNR | centroid | %E>10 kHz | 95% rolloff | RMS vs src | speed |
 |---|---|---|---|---|---|---|---|
-| -q speed | 12.5 dB | 10.8 dB | 744 Hz | 0.34% | 3.4 kHz | ±0.2 dB | ~190× |
-| **-q normal** | **14.1 dB** | **13.2 dB** | 830 Hz | 0.48% | 5.3 kHz | ±0.2 dB | ~89× |
-| -q best | 14.7 dB | 13.8 dB | 820 Hz | 0.47% | 5.1 kHz | ±0.2 dB | ~39× |
+| -q speed | 12.5 dB | 10.8 dB | 744 Hz | 0.34% | 3.4 kHz | ±0.2 dB | ~230× |
+| **-q normal** | **14.1 dB** | **13.2 dB** | 830 Hz | 0.48% | 5.3 kHz | ±0.2 dB | ~115× |
+| -q best | 14.7 dB | 13.8 dB | 820 Hz | 0.47% | 5.1 kHz | ±0.2 dB | ~54× |
 
 Source rolloff 5.4 kHz, centroid 892 Hz, %E>10 kHz 0.72%. Both signal paths
-are numerically identical. Apple M1, 256 kbps stereo, single-threaded (`-j1`),
-best of 8 runs. The optional threaded scale-factor search (`-j N`, byte-identical
-output) reaches **~149× normal / ~86× best at `-j4`** on the M1's four
+are numerically identical. Apple M1, 256 kbps stereo, single-threaded (`-j1`).
+Speed figures are the pre-pass-3 idle-machine measurements scaled by the
+perf-pass-3 deltas (−19%/−23%/−27% encode time, interleaved A/B, p<0.002,
+byte-identical output); re-measure absolutes on an idle machine. The optional
+threaded scale-factor search (`-j N`, byte-identical output) reaches roughly
+**~175× normal / ~105× best at `-j4`** on the M1's four
 performance cores; `-j8` regresses past that. Quality metrics are unaffected by
 thread count. For a deterministic local speed/quality run without external
 audio, use `python tests/benchmark_encoder.py build/glint_cli`; to A/B two
@@ -241,7 +244,7 @@ passes. Measured on a 1-min 256 kbps stereo speech clip (`double`==`fixed`):
 | RMS level            | −25.9 / −21.4 / −19.7 | within ~0.2 dB of source, all tiers |
 | 95% rolloff          | 1031 / 1031 / 4359 Hz | 3422 / 5344 / 5133 Hz |
 | overall SNR          | 5.1 / 10.1 / 15.0 dB  | 12.5 / 14.1 / 14.7 dB |
-| encode speed         | —                     | ~190× / 89× / 39× realtime (Apple M1, `-j1`) |
+| encode speed         | —                     | ~230× / 115× / 54× realtime (Apple M1, `-j1`) |
 
 Verify with `python tests/measure_audio.py original.wav out.mp3` (want RMS
 within ~0.5 dB of source, rolloff near source, `double`==`fixed`) and
