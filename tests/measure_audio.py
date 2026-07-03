@@ -116,6 +116,60 @@ def fidelity(ref, test, sr):
     return snr, seg, lsd, bsnr, nsh
 
 
+def bark(f):
+    return 13*np.arctan(0.00076*f) + 3.5*np.arctan((f/7500.0)**2)
+
+
+def nmr_metrics(ref, test, sr):
+    """Per-Bark-band noise-to-mask ratio (simplified PEAQ-style).
+
+    Masking threshold per frame: reference Bark-band energies spread with the
+    Schroeder spreading function, offset -14 dB, floored at an ATH-shaped
+    curve calibrated ~96 dB below the loudest band-frame. Returns
+    (mean NMR dB, 95th-percentile NMR dB, % of band-frames with NMR > 0 dB).
+    Lower is better; NMR <= 0 means noise sits below the estimated mask.
+    Absolute calibration is approximate — compare encoders/settings on the
+    same reference, don't read the numbers as absolute audibility.
+    """
+    d = align(ref, test)
+    t = test[d:] if d >= 0 else test
+    n = min(len(ref), len(t))
+    trim = int(0.5*sr)
+    a = ref[:n][trim:n-trim]
+    b = t[:n][trim:n-trim]
+    err = a - b
+    f, _, A = sig.stft(a, sr, nperseg=2048)
+    _, _, E = sig.stft(err, sr, nperseg=2048)
+    PA = np.abs(A)**2
+    PE = np.abs(E)**2
+    z = bark(f)
+    nb = int(np.floor(z.max())) + 1
+    W = np.zeros((nb, len(f)))
+    for i, zi in enumerate(z):
+        W[int(zi), i] = 1.0
+    EA = W @ PA          # [bands, frames] reference energy
+    EN = W @ PE          # [bands, frames] noise energy
+    # Schroeder spreading across Bark bands (dz = maskee - masker)
+    dz = np.arange(nb)[:, None] - np.arange(nb)[None, :]
+    s_db = 15.81 + 7.5*(dz + 0.474) - 17.5*np.sqrt(1 + (dz + 0.474)**2)
+    S = 10**(s_db/10.0)
+    mask = (S @ EA) * 10**(-14/10.0)
+    # ATH-shaped floor, calibrated relative to the loudest band-frame
+    fc = np.array([max(f[W[bi] > 0].mean(), 20.0) for bi in range(nb)])
+    khz = fc/1000.0
+    ath_db = 3.64*khz**-0.8 - 6.5*np.exp(-0.6*(khz - 3.3)**2) + 1e-3*khz**4
+    floor = EA.max() * 10**((ath_db - ath_db.min() - 96.0)/10.0)
+    mask = np.maximum(mask, floor[:, None])
+    # Skip near-silent frames (leader/trailer): total ref energy < -60 dB rel max
+    frame_e = EA.sum(axis=0)
+    keep = frame_e > frame_e.max()*1e-6
+    ratio = (EN[:, keep] / mask[:, keep]).ravel()
+    mean_nmr = 10*np.log10(np.mean(ratio) + 1e-12)
+    p95_nmr = 10*np.log10(np.percentile(ratio, 95) + 1e-12)
+    audible = 100.0*np.mean(ratio > 1.0)
+    return mean_nmr, p95_nmr, audible
+
+
 def main():
     if len(sys.argv) < 3:
         print(__doc__)
@@ -155,6 +209,12 @@ def main():
     for name, x in items[1:]:
         _, _, _, _, nsh = fidelity(ref, x, sr)
         print("%-22s %6.1f %6.1f %6.1f %6.1f %6.1f" % (name, *nsh))
+
+    print("\n=== NMR (Bark-band noise-to-mask; lower better, <=0 ~ masked) ===")
+    print("%-22s %9s %9s %10s" % ("file", "mean dB", "p95 dB", "NMR>0 %"))
+    for name, x in items[1:]:
+        m, p, aud = nmr_metrics(ref, x, sr)
+        print("%-22s %9.2f %9.2f %10.1f" % (name, m, p, aud))
 
 
 if __name__ == "__main__":
