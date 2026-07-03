@@ -7,6 +7,64 @@
 
 namespace glint {
 
+namespace {
+
+// Per-table pair-cost LUT: cost[t][(ax<<4)|ay] holds exactly what
+// tables::huff_code_length(t, ax, ay) returns for |x|,|y| <= 15 — code length
+// + sign bits, + linbits for ESC tables at the ax/ay == 15 boundary (invalid
+// entries hold the same 100 penalty). huff_code_length re-fetches the
+// HuffTable descriptor through a 34-way switch and re-derives sign/ESC
+// handling per pair; this collapses the per-pair cost in the bit-counting hot
+// loop to one byte load. Only pair tables 0-31 are represented (32/33 are the
+// quad count1 tables, handled by kCount1Cost below).
+struct PairCostLUT {
+    uint8_t cost[32][256];
+    PairCostLUT() {
+        for (int t = 0; t < 32; t++)
+            for (int ax = 0; ax < 16; ax++)
+                for (int ay = 0; ay < 16; ay++)
+                    cost[t][(ax << 4) | ay] =
+                        static_cast<uint8_t>(tables::huff_code_length(t, ax, ay));
+    }
+};
+const PairCostLUT kPairCost;
+
+// ESC tables clamp values >= 15 into the boundary entry (which already
+// includes linbits), so the LUT stays exact; non-ESC tables return the same
+// 100 penalty huff_code_length produces for out-of-range values.
+inline int pair_cost(const uint8_t* lut, bool esc, int x, int y) {
+    unsigned ax = static_cast<unsigned>(x < 0 ? -x : x);
+    unsigned ay = static_cast<unsigned>(y < 0 ? -y : y);
+    if ((ax | ay) > 15u) {
+        if (!esc) return 100;
+        if (ax > 15u) ax = 15u;
+        if (ay > 15u) ay = 15u;
+    }
+    return lut[(ax << 4) | ay];
+}
+
+// count1 quad cost: code length + one sign bit per nonzero value, indexed by
+// the 4-bit nonzero mask. Same values tables::count1_code_length computes.
+struct Count1CostLUT {
+    uint8_t cost[2][16];
+    Count1CostLUT() {
+        for (int idx = 0; idx < 16; idx++) {
+            cost[0][idx] = static_cast<uint8_t>(tables::count1_code_length(
+                32, (idx >> 3) & 1, (idx >> 2) & 1, (idx >> 1) & 1, idx & 1));
+            cost[1][idx] = static_cast<uint8_t>(tables::count1_code_length(
+                33, (idx >> 3) & 1, (idx >> 2) & 1, (idx >> 1) & 1, idx & 1));
+        }
+    }
+};
+const Count1CostLUT kCount1Cost;
+
+inline int count1_mask(const int16_t* q) {
+    return ((q[0] != 0) << 3) | ((q[1] != 0) << 2) |
+           ((q[2] != 0) << 1) | (q[3] != 0);
+}
+
+} // namespace
+
 // Find the best Huffman table for a region via max-value-indexed lookup.
 int select_best_table(const int16_t* ix, int start, int end) {
     if (start >= end) return 0;
@@ -106,8 +164,9 @@ HuffRegions huffman_determine_regions_from_bounds(const int16_t* ix, int sr_inde
     // Choose count1 table (A=32 vs B=33): try both, pick smaller
     int bits_a = 0, bits_b = 0;
     for (int i = count1_start; i + 3 < rzero; i += 4) {
-        bits_a += tables::count1_code_length(32, ix[i], ix[i+1], ix[i+2], ix[i+3]);
-        bits_b += tables::count1_code_length(33, ix[i], ix[i+1], ix[i+2], ix[i+3]);
+        int m = count1_mask(ix + i);
+        bits_a += kCount1Cost.cost[0][m];
+        bits_b += kCount1Cost.cost[1][m];
     }
     r.count1table = (bits_b < bits_a) ? 1 : 0;
 
@@ -159,8 +218,9 @@ HuffRegions huffman_determine_regions_short_from_bounds(const int16_t* ix,
     // Choose count1 table
     int bits_a = 0, bits_b = 0;
     for (int i = count1_start; i + 3 < rzero; i += 4) {
-        bits_a += tables::count1_code_length(32, ix[i], ix[i+1], ix[i+2], ix[i+3]);
-        bits_b += tables::count1_code_length(33, ix[i], ix[i+1], ix[i+2], ix[i+3]);
+        int m = count1_mask(ix + i);
+        bits_a += kCount1Cost.cost[0][m];
+        bits_b += kCount1Cost.cost[1][m];
     }
     r.count1table = (bits_b < bits_a) ? 1 : 0;
 
@@ -189,32 +249,27 @@ int huffman_count_bits_limited(const int16_t* ix, const HuffRegions& regions,
         int region1_end = sfb[regions.region0_count + 1 + regions.region1_count + 1];
         if (region1_end > big_values_end) region1_end = big_values_end;
 
-        // Region 0
-        for (int i = 0; i < region0_end; i += 2) {
-            int y = (i + 1 < region0_end) ? ix[i + 1] : 0;
-            total += tables::huff_code_length(regions.table_select[0], ix[i], y);
-            if (use_limit && total > bit_limit) return total;
-        }
-        // Region 1
-        for (int i = region0_end; i < region1_end; i += 2) {
-            int y = (i + 1 < region1_end) ? ix[i + 1] : 0;
-            total += tables::huff_code_length(regions.table_select[1], ix[i], y);
-            if (use_limit && total > bit_limit) return total;
-        }
-        // Region 2
-        for (int i = region1_end; i < big_values_end; i += 2) {
-            int y = (i + 1 < big_values_end) ? ix[i + 1] : 0;
-            total += tables::huff_code_length(regions.table_select[2], ix[i], y);
-            if (use_limit && total > bit_limit) return total;
+        const int region_start[3] = { 0, region0_end, region1_end };
+        const int region_end[3] = { region0_end, region1_end, big_values_end };
+        for (int r = 0; r < 3; r++) {
+            int end = region_end[r];
+            int t = regions.table_select[r];
+            const uint8_t* lut = kPairCost.cost[t];
+            const bool esc = t >= 16;
+            for (int i = region_start[r]; i < end; i += 2) {
+                int y = (i + 1 < end) ? ix[i + 1] : 0;
+                total += pair_cost(lut, esc, ix[i], y);
+                if (use_limit && total > bit_limit) return total;
+            }
         }
     }
 
     // Count1 region
     int count1_start = big_values_end;
     int count1_end = count1_start + regions.count1 * 4;
-    int ct = regions.count1table ? 33 : 32;
+    const uint8_t* c1 = kCount1Cost.cost[regions.count1table ? 1 : 0];
     for (int i = count1_start; i + 3 < count1_end && i + 3 < 576; i += 4) {
-        total += tables::count1_code_length(ct, ix[i], ix[i+1], ix[i+2], ix[i+3]);
+        total += c1[count1_mask(ix + i)];
         if (use_limit && total > bit_limit) return total;
     }
 
