@@ -605,11 +605,13 @@ static GranuleInfo nmr_outer_loop(const GranuleInfo& start, double factor,
 // the search entirely: f=1.0 wins almost always, and the tier's contract is
 // throughput.
 GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
-                              int sr_index, int quality_mode, bool short_block) {
+                              int sr_index, int quality_mode, bool short_block,
+                              int gain_floor) {
     init_quant_tables();
 
     if (quality_mode <= 0) {
-        return quantize_base(mdct_in, available_bits, sr_index, short_block);
+        return quantize_base(mdct_in, available_bits, sr_index, short_block,
+                             gain_floor);
     }
 
     static const double kNormal[] = { 1.0, 1.04, 1.09, 1.15, 1.22, 1.30 };
@@ -634,7 +636,8 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
         double f = factors[fi];
         double scaled[576];
         for (int i = 0; i < 576; i++) scaled[i] = mdct_in[i] * f;
-        results[fi] = quantize_base(scaled, available_bits, sr_index, short_block);
+        results[fi] = quantize_base(scaled, available_bits, sr_index,
+                                    short_block, gain_floor);
         mses[fi] = granule_mse(results[fi], mdct_in, sr_index);
     });
 
@@ -665,7 +668,8 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
         quant_parallel_for(nc, [&](int k) {
             double scaled[576];
             for (int i = 0; i < 576; i++) scaled[i] = mdct_in[i] * cand[k];
-            rres[k] = quantize_base(scaled, available_bits, sr_index, short_block);
+            rres[k] = quantize_base(scaled, available_bits, sr_index,
+                                    short_block, gain_floor);
             rmse[k] = granule_mse(rres[k], mdct_in, sr_index);
         });
         for (int k = 0; k < nc; k++) {

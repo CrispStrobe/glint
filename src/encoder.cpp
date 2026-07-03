@@ -156,6 +156,8 @@ glint_t glint_create(const glint_config* cfg) {
     // Reservoir capacity = what the main_data_begin field can express:
     // 9 bits (511 bytes) for MPEG-1, 8 bits (255) for MPEG-2/2.5.
     ctx->reservoir.init(ctx->mpeg_version == 1 ? 511 : 255);
+    ctx->rc_anchor = 0;
+    ctx->rc_gain_ema_x16 = 0;
 
     // Determine signal path
 #ifdef GLINT_BOTH_PATHS
@@ -507,14 +509,33 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
     int this_frame_size = enc->frame_size + (enc->vbr_mode ? 0 : enc->padding);
     int this_frame_bits = this_frame_size * 8 - 32 - enc->side_info_bits;
 
-    // Bit reservoir: the mechanism (continuous main-data stream + deferred
-    // frame emission, see reservoir.hpp) is active for CBR. The allocation
-    // policy is conservative for now: each frame targets its own slot, and
-    // the reservoir absorbs natural under-use (easy frames whose finest
-    // useful gain needs fewer bits than the slot). Borrowing beyond the slot
-    // requires a demand-driven policy — a naive "spend the whole reservoir"
-    // was measured to regress badly (see PLAN.md item 5).
+    // Bit reservoir rate control (CBR): a frame may spend its own slot plus
+    // the reservoir (capped at one extra slot), but a per-frame gain FLOOR —
+    // the constant-quality anchor — stops the quantizer from spending finer
+    // than the current quality target, so easy frames bank bits instead of
+    // gold-plating. The anchor adapts +-1 gain step per frame from reservoir
+    // fill (>60% full: aim finer / spend; <40%: aim coarser / save) and is
+    // tethered to the EMA of achieved gains so it tracks the content's
+    // operating point. This replaces the measured-bad naive policy ("every
+    // frame may spend the whole reservoir", which oscillated); see PLAN.md
+    // item 5.
     int available_bits = this_frame_bits;
+    int gain_floor = 0;
+    if (!enc->vbr_mode) {
+        int mdb_bits = 8 * enc->reservoir.main_data_begin();
+        available_bits += std::min(mdb_bits, this_frame_bits);
+        if (enc->rc_anchor > 0) {
+            int resv_cap_bits = 8 * (enc->mpeg_version == 1 ? 511 : 255);
+            if (mdb_bits * 10 > resv_cap_bits * 6) enc->rc_anchor--;
+            else if (mdb_bits * 10 < resv_cap_bits * 4) enc->rc_anchor++;
+            int ema = enc->rc_gain_ema_x16 / 16;
+            if (enc->rc_anchor < ema - 12) enc->rc_anchor = ema - 12;
+            if (enc->rc_anchor > ema + 12) enc->rc_anchor = ema + 12;
+            if (enc->rc_anchor < 1) enc->rc_anchor = 1;
+            if (enc->rc_anchor > 255) enc->rc_anchor = 255;
+            gain_floor = enc->rc_anchor;
+        }
+    }
 
     int num_gr = enc->num_granules;
     int bits_per_granule = available_bits / (num_gr * nch);
@@ -638,7 +659,8 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                     } else {
                         granule_info[gr][ch] = quantize_granule(mdct_flat, gr_bits,
                                                                  enc->sr_index, enc->quality_mode,
-                                                                 /*short_block=*/true);
+                                                                 /*short_block=*/true,
+                                                                 gain_floor);
                     }
                     granule_info[gr][ch].block_type = 2;
                 } else {
@@ -655,7 +677,9 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                             enc->sr_index, enc->quality_mode, enc->vbr_quality);
                     } else {
                         granule_info[gr][ch] = quantize_granule(mdct_flat, gr_bits,
-                                                                 enc->sr_index, enc->quality_mode);
+                                                                 enc->sr_index, enc->quality_mode,
+                                                                 /*short_block=*/false,
+                                                                 gain_floor);
                     }
                     granule_info[gr][ch].block_type = 0;
                 }
@@ -750,7 +774,9 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                         enc->sr_index, enc->quality_mode, enc->vbr_quality);
                 } else {
                     granule_info[gr][ch] = quantize_granule(mdct_flat, gr_bits,
-                                                             enc->sr_index, enc->quality_mode);
+                                                             enc->sr_index, enc->quality_mode,
+                                                             /*short_block=*/false,
+                                                             gain_floor);
                 }
                 total_main_bits += granule_info[gr][ch].part2_3_length;
             }
@@ -769,6 +795,23 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
 #else
     encode_double();
 #endif
+
+    // Rate controller: track the achieved operating point (mean global_gain)
+    // so the constant-quality anchor stays tethered to the content.
+    if (!enc->vbr_mode) {
+        int gsum = 0, gn = 0;
+        for (int gr = 0; gr < num_gr; gr++)
+            for (int ch = 0; ch < nch; ch++) {
+                gsum += granule_info[gr][ch].global_gain;
+                gn++;
+            }
+        int gmean = (gn > 0) ? gsum / gn : 0;
+        if (gmean > 0) {
+            if (enc->rc_gain_ema_x16 == 0) enc->rc_gain_ema_x16 = gmean * 16;
+            else enc->rc_gain_ema_x16 += (gmean * 16 - enc->rc_gain_ema_x16) / 8;
+            if (enc->rc_anchor == 0) enc->rc_anchor = gmean;
+        }
+    }
 
     return finish_frame(enc, granule_info, num_gr, nch, mode_ext,
                         this_frame_size, total_main_bits, out_size);
@@ -826,14 +869,33 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
     int this_frame_size = enc->frame_size + (enc->vbr_mode ? 0 : enc->padding);
     int this_frame_bits = this_frame_size * 8 - 32 - enc->side_info_bits;
 
-    // Bit reservoir: the mechanism (continuous main-data stream + deferred
-    // frame emission, see reservoir.hpp) is active for CBR. The allocation
-    // policy is conservative for now: each frame targets its own slot, and
-    // the reservoir absorbs natural under-use (easy frames whose finest
-    // useful gain needs fewer bits than the slot). Borrowing beyond the slot
-    // requires a demand-driven policy — a naive "spend the whole reservoir"
-    // was measured to regress badly (see PLAN.md item 5).
+    // Bit reservoir rate control (CBR): a frame may spend its own slot plus
+    // the reservoir (capped at one extra slot), but a per-frame gain FLOOR —
+    // the constant-quality anchor — stops the quantizer from spending finer
+    // than the current quality target, so easy frames bank bits instead of
+    // gold-plating. The anchor adapts +-1 gain step per frame from reservoir
+    // fill (>60% full: aim finer / spend; <40%: aim coarser / save) and is
+    // tethered to the EMA of achieved gains so it tracks the content's
+    // operating point. This replaces the measured-bad naive policy ("every
+    // frame may spend the whole reservoir", which oscillated); see PLAN.md
+    // item 5.
     int available_bits = this_frame_bits;
+    int gain_floor = 0;
+    if (!enc->vbr_mode) {
+        int mdb_bits = 8 * enc->reservoir.main_data_begin();
+        available_bits += std::min(mdb_bits, this_frame_bits);
+        if (enc->rc_anchor > 0) {
+            int resv_cap_bits = 8 * (enc->mpeg_version == 1 ? 511 : 255);
+            if (mdb_bits * 10 > resv_cap_bits * 6) enc->rc_anchor--;
+            else if (mdb_bits * 10 < resv_cap_bits * 4) enc->rc_anchor++;
+            int ema = enc->rc_gain_ema_x16 / 16;
+            if (enc->rc_anchor < ema - 12) enc->rc_anchor = ema - 12;
+            if (enc->rc_anchor > ema + 12) enc->rc_anchor = ema + 12;
+            if (enc->rc_anchor < 1) enc->rc_anchor = 1;
+            if (enc->rc_anchor > 255) enc->rc_anchor = 255;
+            gain_floor = enc->rc_anchor;
+        }
+    }
 
     int num_gr = enc->num_granules;
     int bits_per_granule = available_bits / (num_gr * nch);
@@ -913,7 +975,8 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
                 } else {
                     granule_info[gr][ch] = quantize_granule(mdct_flat, gr_bits,
                                                              enc->sr_index, enc->quality_mode,
-                                                             /*short_block=*/true);
+                                                             /*short_block=*/true,
+                                                             gain_floor);
                 }
                 granule_info[gr][ch].block_type = 2;
             } else {
@@ -928,7 +991,9 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
                         enc->sr_index, enc->quality_mode, enc->vbr_quality);
                 } else {
                     granule_info[gr][ch] = quantize_granule(mdct_flat, gr_bits,
-                                                             enc->sr_index, enc->quality_mode);
+                                                             enc->sr_index, enc->quality_mode,
+                                                             /*short_block=*/false,
+                                                             gain_floor);
                 }
                 granule_info[gr][ch].block_type = 0;
             }
@@ -940,6 +1005,23 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
     enc->prev_energy_valid = true;
 
     // --- Frame assembly (identical to glint_encode) ---
+
+    // Rate controller: track the achieved operating point (mean global_gain)
+    // so the constant-quality anchor stays tethered to the content.
+    if (!enc->vbr_mode) {
+        int gsum = 0, gn = 0;
+        for (int gr = 0; gr < num_gr; gr++)
+            for (int ch = 0; ch < nch; ch++) {
+                gsum += granule_info[gr][ch].global_gain;
+                gn++;
+            }
+        int gmean = (gn > 0) ? gsum / gn : 0;
+        if (gmean > 0) {
+            if (enc->rc_gain_ema_x16 == 0) enc->rc_gain_ema_x16 = gmean * 16;
+            else enc->rc_gain_ema_x16 += (gmean * 16 - enc->rc_gain_ema_x16) / 8;
+            if (enc->rc_anchor == 0) enc->rc_anchor = gmean;
+        }
+    }
 
     return finish_frame(enc, granule_info, num_gr, nch, mode_ext,
                         this_frame_size, total_main_bits, out_size);

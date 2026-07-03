@@ -45,6 +45,13 @@ struct glint_context {
     // Bit reservoir: continuous main-data stream with deferred frame emission.
     glint::ReservoirStream reservoir;
 
+    // CBR rate controller: constant-quality gain anchor, adapted +-1 per
+    // frame from reservoir fill (rc_anchor == 0 means warmup, floor off),
+    // plus an EMA (x16 fixed point) of the achieved mean global_gain that
+    // bounds the anchor's drift.
+    int rc_anchor;
+    int rc_gain_ema_x16;
+
     glint::FrameAssembler frame_asm;
     // Sized to hold several frames: with the reservoir, one encode call can
     // release more than one buffered frame (and flush() drains the tail).

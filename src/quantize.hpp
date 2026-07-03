@@ -27,9 +27,12 @@ struct GranuleInfo {
 // index order, so the result is byte-identical for any thread count.
 void quantize_set_threads(int n);
 
+// gain_floor > 0 keeps the gain search from quantizing finer than that gain
+// (the CBR rate controller's constant-quality anchor; savings bank in the
+// bit reservoir).
 GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
                               int sr_index, int quality_mode = 0,
-                              bool short_block = false);
+                              bool short_block = false, int gain_floor = 0);
 
 // VBR quantization: starts from a fixed target gain (vbr_quality 0=best to
 // 9=worst) for variable quality, but never exceeds available_bits per
