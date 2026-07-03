@@ -413,12 +413,14 @@ static double granule_mse(const GranuleInfo& gi, const double* mdct_in,
 
 // Base quantizer: gain search to the bit budget + energy-based scalefactors.
 // Operates on already-scaled input; the public quantize_granule wraps this in
-// the per-granule scale search.
+// the per-granule scale search. gain_floor > 0 keeps the search from going
+// finer than that gain (VBR constant-quality target).
 static GranuleInfo quantize_base(const double* mdct_in, int available_bits,
-                                 int sr_index, bool short_block);
+                                 int sr_index, bool short_block,
+                                 int gain_floor = 0);
 static void gain_search_with_scalefacs(GranuleInfo& info, const double* mdct_in,
                                        int available_bits, int sr_index,
-                                       bool short_block);
+                                       bool short_block, int gain_floor = 0);
 static bool encode_scalefac_fields(GranuleInfo& info, int sr_index);
 
 // Per-band decoder-reconstruction noise vs the original MDCT (same
@@ -718,7 +720,7 @@ static bool encode_scalefac_fields(GranuleInfo& info, int sr_index) {
 // budget-guarantee loop. Sets ix/global_gain/regions/part2_3_length.
 static void gain_search_with_scalefacs(GranuleInfo& info, const double* mdct_in,
                                        int available_bits, int sr_index,
-                                       bool short_block) {
+                                       bool short_block, int gain_floor) {
     int target_bits = available_bits - info.part2_length;
     if (target_bits < 0) target_bits = 0;
 
@@ -758,6 +760,9 @@ static void gain_search_with_scalefacs(GranuleInfo& info, const double* mdct_in,
         int est = static_cast<int>(g_max) + 2;
         if (est < max_gain && est > min_gain) max_gain = est;
     }
+    // VBR constant-quality floor: never quantize finer than the target gain.
+    if (gain_floor > min_gain) min_gain = gain_floor;
+    if (max_gain < min_gain) max_gain = min_gain;
 
     // When a search iteration accepts a gain (bits <= target_bits), its bit
     // count ran to completion (the early exit only fires when over the limit),
@@ -820,7 +825,8 @@ static void gain_search_with_scalefacs(GranuleInfo& info, const double* mdct_in,
 }
 
 static GranuleInfo quantize_base(const double* mdct_in, int available_bits,
-                                 int sr_index, bool short_block) {
+                                 int sr_index, bool short_block,
+                                 int gain_floor) {
     GranuleInfo info{};
     std::memset(&info, 0, sizeof(info));
     init_quant_tables();
@@ -865,162 +871,34 @@ static GranuleInfo quantize_base(const double* mdct_in, int available_bits,
     }
 
     gain_search_with_scalefacs(info, mdct_in, available_bits, sr_index,
-                               short_block);
+                               short_block, gain_floor);
     return info;
 }
 
-// VBR quality 0-9 maps to target global_gain values:
-// 0 (best): gain ~150 (fine quantization, many bits)
-// 5 (medium): gain ~186
-// 9 (worst): gain ~230 (coarse quantization, few bits)
+// VBR quality 0-9 maps to target global_gain values (recalibrated after the
+// pow34-curve fix: each gain step is ~1.1 dB of quantization noise; the old
+// table's 194-230 range dead-zoned entire granules to silence).
+// 0 (best): gain ~134 (fine quantization, many bits)
+// 9 (worst): gain ~178 (coarse quantization, few bits)
 static const int vbr_target_gain[10] = {
-    150, 155, 162, 170, 178, 186, 194, 204, 216, 230
+    134, 140, 144, 148, 152, 156, 161, 166, 172, 178
 };
 
 GranuleInfo quantize_granule_vbr(const double* mdct_in, int available_bits,
-                                  int sr_index, int quality_mode, int vbr_quality,
-                                  bool short_block) {
-    if (quality_mode >= 2) {
-        double masking_threshold[576];
-        s_psycho.compute_masking(mdct_in, masking_threshold, sr_index);
-
-        double mdct_masked[576];
-        for (int i = 0; i < 576; i++) {
-            if (mdct_in[i] * mdct_in[i] < masking_threshold[i])
-                mdct_masked[i] = 0.0;
-            else
-                mdct_masked[i] = mdct_in[i];
-        }
-
-        return quantize_granule_vbr(mdct_masked, available_bits, sr_index, 1,
-                                    vbr_quality, short_block);
-    }
-
-    GranuleInfo info{};
-    std::memset(&info, 0, sizeof(info));
+                                  int sr_index, int /*quality_mode*/,
+                                  int vbr_quality, bool short_block) {
+    // Same path as CBR (energy-based scalefactors + gain search under the
+    // frame budget), with the search floored at the constant-quality target
+    // gain: "the finest gain >= target that fits". The old VBR-only
+    // preprocessing is gone: the psycho-model coefficient zeroing used the
+    // shallow-slope masks that are unusable as an allocation target (see
+    // compute_band_masks), and the headroom scalefactor assignment measured
+    // as a no-op pre-fix and a regression post-fix.
     init_quant_tables();
-
     if (vbr_quality < 0) vbr_quality = 0;
     if (vbr_quality > 9) vbr_quality = 9;
-
-    int target_gain = vbr_target_gain[vbr_quality];
-
-    // Energy-based scalefactor adjustment
-    {
-        const int* sfb = tables::get_sfb_long_by_unified(sr_index);
-        double band_energy[21], max_energy = 0.0;
-        for (int band = 0; band < 21; band++) {
-            double e = 0.0;
-            for (int i = sfb[band]; i < sfb[band+1] && i < 576; i++)
-                e += mdct_in[i] * mdct_in[i];
-            band_energy[band] = e;
-            if (e > max_energy) max_energy = e;
-        }
-
-        int active_bands = 0;
-        if (max_energy > 0.0) {
-            for (int band = 0; band < 21; band++)
-                if (band_energy[band] / max_energy > 0.01) active_bands++;
-        }
-
-        // Helper lambda to recompute scalefac encoding for VBR
-        auto recompute_scalefac_encoding_vbr = [&]() {
-            bool is_mpeg2 = (sr_index >= 3);
-            if (is_mpeg2) {
-                int max_sf[4] = {};
-                for (int b = 0; b < 6; b++) max_sf[0] = std::max(max_sf[0], info.scalefac[b]);
-                for (int b = 6; b < 11; b++) max_sf[1] = std::max(max_sf[1], info.scalefac[b]);
-                for (int b = 11; b < 16; b++) max_sf[2] = std::max(max_sf[2], info.scalefac[b]);
-                for (int b = 16; b < 21; b++) max_sf[3] = std::max(max_sf[3], info.scalefac[b]);
-                int sl[4];
-                for (int g = 0; g < 4; g++) {
-                    sl[g] = 0;
-                    while ((1 << sl[g]) <= max_sf[g]) sl[g]++;
-                    if (sl[g] > 4) sl[g] = 4;
-                }
-                info.scalefac_compress = encode_scalefac_compress_m2(
-                    sl[0], sl[1], sl[2], sl[3]);
-                info.part2_length = sl[0]*6 + sl[1]*5 + sl[2]*5 + sl[3]*5;
-            } else {
-                int max_sf1 = 0, max_sf2 = 0;
-                for (int b = 0; b < 11; b++) max_sf1 = std::max(max_sf1, info.scalefac[b]);
-                for (int b = 11; b < 21; b++) max_sf2 = std::max(max_sf2, info.scalefac[b]);
-                int sl1 = 0; while ((1 << sl1) <= max_sf1) sl1++;
-                int sl2 = 0; while ((1 << sl2) <= max_sf2) sl2++;
-                if (sl1 > 4) sl1 = 4;
-                if (sl2 > 3) sl2 = 3;
-                info.scalefac_compress = encode_scalefac_compress(sl1, sl2);
-                info.part2_length = sl1 * 11 + sl2 * 10;
-            }
-        };
-
-        if (quality_mode >= 1 && max_energy > 0.0 && active_bands >= 3) {
-            // Headroom-based scalefactor assignment (Vorbis/Opus/FLAC insight)
-            bool any = compute_headroom_scalefactors(info.scalefac, band_energy,
-                                                      active_bands);
-            if (any) {
-                recompute_scalefac_encoding_vbr();
-            }
-        } else if (max_energy > 0.0 && active_bands >= 3) {
-            bool any = false;
-            for (int band = 0; band < 21; band++) {
-                double ratio = band_energy[band] / max_energy;
-                if (ratio > 0.01) {
-                    int sf = static_cast<int>(ratio * 4.0 + 0.5);
-                    if (sf > 7) sf = 7;
-                    if (sf > 0) { info.scalefac[band] = sf; any = true; }
-                }
-            }
-            if (any) {
-                recompute_scalefac_encoding_vbr();
-            }
-        }
-    }
-
-    // Final quantize and cache regions (using the correct long/short layout)
-    QuantCache final_cache;
-    fill_quant_cache(final_cache, mdct_in, info.scalefac, info.scalefac_scale,
-                     info.preflag, sr_index);
-
-    // Clipping protection from the cache's actual quantizer input (includes
-    // the scalefactor boost — see gain_search_with_scalefacs).
-    double peak34 = 0.0;
-    for (int i = 0; i < 576; i++)
-        if (final_cache.pow34_sf[i] > peak34) peak34 = final_cache.pow34_sf[i];
-    int min_gain = 0;
-    if (peak34 > 0.0) {
-        double g_min = 210.0 - (16.0 / 3.0) * std::log2(8190.0 / peak34);
-        min_gain = static_cast<int>(std::ceil(g_min));
-        if (min_gain < 0) min_gain = 0;
-    }
-
-    // Use the target gain, but never go below min_gain (clipping protection)
-    int gain = std::max(target_gain, min_gain);
-    info.global_gain = gain;
-
-    int huff_bits = quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
-                                       info.scalefac_scale, info.preflag,
-                                       sr_index, &info.regions, &final_cache,
-                                       short_block);
-    info.part2_3_length = info.part2_length + huff_bits;
-
-    // Budget guarantee: with the reservoir disabled, each granule must fit its
-    // share of the frame, and part2_3_length must also fit the 12-bit side-info
-    // field (max 4095). A fine target gain on a loud granule can exceed either,
-    // so coarsen global_gain until it fits. available_bits <= 0 means "no frame
-    // budget given" — fall back to just the field limit.
-    int limit = (available_bits > 0) ? available_bits : 4095;
-    if (limit > 4095) limit = 4095;
-    while (info.part2_3_length > limit && gain < 255) {
-        gain++;
-        info.global_gain = gain;
-        huff_bits = quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
-                                       info.scalefac_scale, info.preflag,
-                                       sr_index, &info.regions, &final_cache,
-                                       short_block);
-        info.part2_3_length = info.part2_length + huff_bits;
-    }
-    return info;
+    return quantize_base(mdct_in, available_bits, sr_index, short_block,
+                         vbr_target_gain[vbr_quality]);
 }
 
 } // namespace glint

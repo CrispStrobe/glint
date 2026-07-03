@@ -87,10 +87,14 @@ void glint_set_threads(int num_threads) {
 glint_t glint_create(const glint_config* cfg) {
     if (!cfg) return nullptr;
 
-    // For VBR, use 320 kbps frame size (max bitrate) regardless of -b
+    // For VBR, quantize under the max-bitrate frame budget regardless of -b
+    // (each frame is then emitted at the smallest bitrate index that fits).
+    // MPEG-2/2.5 rates top out at 160 kbps — forcing 320 made glint_create
+    // reject VBR at low sample rates outright.
     int effective_bitrate = cfg->bitrate;
     if (cfg->vbr == GLINT_VBR_ON) {
-        effective_bitrate = 320;
+        effective_bitrate =
+            (tables::detect_mpeg_version(cfg->sample_rate) == 1) ? 320 : 160;
     }
 
     if (glint_check_config(cfg->sample_rate, effective_bitrate) != 0) return nullptr;
@@ -114,10 +118,13 @@ glint_t glint_create(const glint_config* cfg) {
         ctx->mpeg_version, tables::samplerate_to_index(cfg->sample_rate));
     ctx->num_granules = (ctx->mpeg_version == 1) ? 2 : 1;
 
+    // Use the effective bitrate (320 for VBR) — computing these from the
+    // caller's cfg->bitrate silently ran VBR on the caller's (default 128k)
+    // frame budget despite the documented 320k VBR frame size.
     if (ctx->mpeg_version == 1) {
-        ctx->br_index = tables::bitrate_to_index(cfg->bitrate);
+        ctx->br_index = tables::bitrate_to_index(effective_bitrate);
     } else {
-        ctx->br_index = tables::bitrate_to_index_m2(cfg->bitrate);
+        ctx->br_index = tables::bitrate_to_index_m2(effective_bitrate);
     }
 
     ctx->num_channels = cfg->num_channels;
@@ -134,7 +141,7 @@ glint_t glint_create(const glint_config* cfg) {
         ctx->side_info_bits = (cfg->num_channels == 1) ? 72 : 136;
     }
 
-    int bitrate_bps = cfg->bitrate * 1000;
+    int bitrate_bps = effective_bitrate * 1000;
     if (ctx->mpeg_version == 1) {
         ctx->frame_size = 144 * bitrate_bps / cfg->sample_rate;
     } else {
@@ -248,6 +255,33 @@ static constexpr int32_t kInvSqrt2_Q31 = 1518500250; // 0.7071067811865476 * 2^3
 // curve fixed it starves the quiet granule and costs ~1.9 dB SNR at -q best
 // on the speech reference (34.7 -> 32.8). Revisit with the bit reservoir.
 static constexpr bool kGranuleRedistribution = false;
+
+// VBR frame fit: smallest header bitrate index whose frame holds this
+// frame's actual data (header + side info + main data). VBR granules
+// quantize under the 320 kbps budget; each frame is then emitted at the
+// smallest size that fits instead of padding every frame to 320 kbps.
+// Returns the header index and sets *frame_size_out (padding bit stays 0).
+static int vbr_pick_frame_size(const glint_context* enc, int total_main_bits,
+                               int* frame_size_out) {
+    int needed = 4 + enc->side_info_bits / 8 + (total_main_bits + 7) / 8;
+    int slot_mult = (enc->mpeg_version == 1) ? 144 : 72;
+    for (int i = 0; i < tables::kNumBitrates; i++) {
+        int kbps = (enc->mpeg_version == 1) ? tables::kBitrates[i]
+                                            : tables::kBitrates_M2[i];
+        int size = slot_mult * kbps * 1000 / enc->config.sample_rate;
+        if (size >= needed) {
+            *frame_size_out = size;
+            return i + 1;
+        }
+    }
+    // Cannot happen (granule budgets cap main data at the max-bitrate frame),
+    // but fall back to the max bitrate.
+    *frame_size_out = slot_mult *
+        ((enc->mpeg_version == 1) ? tables::kBitrates[tables::kNumBitrates - 1]
+                                  : tables::kBitrates_M2[tables::kNumBitrates - 1]) *
+        1000 / enc->config.sample_rate;
+    return tables::kNumBitrates;
+}
 
 // Per-granule channel bit-split clamp (share of the granule's total that
 // channel 0 — mid, in M/S — may receive). Tuned on the speech reference:
@@ -588,8 +622,15 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
     // The header needs the 2-bit sample rate index (0-2), not the unified one
     int hdr_sr_index = (enc->sr_index < 3) ? enc->sr_index : (enc->sr_index - 3);
     enc->frame_asm.reset();
-    enc->frame_asm.write_header(enc->br_index, hdr_sr_index,
-                                 enc->padding, channel_mode, mode_ext,
+    int hdr_br_index = enc->br_index;
+    int hdr_padding = enc->padding;
+    if (enc->vbr_mode) {
+        hdr_br_index = vbr_pick_frame_size(enc, total_main_bits,
+                                           &this_frame_size);
+        hdr_padding = 0;
+    }
+    enc->frame_asm.write_header(hdr_br_index, hdr_sr_index,
+                                 hdr_padding, channel_mode, mode_ext,
                                  enc->mpeg_version);
 
     // Write side information
@@ -916,8 +957,15 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
     int channel_mode = mode_to_mpeg(enc->config.mode);
     int hdr_sr_index = (enc->sr_index < 3) ? enc->sr_index : (enc->sr_index - 3);
     enc->frame_asm.reset();
-    enc->frame_asm.write_header(enc->br_index, hdr_sr_index,
-                                 enc->padding, channel_mode, mode_ext,
+    int hdr_br_index = enc->br_index;
+    int hdr_padding = enc->padding;
+    if (enc->vbr_mode) {
+        hdr_br_index = vbr_pick_frame_size(enc, total_main_bits,
+                                           &this_frame_size);
+        hdr_padding = 0;
+    }
+    enc->frame_asm.write_header(hdr_br_index, hdr_sr_index,
+                                 hdr_padding, channel_mode, mode_ext,
                                  enc->mpeg_version);
 
     BitstreamWriter& si = enc->frame_asm.side_info();

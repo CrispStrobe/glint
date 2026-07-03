@@ -472,8 +472,11 @@ int main(int argc, char** argv) {
         mode = (wav.num_channels == 1) ? GLINT_MONO : GLINT_JOINT;
     }
 
-    // Validate config (VBR uses 320 kbps internally)
-    int check_bitrate = (vbr_quality >= 0) ? 320 : bitrate;
+    // Validate config (VBR uses the version's max bitrate internally:
+    // 320 kbps for MPEG-1 rates, 160 kbps for MPEG-2/2.5 rates)
+    int check_bitrate = (vbr_quality >= 0)
+        ? ((wav.sample_rate >= 32000) ? 320 : 160)
+        : bitrate;
     if (glint_check_config(wav.sample_rate, check_bitrate) != 0) {
         fprintf(stderr, "Error: invalid sample rate (%d) or bitrate (%d kbps)\n",
                 wav.sample_rate, check_bitrate);
