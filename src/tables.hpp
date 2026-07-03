@@ -263,24 +263,31 @@ inline const int* get_sfb_long_by_unified(int unified_sr_index) {
 // Short block scalefactor band boundaries
 static constexpr int kSfbShortCount = 14; // 13 boundaries (12 bands + endpoint)
 
+// ISO 11172-3 Table B.8 boundaries (must match every decoder's band tables
+// exactly — the short-block reorder is derived from them, so a wrong entry
+// scrambles the wire order). 44100's 12th boundary was 138 for a long time;
+// ISO/mpg123/ffmpeg/LAME all have 136.
 static constexpr int sfb_short_table[3][kSfbShortCount] = {
     // 44100 Hz
-    { 0, 4, 8, 12, 16, 22, 30, 40, 52, 66, 84, 106, 138, 192 },
+    { 0, 4, 8, 12, 16, 22, 30, 40, 52, 66, 84, 106, 136, 192 },
     // 48000 Hz
     { 0, 4, 8, 12, 16, 22, 28, 38, 50, 64, 80, 100, 126, 192 },
     // 32000 Hz
     { 0, 4, 8, 12, 16, 22, 30, 42, 58, 78, 104, 138, 180, 192 }
 };
 
-// Short block SFB for MPEG-2/2.5 (same as MPEG-1 for simplicity; actual
-// MPEG-2 short SFB tables are identical at common rates)
+// Short block SFB for MPEG-2 LSF, ISO 13818-3 Table B.2. These differ from
+// the MPEG-1 tables from band 3 up — the old "same as MPEG-1 for
+// simplicity" copy scrambled the reorder against every real decoder and
+// was the actual cause of the historical LSF short-block collapse
+// (20.8 -> 8.6 dB), not the scalefac_compress semantics.
 static constexpr int sfb_short_table_m2[3][kSfbShortCount] = {
     // 22050 Hz
-    { 0, 4, 8, 12, 16, 22, 30, 40, 52, 66, 84, 106, 138, 192 },
+    { 0, 4, 8, 12, 18, 24, 32, 42, 56, 74, 100, 132, 174, 192 },
     // 24000 Hz
-    { 0, 4, 8, 12, 16, 22, 28, 38, 50, 64, 80, 100, 126, 192 },
+    { 0, 4, 8, 12, 18, 26, 36, 48, 62, 80, 104, 136, 180, 192 },
     // 16000 Hz
-    { 0, 4, 8, 12, 16, 22, 30, 42, 58, 78, 104, 138, 180, 192 },
+    { 0, 4, 8, 12, 18, 26, 36, 48, 62, 80, 104, 134, 174, 192 },
 };
 
 inline const int* get_sfb_short_by_unified(int unified_sr_index) {

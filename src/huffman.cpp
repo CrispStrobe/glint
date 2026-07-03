@@ -347,7 +347,8 @@ HuffRegions huffman_determine_regions(const int16_t* ix, int sr_index) {
 HuffRegions huffman_determine_regions_short_from_bounds(const int16_t* ix,
                                                         int sr_index,
                                                         int rzero,
-                                                        int count1_start) {
+                                                        int count1_start,
+                                                        int block_type) {
     HuffRegions r{};
 
     r.big_values = count1_start / 2;
@@ -355,16 +356,19 @@ HuffRegions huffman_determine_regions_short_from_bounds(const int16_t* ix,
     if (r.count1 < 0) r.count1 = 0;
     r.rzero = rzero;
 
-    // For short blocks with window_switching_flag=1, the decoder computes
-    // region boundaries as: region0_end = 36, region1_end = big_values*2.
-    // We set region0_count so that sfb_long[region0_count+1] == 36, which
-    // makes huffman_count_bits/huffman_encode compute the right boundaries.
-    // For all MPEG-1 rates: sfb_long[8] = 36, so region0_count = 7.
-    // For MPEG-2 rates: sfb_long_m2[6] = 36, so region0_count = 5.
+    // With window_switching_flag=1 the decoder hardwires the region split:
+    // region0_end = 36 for SHORT granules (block_type 2) at every rate, but
+    // 54 for LSF START/STOP granules (block_type 1/3 at MPEG-2 rates) — see
+    // e.g. ffmpeg's init_short_region(). region1_end = big_values*2. We set
+    // region0_count so that sfb_long[region0_count+1] == boundary, which
+    // makes huffman_count_bits/huffman_encode compute the same boundaries.
+    // MPEG-1: sfb_long[8]=36 (r0c 7). MPEG-2: sfb_long_m2[6]=36 (r0c 5),
+    // sfb_long_m2[8]=54 (r0c 7).
+    const int boundary = (block_type != 2 && sr_index >= 3) ? 54 : 36;
     const int* sfb_long = tables::get_sfb_long_by_unified(sr_index);
     int r0c = 7;  // default for MPEG-1
     for (int b = 0; b < 21; b++) {
-        if (sfb_long[b + 1] >= 36) {
+        if (sfb_long[b + 1] >= boundary) {
             r0c = b;
             break;
         }
@@ -373,7 +377,7 @@ HuffRegions huffman_determine_regions_short_from_bounds(const int16_t* ix,
     r.region1_count = 0;
     r.window_switching = 1;
 
-    int region0_end = 36;
+    int region0_end = boundary;
     if (region0_end > count1_start) region0_end = count1_start;
 
     r.table_select[0] = select_best_table(ix, 0, region0_end);
@@ -392,11 +396,12 @@ HuffRegions huffman_determine_regions_short_from_bounds(const int16_t* ix,
     return r;
 }
 
-HuffRegions huffman_determine_regions_short(const int16_t* ix, int sr_index) {
+HuffRegions huffman_determine_regions_short(const int16_t* ix, int sr_index,
+                                            int block_type) {
     int rzero = 576;
     while (rzero > 0 && ix[rzero - 1] == 0) rzero--;
     return huffman_determine_regions_short_from_bounds(
-        ix, sr_index, rzero, find_count1_start(ix, rzero));
+        ix, sr_index, rzero, find_count1_start(ix, rzero), block_type);
 }
 
 int huffman_count_bits_limited(const int16_t* ix, const HuffRegions& regions,

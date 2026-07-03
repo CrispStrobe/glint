@@ -53,12 +53,15 @@ void huffman_encode(const int16_t* ix, const HuffRegions& regions,
 // Returns filled HuffRegions struct
 HuffRegions huffman_determine_regions(const int16_t* ix, int sr_index);
 
-// Determine regions for a short (block_type 2) granule. Short blocks use a
-// fixed region0_end of 36 and only two big-value sub-regions, so they need a
-// different region layout than long blocks. The gain search and the final
-// encode MUST use the same layout, otherwise the stored part2_3_length will
-// not match the bits actually written.
-HuffRegions huffman_determine_regions_short(const int16_t* ix, int sr_index);
+// Determine regions for a window-switching granule (block types 1/2/3).
+// These have no region counts in the side info; the decoder hardwires
+// region0_end (36 for short blocks; 36 MPEG-1 / 54 LSF for start/stop) and
+// only two big-value sub-regions, so they need a different region layout
+// than long blocks. The gain search and the final encode MUST use the same
+// layout, otherwise the stored part2_3_length will not match the bits
+// actually written. block_type distinguishes short (2) from start/stop.
+HuffRegions huffman_determine_regions_short(const int16_t* ix, int sr_index,
+                                            int block_type = 2);
 
 // Determine regions when the caller already knows the nonzero/count1
 // boundaries from quantization. count1_start is the first index of the count1
@@ -68,7 +71,8 @@ HuffRegions huffman_determine_regions_from_bounds(const int16_t* ix, int sr_inde
 HuffRegions huffman_determine_regions_short_from_bounds(const int16_t* ix,
                                                         int sr_index,
                                                         int rzero,
-                                                        int count1_start);
+                                                        int count1_start,
+                                                        int block_type = 2);
 
 // Select the best Huffman table for a region
 // Returns table_id that minimizes bit count

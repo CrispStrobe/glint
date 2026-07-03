@@ -509,11 +509,21 @@ static const uint8_t* finish_frame(glint_t enc, GranuleInfo granule_info[2][2],
                     slen[3] = 0;
                     nr[0] = 11; nr[1] = 10; nr[2] = 0; nr[3] = 0;
                 }
-                int b = 0;
-                for (int g = 0; g < 4; g++) {
-                    for (int i = 0; i < nr[g] && b < 21; i++, b++) {
-                        if (slen[g] > 0)
-                            md.write_bits(gi.scalefac[b], slen[g]);
+                if (gi.block_type == 2) {
+                    // LSF short (non-mixed): the slen groups cover 3 bands x
+                    // 3 windows = 9 values each, written in [band][window]
+                    // wire order (band group = band / 3).
+                    for (int b = 0; b < 12; b++)
+                        for (int w = 0; w < 3; w++)
+                            if (slen[b / 3] > 0)
+                                md.write_bits(gi.scalefac_s[b][w], slen[b / 3]);
+                } else {
+                    int b = 0;
+                    for (int g = 0; g < 4; g++) {
+                        for (int i = 0; i < nr[g] && b < 21; i++, b++) {
+                            if (slen[g] > 0)
+                                md.write_bits(gi.scalefac[b], slen[g]);
+                        }
                     }
                 }
             } else if (gi.block_type == 2) {
@@ -675,10 +685,11 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
         // Block-type scheduling from pre-M/S granule energies (M/S preserves
         // total energy, and both channels must share a window type anyway).
         int btypes[2] = { 0, 0 };
-        // MPEG-1 only: LSF (MPEG-2/2.5) short blocks use different
-        // scalefac_compress semantics that are not implemented yet — enabling
-        // them measured 20.8 -> 8.6 dB at 22.05 kHz.
-        if (kShortBlocksEnabled && enc->quality_mode >= 1 && enc->sr_index < 3) {
+        // LSF (MPEG-2/2.5) short blocks use the ISO 13818-3 four-slen
+        // scalefac_compress encoding over 3-band groups (see
+        // encode_scalefac_fields); the historical 20.8 -> 8.6 dB collapse
+        // came from emitting them with the MPEG-1 two-slen layout.
+        if (kShortBlocksEnabled && enc->quality_mode >= 1) {
             double gr_energy[3] = { 0.0, 0.0, 0.0 };
             for (int g = 0; g < num_gr; g++)
                 for (int ch = 0; ch < nch; ch++)
@@ -1071,10 +1082,8 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
     // Block-type scheduling from pre-M/S granule energies (M/S preserves
     // total energy, and both channels must share a window type anyway).
     int btypes[2] = { 0, 0 };
-    // MPEG-1 only: LSF (MPEG-2/2.5) short blocks use different
-        // scalefac_compress semantics that are not implemented yet — enabling
-        // them measured 20.8 -> 8.6 dB at 22.05 kHz.
-        if (kShortBlocksEnabled && enc->quality_mode >= 1 && enc->sr_index < 3) {
+    // LSF short blocks: see the note in glint_encode.
+    if (kShortBlocksEnabled && enc->quality_mode >= 1) {
         double gr_energy[3] = { 0.0, 0.0, 0.0 };
         for (int g = 0; g < num_gr; g++)
             for (int ch = 0; ch < nch; ch++)

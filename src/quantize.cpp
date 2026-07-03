@@ -264,13 +264,15 @@ static void fill_quant_cache(QuantCache& cache, const double* mdct_in,
     }
 }
 
+// ws_block_type: 0 = long region layout; 1/2/3 = window-switching layout for
+// that block type (the LSF start/stop region boundary differs from short's).
 static int quantize_and_count(const double* mdct_in, int16_t* ix,
                                int global_gain, const int scalefac[21],
                                int scalefac_scale, int preflag,
                                int sr_index,
                                HuffRegions* out_regions = nullptr,
                                const QuantCache* cache = nullptr,
-                               bool short_block = false,
+                               int ws_block_type = 0,
                                int bit_limit = -1) {
     init_quant_tables();
     double base_step = gain_table[global_gain];
@@ -309,17 +311,17 @@ static int quantize_and_count(const double* mdct_in, int16_t* ix,
         while (rzero > 0 && ix[rzero - 1] == 0) rzero--;
     }
 
-    // Short blocks use a different region layout; the gain search must count
-    // bits with the same layout the encoder will actually use.
+    // Window-switching granules use a different region layout; the gain
+    // search must count bits with the same layout the encoder will use.
     int count1_start = find_count1_start(ix, rzero);
-    if (!short_block) {
+    if (!ws_block_type) {
         // Fused region/table selection + count: one pass picks each region's
         // cheapest candidate table and returns the total.
         return huffman_select_and_count(ix, sr_index, rzero, count1_start,
                                         bit_limit, out_regions);
     }
     HuffRegions regions = huffman_determine_regions_short_from_bounds(
-        ix, sr_index, rzero, count1_start);
+        ix, sr_index, rzero, count1_start, ws_block_type);
     if (out_regions) *out_regions = regions;
     return bit_limit >= 0 ? huffman_count_bits_limited(ix, regions, sr_index,
                                                        bit_limit)
@@ -912,7 +914,10 @@ static GranuleInfo nmr_outer_loop(const GranuleInfo& start, double factor,
             amplified = true;
         }
         if (!amplified) break;
-        try_fold_preflag(cand);
+        // MPEG-1 only: in the LSF sfc<400 range a decoder derives preflag=0
+        // (preflag=1 only comes from the sfc>=500 range, never emitted), so
+        // folding would silently desync encoder and decoder.
+        if (sr_index < 3) try_fold_preflag(cand);
         if (!encode_scalefac_fields(cand, sr_index)) break;
         gain_search_with_scalefacs(cand, scaled, available_bits, sr_index,
                                    /*block_type=*/0, gain_floor);
@@ -1025,13 +1030,18 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
     // see nmr_outer_loop). The masks mirror the measurement metric's model
     // (Schroeder spreading, -14 dB offset, ATH floor); granules already
     // comfortably below the mask skip the loop.
-    if (allow_psy && quality_mode >= 1 && sr_index < 3) {
+    if (allow_psy && quality_mode >= 1) {
         int max_iters = (quality_mode >= 2) ? 20 : 8;
         if (block_type == 2) {
+            // Short shaping works for LSF too (the sf caps match MPEG-1's
+            // and encode_scalefac_fields handles the LSF field encoding).
             best_result = nmr_outer_loop_short(best_result, best_factor,
                                                mdct_in, available_bits,
                                                sr_index, max_iters, gain_floor);
         } else if (block_type == 0) {
+            // LSF long blocks too: the m2 slen group caps (15/15/7/7 over
+            // bands [0-5][6-10][11-15][16-20]) are within kSfMax, and the
+            // preflag fold is gated off above.
             best_result = nmr_outer_loop(best_result, best_factor, mdct_in,
                                          available_bits, sr_index, max_iters,
                                          src_band, gain_floor);
@@ -1053,6 +1063,30 @@ static bool encode_scalefac_fields(GranuleInfo& info, int sr_index) {
         {2,1},{2,2},{2,3},{3,1},{3,2},{3,3},{4,2},{4,3}
     };
     if (info.block_type == 2) {
+        if (sr_index >= 3) {
+            // LSF short (non-mixed, non-intensity), ISO 13818-3 sfc < 400
+            // range: the 12x3 scalefactors go out in [band][window] wire
+            // order as FOUR groups of 3 bands (9 values each), one slen per
+            // group; slen limits 4/4/3/3 like the long-block groups.
+            int max_sf[4] = {};
+            for (int b = 0; b < 12; b++)
+                for (int w = 0; w < 3; w++)
+                    max_sf[b / 3] = std::max(max_sf[b / 3],
+                                             info.scalefac_s[b][w]);
+            if (max_sf[0] > 15 || max_sf[1] > 15 || max_sf[2] > 7 ||
+                max_sf[3] > 7)
+                return false;
+            int sl[4];
+            for (int g = 0; g < 4; g++) {
+                sl[g] = 0;
+                while ((1 << sl[g]) <= max_sf[g]) sl[g]++;
+            }
+            int sfc = encode_scalefac_compress_m2(sl[0], sl[1], sl[2], sl[3]);
+            if (sfc < 0) return false;
+            info.scalefac_compress = sfc;
+            info.part2_length = (sl[0] + sl[1] + sl[2] + sl[3]) * 9;
+            return true;
+        }
         int max_sf1 = 0, max_sf2 = 0;
         for (int b = 0; b < 6; b++)
             for (int w = 0; w < 3; w++)
@@ -1133,7 +1167,7 @@ static bool encode_scalefac_fields(GranuleInfo& info, int sr_index) {
 static void gain_search_with_scalefacs(GranuleInfo& info, const double* mdct_in,
                                        int available_bits, int sr_index,
                                        int block_type, int gain_floor) {
-    const bool ws_layout = (block_type != 0);
+    const int ws_layout = (block_type != 0) ? block_type : 0;
     int target_bits = available_bits - info.part2_length;
     if (target_bits < 0) target_bits = 0;
 
