@@ -1,28 +1,44 @@
 # Quality improvement plan
 
 **Scoreboard** (256 kbps joint, `-q best`, vs LAME on identical inputs,
-after psy allocation + short-window scalefactors): speech SNR **37.7 vs
-36.9** (glint ahead), NMR −12.1 vs −16.1, audible band-frames 0.3% vs 0.0%;
-electronic 43.0 vs 44.5 / NMR −12.3 vs −15.8; quartet 43.8 vs 46.0 / −9.2
-vs −11.1 (audible 1.0%); castanets-128k NMR 10.0 vs 4.8 (256k: **−0.7** —
-below the mask). MPEG-2 64k **21.4 vs 17.6** (glint ahead). VBR: V0
-319 kbps / 40.4 dB / **NMR −15.2** (essentially LAME-level), V4 257 kbps /
-40.3 dB, V9 45 kbps / 22.0 dB.
-**Remaining LAME gaps**: mean NMR tail (−12 vs −16 on speech; next:
-preflag, mask-offset tuning, per-band-frame outlier control), the
-castanet-128k gap (10.0 vs 4.8 — **all structural tools now in place**:
-short-window scalefactors + per-(band,window) shaping landed and
-wire-validated on two decoders, subblock_gain, reservoir; what remains
-looks like attack-region bit allocation / transient scheduling breadth —
-try 2–3 short granules per attack and cross-frame bit planning), LSF
-short blocks. Do NOT shape start/stop granules (types 1/3): masks from
-attack-dominated spectra mislead the loop, measured +3 dB NMR.
-Done since: scalefac_scale=1 escalation (gated to bands >6 dB over mask at
-their sf cap; helps ≤128k, neutral above), energy-based subblock_gain
-(castanets 256k NMR −0.50 → −0.72; peak-based selection measured a no-op).
-Measured dead ends: transient frames taking the full reservoir + dropped
-gain floor (≈no-op for castanets, −0.9 dB NMR on speech); reservoir fill
-target 60–90% instead of 40–60% (+0.4 SNR but −0.9 NMR on speech).
+after the 2026-07 pass: shape-below-mask + attack-decay shorts + sfb21
+lowpass + short-sfb table fixes + LSF shorts + shaping/rate-control
+budget fix): speech SNR **37.7 vs 36.9** (glint ahead), NMR −13.5 vs
+−16.1, audible band-frames 0.2% vs 0.0%; electronic 43.5 vs 44.5 / NMR
+−15.9 vs −15.8 (tied); quartet 44.7 vs 46.0 / **NMR −13.9 vs −11.1
+(glint ahead)**, audible 0.0%. Castanets (clip REGENERATED 2026-07 —
+noise-burst train over a 220 Hz bed, `tests/gen_castanet.py`; harsher
+than the old clip, absolute NMRs not comparable to older scoreboards)
+128k: mean NMR 8.4 vs LAME 1.2, but **p95 −1.7 vs 2.6 and audible 2.6%
+vs 6.2% (glint ahead on both)**; 256k −3.9 vs −8.6. MPEG-2 64k speech
+**21.0 vs 17.6 SNR** / NMR 2.5 vs 2.4; m2-64k castanets 15.2/17.8 vs
+14.7/16.5. VBR V0: 40.7 dB / NMR −15.3 / 0.0% audible. Stereo speech
+tiers: 36.7/35.7/35.9 at NMR −8.6/−10.7/−10.8 (normal/best traded
+−0.6 dB SNR for +0.6 NMR vs the target-1.0 era).
+**Remaining LAME gaps**: speech NMR tail (−13.5 vs −16.1; the shaping
+target is exhausted — 0.0625 costs seg-SNR; next: per-band-frame outlier
+control, adaptive rounding offset), castanets-128k MEAN (8.4 vs 1.2 —
+p95/audible already ahead; the mean is dominated by the attack instant
+itself), music SNR (elec −1.0, quartet −1.3 — masked per NMR).
+Done in the 2026-07 pass (commit messages have full numbers): outer-loop
+shaping target 0.125 = push bands ~9 dB below mask; kShortAttackExtend=2
+decay granules; **sfb21 lowpass** (the region has no scalefactor ⇒
+unshapeable quantizer spray; zeroing it wins NMR on every clip at every
+rate incl. VBR); **short-sfb table fixes** (44.1k boundary 138→136 per
+ISO; the m2 tables were MPEG-1 copies — the real cause of the historical
+LSF collapse); LSF short blocks live (four-slen groups of 9, START/STOP
+region0=54, wire-validated ffmpeg+CoreAudio); m2 long-granule shaping;
+preemphasis[20] 3→2 per ISO; **shaping budget = spend + slack/2 and the
+anchor EMA tracks pre-shaping rc_gain** (full-budget shaping drained the
+reservoir signal and ratcheted the anchor coarse: stereo best −5 dB SNR;
+slack·3/4 re-triggers it).
+Measured dead ends: shaping guard >1.25 (speech −0.6 dB SNR for +0.3
+NMR; short-loop-only 2.0 made castanets WORSE — short masks lack temporal
+masking); mixed-frame bit tilt toward the short granule (worse on every
+metric); attack-only sfb21 zeroing (keeps p95 win, loses mean win);
+transient frames taking the full reservoir + dropped gain floor; reservoir
+fill target 60–90% (+0.4 SNR / −0.9 NMR speech). Do NOT shape start/stop
+granules (types 1/3): +3 dB NMR.
 
 ## 0. ~15 dB SNR ceiling — RESOLVED (pow34 curve bug, fixed on main)
 
@@ -211,13 +227,18 @@ at 128k: 28.9 → 10.7 (LAME: 4.8 — remaining gap is bits). SNR drops on
 transients by design (LAME shows the same signature); judge by NMR. Steady
 content within 0.4 dB at unchanged NMR.
 
-**Still open here:**
-- MPEG-2/LSF short blocks (different scalefac_compress semantics; enabling
-  naively measured 20.8 → 8.6 dB — gated to MPEG-1 for now).
-- Short-block scalefactors (currently forced 0; the 12-sfb × 3-window
-  structure is unimplemented in emission) and subblock_gain.
-- 128k castanet NMR gap vs LAME (10.7 vs 4.8): likely wants more reservoir
-  borrow for transient frames and/or 2 short granules per attack.
+**Still open here:** (all resolved since)
+- ~~MPEG-2/LSF short blocks~~ — DONE. The historical 20.8 → 8.6 dB collapse
+  was the sfb_short_table_m2 being an MPEG-1 copy (reorder scrambled vs
+  every real decoder), NOT the scalefac_compress semantics. With the ISO
+  tables, the four-slen LSF field encoding (groups of 3 bands × 3 windows,
+  9 values each), scalefac_s emission, and the START/STOP region0_end=54
+  boundary (ffmpeg init_short_region), m2-64k speech measures 21.1 dB /
+  NMR 1.40 (LAME 17.6 / 2.38) and castanets NMR 36.3 → 17.6.
+  Wire-validated on ffmpeg + CoreAudio (identical metrics).
+- ~~Short-block scalefactors / subblock_gain~~ — done earlier.
+- ~~128k castanet gap~~ — attacked via kShortAttackExtend=2 + sfb21
+  lowpass + the 44.1k short-table fix (see scoreboard).
 - `GLINT_FORCE_SHORT=1` forces all-short for diagnostics.
 
 ## 6. Perceptual measurement — DONE (NMR in measure_audio.py, merged)
