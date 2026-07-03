@@ -694,6 +694,9 @@ static void compute_cell_masks(const double* mdct_in, int sr_index,
         }
 }
 
+static double shape_target();
+static double noise_guard();
+
 // Short-granule shaping: same idea as nmr_outer_loop, over the 13x3
 // (band,window) cells; band 12 counts toward the objective but has no
 // scalefactor to amplify.
@@ -706,18 +709,26 @@ static GranuleInfo nmr_outer_loop_short(const GranuleInfo& start, double factor,
 
     double noise0[13][3];
     compute_cell_noise(start, mdct_in, sr_index, noise0);
-    double j_best = 0.0, total0 = 0.0;
+    const double target = shape_target();
+    double j_best = 0.0, total0 = 0.0, worst0 = 0.0;
     for (int b = 0; b < 13; b++)
         for (int w = 0; w < 3; w++) {
-            if (mask[b][w] > 0.0) j_best += noise0[b][w] / mask[b][w];
+            if (mask[b][w] > 0.0) {
+                double r = noise0[b][w] / mask[b][w];
+                j_best += r;
+                if (r > worst0) worst0 = r;
+            }
             total0 += noise0[b][w];
         }
-    if (j_best < 0.5) return start;
+    if (worst0 <= target) return start;
 
     double scaled[576];
     for (int i = 0; i < 576; i++) scaled[i] = mdct_in[i] * factor;
 
-    static const double kNoiseGuard = 1.25;
+    // Same 1.25x guard as the long loop: a looser short-loop guard (2.0)
+    // measured WORSE castanets-128k NMR (16.2 vs 15.0) — the short mask
+    // model (no temporal masking) misleads when allowed to trade harder.
+    const double kNoiseGuard = noise_guard();
 
     GranuleInfo best = start;
     GranuleInfo cur = start;
@@ -732,8 +743,8 @@ static GranuleInfo nmr_outer_loop_short(const GranuleInfo& start, double factor,
                 double r = cur_noise[b][w] / mask[b][w];
                 if (r > worst) worst = r;
             }
-        if (worst <= 1.0) break;
-        double thresh = std::max(1.0, worst * 0.25);
+        if (worst <= target) break;
+        double thresh = std::max(target, worst * 0.25);
 
         GranuleInfo cand = cur;
         bool amplified = false;
@@ -771,6 +782,40 @@ static GranuleInfo nmr_outer_loop_short(const GranuleInfo& start, double factor,
     return best;
 }
 
+// Shaping target for the NMR outer loops: bands are amplified until their
+// noise-to-mask ratio falls to this value (1.0 = stop at the mask; smaller
+// = keep pushing below it, trading raw MSE inside the noise guard). 0.125
+// (-9 dB) measured the sweet spot on the 256k battery: speech mean NMR
+// -12.1 -> -13.7 at -0.16 dB SNR, quartet -9.2 -> -10.1, electronic -12.3
+// -> -12.6 (SNR holds). 0.0625 buys speech -14.2 but seg-SNR starts to pay
+// (-0.25); music saturates below 0.25 regardless (the sf caps and the
+// noise guard bind, not the target).
+static double shape_target() { return 0.125; }
+
+// Total-noise guard for both outer loops: shaping may redistribute noise,
+// never grow it past this factor. Loosening to 1.6 buys speech only +0.3 dB
+// NMR for -0.6 dB SNR (bad trade); a short-loop-only 2.0 measured WORSE
+// castanets NMR (the short mask model has no temporal masking and misleads
+// when allowed to trade harder).
+static double noise_guard() { return 1.25; }
+
+// Fold the preemphasis pattern into preflag when every HF band's transmitted
+// scalefactor covers it: reconstruction is unchanged (the decoder adds pretab
+// when preflag is set), but the transmitted values shrink, so slen2 — and
+// part2_length — drop and the gain search can afford a finer global_gain.
+// MPEG-1 long blocks only (LSF side info has no preflag bit).
+static void try_fold_preflag(GranuleInfo& gi) {
+    if (gi.preflag || gi.block_type == 2) return;
+    bool any = false;
+    for (int b = 11; b < 21; b++) {
+        if (gi.scalefac[b] < tables::preemphasis[b]) return;
+        if (tables::preemphasis[b] > 0 && gi.scalefac[b] > 0) any = true;
+    }
+    if (!any) return;
+    gi.preflag = 1;
+    for (int b = 11; b < 21; b++) gi.scalefac[b] -= tables::preemphasis[b];
+}
+
 // Outer-loop objective, aligned with the measurement metric: total linear
 // noise-to-mask ratio across bands (the metric averages N/M over
 // band-frames, so minimizing the per-granule sum minimizes the metric).
@@ -799,8 +844,15 @@ static GranuleInfo nmr_outer_loop(const GranuleInfo& start, double factor,
     double noise0[21];
     compute_band_noise(start, mdct_in, sr_index, noise0);
     double j_best = nmr_objective(noise0, mask_band);
-    // Already comfortably below the mask everywhere: nothing to shape.
-    if (j_best < 0.5) return start;
+    // Already at/below the shaping target everywhere: nothing to shape.
+    const double target = shape_target();
+    double worst0 = 0.0;
+    for (int b = 0; b < 21; b++) {
+        if (mask_band[b] <= 0.0) continue;
+        double r = noise0[b] / mask_band[b];
+        if (r > worst0) worst0 = r;
+    }
+    if (worst0 <= target) return start;
 
     double total0 = 0.0;
     for (int b = 0; b < 21; b++) total0 += noise0[b];
@@ -811,7 +863,7 @@ static GranuleInfo nmr_outer_loop(const GranuleInfo& start, double factor,
     // Loose total-noise guard: shaping means redistributing noise, and a
     // genuinely perceptual trade may raise raw MSE — but runaway trades that
     // tank SNR for the last sliver of NMR are rejected.
-    static const double kNoiseGuard = 1.25;
+    const double kNoiseGuard = noise_guard();
 
     // MPEG-1 slen field limits: bands 0-10 max 15, bands 11-20 max 7.
     static const int kSfMax[21] = { 15,15,15,15,15,15,15,15,15,15,15,
@@ -831,8 +883,8 @@ static GranuleInfo nmr_outer_loop(const GranuleInfo& start, double factor,
             double r = cur_noise[b] / mask_band[b];
             if (r > worst) worst = r;
         }
-        if (worst <= 1.0) break;
-        double thresh = std::max(1.0, worst * 0.25);
+        if (worst <= target) break;
+        double thresh = std::max(target, worst * 0.25);
 
         GranuleInfo cand = cur;
         bool amplified = false;
@@ -860,6 +912,7 @@ static GranuleInfo nmr_outer_loop(const GranuleInfo& start, double factor,
             amplified = true;
         }
         if (!amplified) break;
+        try_fold_preflag(cand);
         if (!encode_scalefac_fields(cand, sr_index)) break;
         gain_search_with_scalefacs(cand, scaled, available_bits, sr_index,
                                    /*block_type=*/0, gain_floor);
