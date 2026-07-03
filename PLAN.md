@@ -7,29 +7,42 @@ tables chosen by max-value only, M/S all-or-nothing with a fixed 50/50 channel
 bit split).
 
 Gate for every item: `tests/measure_audio.py` on the canonical speech clip
-(SNR/seg-SNR/rolloff/centroid must improve or hold), `ffmpeg` backstep check
-(zero), unit tests, `double`==`fixed` output identity. Quality changes are
-*not* byte-identical to the previous main by design — that's what the metrics
-gate is for.
+(SNR/seg-SNR/LSD/rolloff/centroid must improve or hold), `ffmpeg` backstep
+check (zero), unit tests, `fixed` path metrics match `double`. (The two
+signal paths have never been byte-identical to each other; "double==fixed" in
+the docs means metrics-identical.) Quality changes are *not* byte-identical
+to the previous main by design — that's what the metrics gate is for.
 
 ## 1. Real Huffman table selection — DONE (merged)
 
 `choose_huff_table` picked one fixed table per max-value class (always 7 never
 8/9, always 10 never 11/12, always 13 never 15, first ESC table with enough
-linbits). Count actual bits for every candidate in the same-range group and
-pick the minimum, using the pass-3 pair-cost LUTs; every saved bit lets the
-gain search land on a finer global_gain at the same bitrate.
-Result: −1.7% Huffman bits on speech; SNR +0.05..0.1 dB all tiers; ~1% slower.
+linbits, never the 24–31 family). Count actual bits for every candidate in
+the same-range group and pick the minimum. Hot path uses a fused
+`huffman_select_and_count` (one pass accumulates all candidate totals; the
+running minimum keeps the bit_limit early exit exact) — the naive version
+cost +22–40% encode time, the fused one +5–7%. Every saved bit lets the gain
+search land on a finer global_gain at the same bitrate.
+Measured (speech, 256 kbps): SNR +0.01..0.03 dB, seg-SNR +0.01..0.04 dB,
+LSD −0.5 dB at all tiers, rolloff +23/+70 Hz (normal/best).
 
 ## 2. Smarter bit distribution — DONE (merged)
 
-- M/S channel bit split: mid gets bits proportional to energy (clamped
-  55–80%), side gets the rest. Was a fixed 50/50; the side channel of
-  correlated material needs far fewer bits than mid.
-  Result (joint, best): SNR 15.1 → 16.5 dB, seg-SNR +1.5 dB.
-- Inter-granule redistribution now uses both channels' energy (was ch 0 only).
-  Kept at `-q best` only, 30/70 clamp unchanged: extending it to speed/normal
-  measured a small seg-SNR regression, so it stays best-only.
+- Per-granule channel bit split proportional to post-transform energy,
+  clamped to **45–55%** (`kChSplitLo/Hi` in encoder.cpp), integer-exact (the
+  shares sum to the old 50/50 total). Was a fixed 50/50.
+  Measured (speech, 256 kbps, vs post-#1): joint speed +0.13 dB SNR /
+  LSD −0.96; joint normal +0.03 / −0.40; joint best −0.01 / −0.37 with
+  seg-SNR +0.02; stereo +0.03..0.05 dB SNR at all tiers.
+  **Clamp tuning matters**: 25/75 regressed joint best SNR by 1.5 dB (side
+  channel starved in loud passages — its error adds directly to decoded L/R
+  even when mid-band metrics improve); 42/58 still −0.09 dB. 45/55 is the
+  everything-improves-or-holds point on the speech clip. Re-tune with real
+  wide-stereo music before trusting it beyond speech.
+- Inter-granule redistribution now uses both channels' energy (was ch 0
+  only). Extending it from best-only to normal was measured and regressed
+  (joint normal −0.05 dB SNR, seg-SNR and LSD worse), so it stays best-only
+  with the 30/70 clamp.
 
 ## 3. Outer-loop noise shaping (NMR-driven) — TODO, biggest lever for 0–1 kHz noise
 

@@ -243,6 +243,13 @@ static int mode_to_mpeg(glint_mode mode) {
 // Q31 constant for 1/sqrt(2) used in MS stereo
 static constexpr int32_t kInvSqrt2_Q31 = 1518500250; // 0.7071067811865476 * 2^31
 
+// Per-granule channel bit-split clamp (share of the granule's total that
+// channel 0 — mid, in M/S — may receive). Tuned on the speech reference:
+// wider clamps starve the side channel in loud passages and regress global
+// SNR in joint mode even though mid-band metrics improve.
+static constexpr double kChSplitLo = 0.45;
+static constexpr double kChSplitHi = 0.55;
+
 const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                               int* out_size) {
     if (!enc || !channel_data || !out_size) {
@@ -296,9 +303,10 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
         if (enc->quality_mode >= 2 && num_gr == 2 && !enc->vbr_mode) {
             double energy[2] = {0, 0};
             for (int gr = 0; gr < 2; gr++)
-                for (int sb = 0; sb < 32; sb++)
-                    for (int ts = gr*18; ts < (gr+1)*18; ts++)
-                        energy[gr] += subband_out_d[0][sb][ts] * subband_out_d[0][sb][ts];
+                for (int ch = 0; ch < nch; ch++)
+                    for (int sb = 0; sb < 32; sb++)
+                        for (int ts = gr*18; ts < (gr+1)*18; ts++)
+                            energy[gr] += subband_out_d[ch][sb][ts] * subband_out_d[ch][sb][ts];
 
             double total = energy[0] + energy[1];
             if (total > 0) {
@@ -323,8 +331,31 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                 mode_ext = 2;
             }
 
+            // Per-channel bit split within the granule: proportional to
+            // post-transform energy, clamped, integer-exact (the two shares
+            // sum to the old 50/50 total). Matters most for M/S, where the
+            // side channel of correlated material needs far fewer bits than
+            // mid; a fixed 50/50 split starves mid and wastes side bits.
+            int bits_ch[2] = { bits_gr[gr], bits_gr[gr] };
+            if (nch == 2) {
+                double e[2] = {0, 0};
+                for (int ch = 0; ch < 2; ch++)
+                    for (int sb = 0; sb < 32; sb++)
+                        for (int ts = 0; ts < 18; ts++) {
+                            double v = subband_out_d[ch][sb][t0 + ts];
+                            e[ch] += v * v;
+                        }
+                double tot = e[0] + e[1];
+                if (tot > 0) {
+                    double r0 = std::max(kChSplitLo, std::min(kChSplitHi, e[0] / tot));
+                    int total_gr = bits_gr[gr] * 2;
+                    bits_ch[0] = static_cast<int>(total_gr * r0);
+                    bits_ch[1] = total_gr - bits_ch[0];
+                }
+            }
+
             for (int ch = 0; ch < nch; ch++) {
-                int gr_bits = bits_gr[gr];
+                int gr_bits = bits_ch[ch];
 
                 // Transient detection on subband output
                 bool transient_detected = detect_transient(
@@ -411,11 +442,12 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
         if (enc->quality_mode >= 2 && num_gr == 2 && !enc->vbr_mode) {
             double energy[2] = {0, 0};
             for (int gr = 0; gr < 2; gr++)
-                for (int sb = 0; sb < 32; sb++)
-                    for (int ts = gr*18; ts < (gr+1)*18; ts++) {
-                        double v = static_cast<double>(subband_out_fp[0][sb][ts]);
-                        energy[gr] += v * v;
-                    }
+                for (int ch = 0; ch < nch; ch++)
+                    for (int sb = 0; sb < 32; sb++)
+                        for (int ts = gr*18; ts < (gr+1)*18; ts++) {
+                            double v = static_cast<double>(subband_out_fp[ch][sb][ts]);
+                            energy[gr] += v * v;
+                        }
 
             double total = energy[0] + energy[1];
             if (total > 0) {
@@ -441,8 +473,27 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                 mode_ext = 2;
             }
 
+            // Per-channel bit split within the granule (see the double path).
+            int bits_ch[2] = { bits_gr[gr], bits_gr[gr] };
+            if (nch == 2) {
+                double e[2] = {0, 0};
+                for (int ch = 0; ch < 2; ch++)
+                    for (int sb = 0; sb < 32; sb++)
+                        for (int ts = 0; ts < 18; ts++) {
+                            double v = static_cast<double>(subband_out_fp[ch][sb][t0 + ts]);
+                            e[ch] += v * v;
+                        }
+                double tot = e[0] + e[1];
+                if (tot > 0) {
+                    double r0 = std::max(kChSplitLo, std::min(kChSplitHi, e[0] / tot));
+                    int total_gr = bits_gr[gr] * 2;
+                    bits_ch[0] = static_cast<int>(total_gr * r0);
+                    bits_ch[1] = total_gr - bits_ch[0];
+                }
+            }
+
             for (int ch = 0; ch < nch; ch++) {
-                int gr_bits = bits_gr[gr];
+                int gr_bits = bits_ch[ch];
 
                 // Frequency inversion and extract granule slice in one pass
                 int32_t sub_gr[32][18];
