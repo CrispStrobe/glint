@@ -12,6 +12,13 @@ namespace glint {
 struct GranuleInfo {
     int16_t ix[576];
     int global_gain;
+    int rc_gain;           // gain achieved BEFORE psy noise shaping — the
+                           // rate controller's anchor EMA must track this,
+                           // not global_gain: shaping deliberately coarsens
+                           // the gain to pay for scalefactors, and feeding
+                           // those gains back raised the constant-quality
+                           // floor in a spiral (stereo -q best lost 5 dB
+                           // SNR and 3 dB NMR before this field existed)
     int scalefac[21];
     int subblock_gain[3];  // per-window gain relief (block_type 2 only)
     int scalefac_s[12][3]; // short-window scalefactors (block_type 2 only):

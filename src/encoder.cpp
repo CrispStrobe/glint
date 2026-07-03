@@ -949,7 +949,10 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
         int gsum = 0, gn = 0;
         for (int gr = 0; gr < num_gr; gr++)
             for (int ch = 0; ch < nch; ch++) {
-                gsum += granule_info[gr][ch].global_gain;
+                // rc_gain, not global_gain: psy shaping coarsens the gain
+                // to pay for scalefactors, and feeding shaped gains into
+                // the EMA ratcheted the anchor floor up (see GranuleInfo).
+                gsum += granule_info[gr][ch].rc_gain;
                 gn++;
             }
         int gmean = (gn > 0) ? gsum / gn : 0;
@@ -1196,7 +1199,10 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
         int gsum = 0, gn = 0;
         for (int gr = 0; gr < num_gr; gr++)
             for (int ch = 0; ch < nch; ch++) {
-                gsum += granule_info[gr][ch].global_gain;
+                // rc_gain, not global_gain: psy shaping coarsens the gain
+                // to pay for scalefactors, and feeding shaped gains into
+                // the EMA ratcheted the anchor floor up (see GranuleInfo).
+                gsum += granule_info[gr][ch].rc_gain;
                 gn++;
             }
         int gmean = (gn > 0) ? gsum / gn : 0;

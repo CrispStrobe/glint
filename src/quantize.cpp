@@ -727,6 +727,15 @@ static GranuleInfo nmr_outer_loop_short(const GranuleInfo& start, double factor,
     double scaled[576];
     for (int i = 0; i < 576; i++) scaled[i] = mdct_in[i] * factor;
 
+    // Shaping budget = what the unshaped winner actually spent, NOT the
+    // frame budget: re-searching under the full budget converts the rate
+    // controller's underspend (its reservoir-fill signal) into scalefactor
+    // spending, pinning the anchor floor coarse (see nmr_outer_loop for
+    // the measured slack sweep).
+    int shape_bits = start.part2_3_length +
+                     (available_bits - start.part2_3_length) / 2;
+    if (shape_bits > available_bits) shape_bits = available_bits;
+
     // Same 1.25x guard as the long loop: a looser short-loop guard (2.0)
     // measured WORSE castanets-128k NMR (16.2 vs 15.0) — the short mask
     // model (no temporal masking) misleads when allowed to trade harder.
@@ -762,7 +771,7 @@ static GranuleInfo nmr_outer_loop_short(const GranuleInfo& start, double factor,
             }
         if (!amplified) break;
         if (!encode_scalefac_fields(cand, sr_index)) break;
-        gain_search_with_scalefacs(cand, scaled, available_bits, sr_index,
+        gain_search_with_scalefacs(cand, scaled, shape_bits, sr_index,
                                    /*block_type=*/2, gain_floor);
 
         double cand_noise[13][3];
@@ -862,6 +871,19 @@ static GranuleInfo nmr_outer_loop(const GranuleInfo& start, double factor,
     double scaled[576];
     for (int i = 0; i < 576; i++) scaled[i] = mdct_in[i] * factor;
 
+    // Shaping is mostly a REDISTRIBUTION: it gets what the unshaped winner
+    // spent plus HALF the leftover budget. Handing it the full budget let
+    // it consume the easy-granule underspend that the CBR rate controller
+    // reads as reservoir fill — the anchor then ratcheted to its coarse
+    // clamp and stereo -q best (both channels shaped, so no unshaped side
+    // channel kept the reservoir fed) lost 5 dB SNR / 3 dB NMR. Measured
+    // (speech 256k best): slack/2 gives stereo 35.9/-10.8 and joint
+    // 37.7/-13.5; slack*3/4 re-triggers the ratchet (stereo 33.3/-8.3);
+    // zero slack starves joint shaping (-11.9).
+    int shape_bits = start.part2_3_length +
+                     (available_bits - start.part2_3_length) / 2;
+    if (shape_bits > available_bits) shape_bits = available_bits;
+
     // Loose total-noise guard: shaping means redistributing noise, and a
     // genuinely perceptual trade may raise raw MSE — but runaway trades that
     // tank SNR for the last sliver of NMR are rejected.
@@ -919,7 +941,7 @@ static GranuleInfo nmr_outer_loop(const GranuleInfo& start, double factor,
         // folding would silently desync encoder and decoder.
         if (sr_index < 3) try_fold_preflag(cand);
         if (!encode_scalefac_fields(cand, sr_index)) break;
-        gain_search_with_scalefacs(cand, scaled, available_bits, sr_index,
+        gain_search_with_scalefacs(cand, scaled, shape_bits, sr_index,
                                    /*block_type=*/0, gain_floor);
 
         double cand_noise[21];
@@ -1347,6 +1369,10 @@ static GranuleInfo quantize_base(const double* mdct_in, int available_bits,
 
     gain_search_with_scalefacs(info, mdct_in, available_bits, sr_index,
                                block_type, gain_floor);
+    // Pre-shaping operating point for the rate controller. The psy loops
+    // copy GranuleInfo wholesale and only re-search global_gain, so this
+    // survives shaping untouched.
+    info.rc_gain = info.global_gain;
     return info;
 }
 

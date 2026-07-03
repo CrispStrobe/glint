@@ -891,9 +891,12 @@ static constexpr double ath_cb[25] = {
 // Multiplied onto scalefactors for certain scalefactor bands
 // ---------------------------------------------------------------------------
 
+// ISO 11172-3 pretab. Band 20 is 2, NOT 3 (it was 3 here for a long time —
+// harmless while preflag was never set, but any preflag use desyncs band 20
+// by one scalefactor step against every decoder).
 static constexpr int preemphasis[22] = {
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    1, 1, 1, 1, 2, 2, 3, 3, 3, 3, 0
+    1, 1, 1, 1, 2, 2, 3, 3, 3, 2, 0
 };
 
 // ---------------------------------------------------------------------------
