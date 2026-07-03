@@ -35,9 +35,9 @@ with `tests/measure_audio.py`; `double` and `fixed` paths are identical):
 
 | Mode | SNR | seg-SNR | centroid | %E>10 kHz | 95% rolloff | RMS vs src | speed |
 |---|---|---|---|---|---|---|---|
-| -q speed | 36.7 dB | 38.0 dB | 881 Hz | 0.69% | 5.32 kHz | ±0.2 dB | ~190× |
-| **-q normal** | **36.5 dB** | **37.9 dB** | 884 Hz | 0.70% | 5.37 kHz | ±0.2 dB | ~85× |
-| -q best | 36.5 dB | 37.9 dB | 892 Hz | 0.71% | 5.44 kHz | ±0.2 dB | ~40× |
+| -q speed | 36.7 dB | 38.0 dB | 882 Hz | 0.71% | 5.34 kHz | ±0.2 dB | ~190× |
+| **-q normal** | **36.3 dB** | **37.8 dB** | 885 Hz | 0.71% | 5.37 kHz | ±0.2 dB | ~85× |
+| -q best | 36.5 dB | 37.9 dB | 890 Hz | 0.72% | 5.41 kHz | ±0.2 dB | ~40× |
 
 Source rolloff 5.4 kHz, centroid 892 Hz, %E>10 kHz 0.72%. **In joint mode
 glint measures ahead of LAME on this clip: 37.7 dB SNR vs LAME 256k's
@@ -66,12 +66,13 @@ builds with statistics, byte-identity, and quality regression flags, use
 
 | Mode | 0–1 kHz | 1–4 kHz | 4–8 kHz | 8–16 kHz |
 |---|---|---|---|---|
-| -q best | 45.5 dB | 31.1 dB | 28.0 dB | 23.6 dB |
+| -q best | 44.4 dB | 31.9 dB | 27.8 dB | 24.5 dB |
 
-(speed/normal within 0.2 dB of best per band.) Noise sits where masking
-absorbs it: most error power above 8 kHz, ~9% in 0–1 kHz. A Bark-band
-noise-to-mask metric (`tests/measure_audio.py`) measures mean NMR −7.2 dB
-stereo / −10.3 dB joint (LAME: −16.1 dB).
+(speed/normal within 0.5 dB of best per band.) Noise sits where masking
+absorbs it: most error power above 4 kHz, ~14% in 0–1 kHz. A Bark-band
+noise-to-mask metric (`tests/measure_audio.py`) measures mean NMR −10.2 dB
+stereo / −12.2 dB joint with 0.3–0.5% of band-frames above the mask
+(LAME: −16.1 dB / 0.0%).
 
 **Footprint**:
 
