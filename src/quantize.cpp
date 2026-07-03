@@ -149,13 +149,15 @@ static void init_quant_tables() {
     tables_init = true;
 }
 
+// x^0.75 for the quantizer. Inputs are raw MDCT coefficients — almost all
+// FRACTIONAL (~1e-6..0.3). The old integer-grid table interpolation
+// (pow34_table[int(x)] + frac*...) degenerated to pow34(x)=x on (0,1) — a
+// 33% error at x=0.2 — so ix was linear in x instead of x^0.75 and the
+// decoder's exact ix^(4/3) expansion warped the entire spectrum by x^(4/3):
+// content 20 dB below the granule peak decoded 6.7 dB too quiet. That single
+// curve error capped whole-file SNR at ~15 dB independent of bitrate.
 static double fast_pow34(double x) {
     if (x <= 0.0) return 0.0;
-    if (x < static_cast<double>(tables::kPow34TableSize - 1)) {
-        int idx = static_cast<int>(x);
-        double frac = x - idx;
-        return tables::pow34_table[idx] + frac * (tables::pow34_table[idx + 1] - tables::pow34_table[idx]);
-    }
     return std::pow(x, 0.75);
 }
 
@@ -605,10 +607,15 @@ static GranuleInfo nmr_outer_loop(const GranuleInfo& start, double factor,
 GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
                               int sr_index, int quality_mode, bool short_block) {
     init_quant_tables();
-    static const double kSpeed[]  = { 1.7, 2.4 };
-    static const double kNormal[] = { 1.3, 1.7, 2.1, 2.6, 3.2, 4.0 };
+    // Candidate input scales. With the pow34 curve fixed, reconstruction is
+    // level-exact at f=1.0; small boosts >1 only serve to rescue dead-zone
+    // coefficients (at a matching level cost the MSE weighs). The old grids
+    // (1.3..4.2) existed to compensate the broken pow34 curve — with it
+    // fixed they are pure level errors.
+    static const double kSpeed[]  = { 1.0, 1.12 };
+    static const double kNormal[] = { 1.0, 1.04, 1.09, 1.15, 1.22, 1.30 };
     static const double kBest[]   = {
-        1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 2.2, 2.5, 2.8, 3.2, 3.6, 4.2 };
+        1.0, 1.02, 1.05, 1.08, 1.11, 1.15, 1.19, 1.24, 1.30, 1.38, 1.48, 1.60 };
     const double* factors; int nf;
     if (quality_mode >= 2)      { factors = kBest;   nf = 12; }
     else if (quality_mode == 1) { factors = kNormal; nf = 6; }
@@ -647,13 +654,13 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
 
     if (quality_mode >= 2) {
         // Fine refinement around best_factor: candidates for step -2,-1,1,2
-        // (skipping any f < 0.5), kept in that exact order for the reduction.
+        // (skipping any f < 0.98), kept in that exact order for the reduction.
         double cand[4];
         int nc = 0;
         for (int step = -2; step <= 2; step++) {
             if (step == 0) continue;
-            double f = best_factor + step * 0.12;
-            if (f < 0.5) continue;
+            double f = best_factor + step * 0.015;
+            if (f < 0.98) continue;
             cand[nc++] = f;
         }
         std::vector<GranuleInfo> rres(nc);
@@ -675,8 +682,13 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
     }
 
     // NMR-driven noise shaping on the winning candidate (MPEG-1 long blocks;
-    // see nmr_outer_loop). Runs once per granule, after the scale search.
-    if (quality_mode >= 2 && sr_index < 3 && !short_block) {
+    // see nmr_outer_loop). Disabled since the pow34-curve fix: the loop's
+    // -20 dB SMR masks sit far above the new noise floor, so it amplifies
+    // bands whose noise is already inaudible and pays with real SNR
+    // (-0.7 dB at -q best). Re-enable only after re-tuning the masks to the
+    // post-fix noise floor (PLAN.md item 3).
+    static constexpr bool kNmrOuterLoop = false;
+    if (kNmrOuterLoop && quality_mode >= 2 && sr_index < 3 && !short_block) {
         int max_iters = 10;
         best_result = nmr_outer_loop(best_result, best_factor, mdct_in,
                                      available_bits, sr_index, max_iters,
@@ -730,46 +742,42 @@ static void gain_search_with_scalefacs(GranuleInfo& info, const double* mdct_in,
     int target_bits = available_bits - info.part2_length;
     if (target_bits < 0) target_bits = 0;
 
-    // Compute minimum gain to prevent clipping (ix > 8191).
-    double max_abs = 0.0;
-    for (int i = 0; i < 576; i++) {
-        double v = std::fabs(mdct_in[i]);
-        if (v > max_abs) max_abs = v;
-    }
-    int min_gain = 0;
-    if (max_abs > 0.0) {
-        double pow34_peak = fast_pow34(max_abs);
-        // Need: pow34_peak * 2^(-3*(g-210)/16) + 0.4054 < 8191
-        // pow34_peak * 2^(-3*(g-210)/16) < 8190.6
-        // -3*(g-210)/16 < log2(8190.6 / pow34_peak)
-        // g > 210 - (16/3) * log2(8190.6 / pow34_peak)
-        if (pow34_peak > 0.0) {
-            double ratio = 8190.0 / pow34_peak;
-            if (ratio > 0.0) {
-                double g_min = 210.0 - (16.0 / 3.0) * std::log2(ratio);
-                min_gain = static_cast<int>(std::ceil(g_min));
-                if (min_gain < 0) min_gain = 0;
-            }
-        }
-    }
-
-    // Tighten binary search upper bound: gain where the peak quantizes to ~1.
-    // pow34_peak * gain_table[g] + 0.4054 < 1.0 → g > 210 - (16/3)*log2(0.6/pow34_peak)
-    int max_gain = 255;
-    if (max_abs > 0.0) {
-        double pow34_peak = fast_pow34(max_abs);
-        if (pow34_peak > 0.0) {
-            double g_max = 210.0 - (16.0 / 3.0) * std::log2(0.6 / pow34_peak);
-            int est = static_cast<int>(g_max) + 2;
-            if (est < max_gain && est > min_gain) max_gain = est;
-        }
-    }
-
     // The cache is filled once and reused for the final quantize and the
     // budget-guarantee loop below (scalefactors no longer change here).
     QuantCache cache;
     fill_quant_cache(cache, mdct_in, info.scalefac, info.scalefac_scale,
                      info.preflag, sr_index);
+
+    // Gain bounds are computed from the cache's actual quantizer input —
+    // pow34(|xr|) INCLUDING the per-band scalefactor boost. Computing them
+    // from pow34(max|xr|) alone (the historical bug) let any band with a
+    // nonzero scalefactor (sfs up to 6.17x at sf=7) sail past the 8191 hard
+    // clamp at the "minimum" gain: the loudest band then decoded up to
+    // ~-21 dB quiet, capping whole-file SNR at ~15 dB regardless of bitrate,
+    // piling the error into the loudest (0-1 kHz) bands, and forcing the
+    // scale search to prefer f>1 purely to coarsen the gain away from
+    // clipping.
+    double peak34 = 0.0;
+    for (int i = 0; i < 576; i++)
+        if (cache.pow34_sf[i] > peak34) peak34 = cache.pow34_sf[i];
+
+    // Minimum gain to prevent clipping (ix > 8191):
+    // peak34 * 2^(-3*(g-210)/16) + 0.4054 < 8191
+    // → g > 210 - (16/3) * log2(8190 / peak34)
+    int min_gain = 0;
+    int max_gain = 255;
+    if (peak34 > 0.0) {
+        double g_min = 210.0 - (16.0 / 3.0) * std::log2(8190.0 / peak34);
+        min_gain = static_cast<int>(std::ceil(g_min));
+        if (min_gain < 0) min_gain = 0;
+
+        // Tighten the search upper bound: gain where the peak quantizes to ~1.
+        // peak34 * gain_table[g] + 0.4054 < 1.0
+        // → g > 210 - (16/3)*log2(0.6/peak34)
+        double g_max = 210.0 - (16.0 / 3.0) * std::log2(0.6 / peak34);
+        int est = static_cast<int>(g_max) + 2;
+        if (est < max_gain && est > min_gain) max_gain = est;
+    }
 
     // When a search iteration accepts a gain (bits <= target_bits), its bit
     // count ran to completion (the early exit only fires when over the limit),
@@ -917,29 +925,6 @@ GranuleInfo quantize_granule_vbr(const double* mdct_in, int available_bits,
 
     int target_gain = vbr_target_gain[vbr_quality];
 
-    // Compute minimum gain to prevent clipping (ix > 8191).
-    double max_abs = 0.0;
-    for (int i = 0; i < 576; i++) {
-        double v = std::fabs(mdct_in[i]);
-        if (v > max_abs) max_abs = v;
-    }
-    int min_gain = 0;
-    if (max_abs > 0.0) {
-        double pow34_peak = fast_pow34(max_abs);
-        if (pow34_peak > 0.0) {
-            double ratio = 8190.0 / pow34_peak;
-            if (ratio > 0.0) {
-                double g_min = 210.0 - (16.0 / 3.0) * std::log2(ratio);
-                min_gain = static_cast<int>(std::ceil(g_min));
-                if (min_gain < 0) min_gain = 0;
-            }
-        }
-    }
-
-    // Use the target gain, but never go below min_gain (clipping protection)
-    int gain = std::max(target_gain, min_gain);
-    info.global_gain = gain;
-
     // Energy-based scalefactor adjustment
     {
         const int* sfb = tables::get_sfb_long_by_unified(sr_index);
@@ -1016,6 +1001,23 @@ GranuleInfo quantize_granule_vbr(const double* mdct_in, int available_bits,
     QuantCache final_cache;
     fill_quant_cache(final_cache, mdct_in, info.scalefac, info.scalefac_scale,
                      info.preflag, sr_index);
+
+    // Clipping protection from the cache's actual quantizer input (includes
+    // the scalefactor boost — see gain_search_with_scalefacs).
+    double peak34 = 0.0;
+    for (int i = 0; i < 576; i++)
+        if (final_cache.pow34_sf[i] > peak34) peak34 = final_cache.pow34_sf[i];
+    int min_gain = 0;
+    if (peak34 > 0.0) {
+        double g_min = 210.0 - (16.0 / 3.0) * std::log2(8190.0 / peak34);
+        min_gain = static_cast<int>(std::ceil(g_min));
+        if (min_gain < 0) min_gain = 0;
+    }
+
+    // Use the target gain, but never go below min_gain (clipping protection)
+    int gain = std::max(target_gain, min_gain);
+    info.global_gain = gain;
+
     int huff_bits = quantize_and_count(mdct_in, info.ix, gain, info.scalefac,
                                        info.scalefac_scale, info.preflag,
                                        sr_index, &info.regions, &final_cache,

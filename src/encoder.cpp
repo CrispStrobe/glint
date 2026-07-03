@@ -243,6 +243,12 @@ static int mode_to_mpeg(glint_mode mode) {
 // Q31 constant for 1/sqrt(2) used in MS stereo
 static constexpr int32_t kInvSqrt2_Q31 = 1518500250; // 0.7071067811865476 * 2^31
 
+// Inter-granule 30/70 bit redistribution (-q best). Disabled: it was a net
+// win only while the pow34 curve bug capped quantization accuracy; with the
+// curve fixed it starves the quiet granule and costs ~1.9 dB SNR at -q best
+// on the speech reference (34.7 -> 32.8). Revisit with the bit reservoir.
+static constexpr bool kGranuleRedistribution = false;
+
 // Per-granule channel bit-split clamp (share of the granule's total that
 // channel 0 — mid, in M/S — may receive). Tuned on the speech reference:
 // wider clamps starve the side channel in loud passages and regress global
@@ -300,7 +306,7 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
         // Compute per-granule energy and allocate more bits to higher-energy
         // granules. This improves SNR by giving more bits where they matter.
         int bits_gr[2] = { bits_per_granule, bits_per_granule };
-        if (enc->quality_mode >= 2 && num_gr == 2 && !enc->vbr_mode) {
+        if (kGranuleRedistribution && enc->quality_mode >= 2 && num_gr == 2 && !enc->vbr_mode) {
             double energy[2] = {0, 0};
             for (int gr = 0; gr < 2; gr++)
                 for (int ch = 0; ch < nch; ch++)
@@ -413,6 +419,7 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
 
                     double* mdct_flat = &mdct_out[0][0];
 
+
                     if (enc->vbr_mode) {
                         granule_info[gr][ch] = quantize_granule_vbr(mdct_flat, gr_bits,
                             enc->sr_index, enc->quality_mode, enc->vbr_quality);
@@ -439,7 +446,7 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
             enc->subband_fp[ch].analyze(channel_data[ch], subband_out_fp[ch], num_slots);
 
         int bits_gr[2] = { bits_per_granule, bits_per_granule };
-        if (enc->quality_mode >= 2 && num_gr == 2 && !enc->vbr_mode) {
+        if (kGranuleRedistribution && enc->quality_mode >= 2 && num_gr == 2 && !enc->vbr_mode) {
             double energy[2] = {0, 0};
             for (int gr = 0; gr < 2; gr++)
                 for (int ch = 0; ch < nch; ch++)
@@ -777,7 +784,7 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
         enc->subband[ch].analyze_float(channel_data[ch], subband_out_d[ch], num_slots);
 
     int bits_gr[2] = { bits_per_granule, bits_per_granule };
-    if (enc->quality_mode >= 2 && num_gr == 2 && !enc->vbr_mode) {
+    if (kGranuleRedistribution && enc->quality_mode >= 2 && num_gr == 2 && !enc->vbr_mode) {
         double energy[2] = {0, 0};
         for (int gr = 0; gr < 2; gr++)
             for (int sb = 0; sb < 32; sb++)
