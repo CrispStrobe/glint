@@ -13,6 +13,7 @@ struct GranuleInfo {
     int16_t ix[576];
     int global_gain;
     int scalefac[21];
+    int subblock_gain[3];  // per-window gain relief (block_type 2 only)
     int scalefac_compress;
     int part2_3_length;
     int part2_length;
@@ -34,9 +35,12 @@ void quantize_set_threads(int n);
 // L/R where the side signal does not mask it, and shaping against the side
 // channel's own masks was measured to destroy joint-mode quality
 // (36.98 -> 16.47 dB SNR on speech).
+// block_type: 0 long, 1 start, 2 short (reordered 3x12 spectrum), 3 stop.
+// Types 1/2/3 use the window-switching side-info/region layout; type 2
+// additionally gets per-window subblock_gain chosen from window peaks.
 GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
                               int sr_index, int quality_mode = 0,
-                              bool short_block = false, int gain_floor = 0,
+                              int block_type = 0, int gain_floor = 0,
                               bool allow_psy = true);
 
 // VBR quantization: starts from a fixed target gain (vbr_quality 0=best to
@@ -47,7 +51,7 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
 // and the decoder desyncs ("invalid backstep").
 GranuleInfo quantize_granule_vbr(const double* mdct_in, int available_bits,
                                   int sr_index, int quality_mode, int vbr_quality,
-                                  bool short_block = false);
+                                  int block_type = 0);
 
 } // namespace glint
 
