@@ -875,7 +875,7 @@ static GranuleInfo quantize_base(const double* mdct_in, int available_bits,
                 if (band_energy[band] / max_energy > 0.01) active_bands++;
         }
 
-        if (max_energy > 0.0 && active_bands >= 3) {
+        if (max_energy > 0.0 && active_bands >= 3 && !short_block) {
             // Energy-based scalefactor assignment: give a little extra precision
             // to higher-energy bands. Modes 1/2 get their per-granule fidelity
             // from the scale search that wraps this base quantizer.

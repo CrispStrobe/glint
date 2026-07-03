@@ -152,15 +152,35 @@ backwards), and making the loop pay off at `-q normal`.
 per-band noise by the masking threshold (minimize NMR, not MSE) using the same
 search machinery. Needs metric support (see 6) to evaluate honestly.
 
-## 5. Bit reservoir rate control → short blocks — TODO (biggest ceiling, design-heavy)
+## 5. Bit reservoir + rate control — DONE (merged); short blocks still TODO
 
-Mechanism is verified on `feature/bit-reservoir` (0 backstep, transparent with
-conservative budget). Missing: the policy — per-granule perceptual-entropy
-target, save-on-easy/borrow-on-hard, cap per-frame borrowing so it stops
-regressing low bitrates (96 kbps best: 14.0 → 8.1 dB with the naive policy).
-Once merged, re-enable short blocks (`kShortBlocksEnabled`) — plosives
-currently smear through long blocks (pre-echo); short blocks cost 4–9 dB
-without a reservoir to fund them, so the order is reservoir first.
+**Reservoir + rate control (merged):** the ReservoirStream mechanism
+(continuous main-data stream, deferred frame emission, `finish_frame` unifies
+both encode paths' emission) plus a buffer-feedback constant-quality
+controller: each CBR frame may spend slot + reservoir (capped at one extra
+slot), a per-frame gain floor (`rc_anchor`) stops gold-plating on easy
+frames, and the anchor adapts ±1 gain step/frame from reservoir fill,
+tethered to an EMA of achieved gains. Gains vs no-reservoir: speech 256k
+joint 35.1 → 37.3 dB (now above LAME 256k's 36.9 on this clip), 128k +2.5,
+96k +2.6, electronic 256k 39.7 → 43.2, quartet 44.4 → 45.2, m2-64k
+18.8 → 20.8 (LAME: 17.6). Soft spot: stereo-speech mean NMR eased
+−8.8 → −7.2 while SNR rose; consider an NMR-aware anchor.
+
+**Short blocks — measured, still blocked.** Flipping `kShortBlocksEnabled`
+(with scalefactors forced 0 for short granules) on a castanet click-train:
+SNR collapses to 1.0/−0.3 dB at 128/256k (error > signal — the aliasing
+signature). Root cause: glint switches long↔short directly with **no
+start/stop transition windows** (block_type 1/3 don't exist in mdct.cpp), so
+MDCT time-domain alias cancellation breaks at every switch. A real
+implementation needs: (a) start/stop window shapes in the MDCT, (b)
+**one-granule lookahead** so the start window lands on the granule *before*
+the transient, (c) short-block scalefactor structure (12 sfb × 3 windows —
+the emission currently writes long-layout scalefactors for every granule;
+until then short granules must keep sf=0, now enforced in quantize_base),
+and (d) a short-aware `granule_mse`. Note the pre-echo reality: on the
+castanet clip glint long-blocks *beat* LAME on SNR (12.9 vs 7.1 at 128k) but
+lose badly on NMR (28.9 vs 4.8) — the smearing is perceptual, SNR can't see
+it. Judge short-block work by NMR/p95, not SNR.
 
 ## 6. Perceptual measurement — DONE (NMR in measure_audio.py, merged)
 
