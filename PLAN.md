@@ -6,9 +6,15 @@ vs −16.1, audible band-frames 0.3% vs 0.0%; electronic 43.0 vs 44.5 / NMR
 −12.4 vs −15.8; quartet 44.1 vs 46.0 / −9.3 vs −11.1 (audible 1.0%);
 castanets-128k NMR 10.2 vs 4.8 (256k: −0.5 — at the mask). MPEG-2 64k
 **21.4 vs 17.6** (glint ahead). VBR V4 40.3 dB @ 265 kbps.
-**Remaining LAME gaps**: mean NMR tail (its psymodel shapes deeper — try
-scalefac_scale=1 escalation, preflag, offset tuning), short-granule psy
-shaping + subblock_gain (the castanet-128k gap), LSF short blocks.
+**Remaining LAME gaps**: mean NMR tail (−12 vs −16 on speech; its psymodel
+shapes deeper — next: preflag, mask-offset tuning, per-band-frame outlier
+control), short-window **scalefactors** for short granules (the
+castanet-128k gap: 10.1 vs 4.8 — subblock_gain and the reservoir are in
+place, the missing tool is per-(band,window) shaping + its emission
+format), LSF short blocks.
+Done since: scalefac_scale=1 escalation (gated to bands >6 dB over mask at
+their sf cap; helps ≤128k, neutral above), energy-based subblock_gain
+(castanets 256k NMR −0.50 → −0.72; peak-based selection measured a no-op).
 Measured dead ends: transient frames taking the full reservoir + dropped
 gain floor (≈no-op for castanets, −0.9 dB NMR on speech); reservoir fill
 target 60–90% instead of 40–60% (+0.4 SNR but −0.9 NMR on speech).
