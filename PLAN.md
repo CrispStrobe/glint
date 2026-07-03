@@ -44,19 +44,32 @@ LSD −0.5 dB at all tiers, rolloff +23/+70 Hz (normal/best).
   (joint normal −0.05 dB SNR, seg-SNR and LSD worse), so it stays best-only
   with the 30/70 clamp.
 
-## 3. Outer-loop noise shaping (NMR-driven) — TODO, biggest lever for 0–1 kHz noise
+## 3. Outer-loop noise shaping (NMR-driven) — DONE at `-q best` (merged)
 
-Classic LAME-style inner/outer loop. Per band: measure quantization noise vs
-the masking threshold (25-Bark spreading + ATH already in `psycho.cpp`, only
-used by the VBR path today); amplify scalefactors of bands where noise > mask;
-re-run the gain search so global_gain coarsens to pay for it. This is the
-mechanism both failed attempts lacked: `feature/iterative-sf-amplify` and
-`feature/smr-sf-amplify` kept the gain fixed, so with a full budget every
-boost got reverted (see CLAUDE.md history). Tools to use once here:
-`scalefac_scale=1` when the 0–7 sf range is too narrow, `preflag` for the
-standard HF preemphasis pattern. Also fix the perceptual inversion in the CBR
-energy-based scalefactor assignment (loud bands get extra precision today —
-backwards; loud bands self-mask).
+`nmr_outer_loop` in quantize.cpp: amplify scalefactors of bands whose
+reconstruction noise exceeds a per-band mask, re-run the gain search so
+global_gain coarsens to pay (the mechanism both failed branches lacked —
+they kept the gain fixed), keep the best iterate by (bands-over-mask,
+log-excess), ≤10 iterations, MPEG-1 long blocks.
+Measured: best-tier SNR +0.09/+0.10 dB (stereo/joint), seg-SNR +0.07,
+mean NMR 5.12 → 5.06 dB. Cost +64% encode time at best.
+
+**Learned the hard way:**
+- The `psycho.cpp` model is unusable as an allocation target: 1.5–3 dB/Bark
+  slopes + excluded self-masking let one loud band "mask" the whole
+  spectrum; scoring with it drove SNR to −4 dB (HF polished, low bands
+  destroyed). The loop uses its own masks (−20 dB self SMR, 15 dB/band
+  spreading, ATH floor).
+- A total-noise guard (≤1.15× the start's noise) is load-bearing: the loop
+  may redistribute noise, never grow it. Loosening to 1.3× changed nothing —
+  the loop exits via convergence, not the guard, once masks are sane.
+- At `-q normal` the loop finds nothing the guard allows (2× cost, zero
+  gain) — it stays best-only; speed/normal remain byte-identical.
+
+**Still open here:** `scalefac_scale=1` when sf range is too narrow,
+`preflag` for the HF preemphasis pattern, fixing the perceptual inversion in
+the CBR energy-based scalefactor seed (loud bands get extra precision —
+backwards), and making the loop pay off at `-q normal`.
 
 ## 4. Perceptual scale-search objective — TODO (pairs with 3)
 
@@ -74,12 +87,14 @@ Once merged, re-enable short blocks (`kShortBlocksEnabled`) — plosives
 currently smear through long blocks (pre-echo); short blocks cost 4–9 dB
 without a reservoir to fund them, so the order is reservoir first.
 
-## 6. Perceptual measurement — TODO (prerequisite for honest 3/4 evaluation)
+## 6. Perceptual measurement — DONE (NMR in measure_audio.py, merged)
 
-SNR/rolloff/centroid don't register masking-aware improvements (properly
-shaped noise can lower SNR while sounding better). Add a per-Bark-band NMR
-metric to `tests/measure_audio.py`; optionally wire ViSQOL/PEAQ for a MOS-like
-score. A/B against LAME at 256 kbps as the reference target.
+`nmr_metrics` in `tests/measure_audio.py`: Bark-band noise-to-mask with
+Schroeder spreading, −14 dB offset, ATH-shaped floor calibrated ~96 dB below
+the loudest band-frame. Reports mean/p95 NMR and % band-frames over mask.
+Ranks tiers correctly (speed 6.6 > normal 5.3 > best 5.1 dB mean at
+256 kbps). Calibration is relative — compare builds on the same reference.
+Still open: ViSQOL/PEAQ for a MOS-like score; A/B against LAME at 256 kbps.
 
 ## Smaller dials (experiment-sized)
 
