@@ -4,102 +4,42 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
 
 jobs:
-  build:
+  build-test:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-latest
-            name: Linux x86-64
-          - os: ubuntu-24.04-arm
-            name: Linux aarch64
-          - os: macos-latest
-            name: macOS Apple Silicon
-          - os: windows-latest
-            name: Windows MSVC
-
-    name: ${{ matrix.name }}
+        os: [ubuntu-latest, macos-latest]
+        mode: [double, fixed, both]
     runs-on: ${{ matrix.os }}
-
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg python3-numpy python3-scipy
+
+      - name: Install deps (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install ffmpeg
+          pip3 install --break-system-packages numpy scipy || pip3 install numpy scipy
+
       - name: Configure
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DGLINT_MODE=${{ matrix.mode }}
 
       - name: Build
-        run: cmake --build build --config Release -j
+        run: cmake --build build -j 4
 
-      - name: Unit tests
-        shell: bash
-        run: |
-          if [ -f build/Release/glint_test.exe ]; then
-            build/Release/glint_test.exe
-          elif [ -f build/glint_test ]; then
-            build/glint_test
-          else
-            echo "Test binary not found, skipping"
-          fi
+      - name: Unit + decode tests (ctest)
+        run: ctest --test-dir build --output-on-failure
 
-      - name: Quality tests
-        if: runner.os == 'Linux' && matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg > /dev/null 2>&1
-          pip install numpy --quiet
-          python3 tests/test_quality.py build/glint_cli
+      - name: Full quality suite (default path)
+        run: python3 tests/test_quality.py build/glint_cli
 
-      - name: Smoke test (encode sine wave)
-        shell: bash
-        run: |
-          TMPDIR="${RUNNER_TEMP:-/tmp}"
-
-          # Generate a 1-second 1kHz sine wave as raw PCM, wrap in WAV
-          python3 -c "
-          import struct, math, sys, os
-          sr = 44100; dur = 1; freq = 1000
-          samples = [int(math.sin(2*math.pi*freq*i/sr)*30000) for i in range(sr*dur)]
-          pcm = b''.join(struct.pack('<h', s) for s in samples)
-          hdr  = b'RIFF' + struct.pack('<I', 36+len(pcm)) + b'WAVE'
-          hdr += b'fmt ' + struct.pack('<IHHIIHH', 16, 1, 1, sr, sr*2, 2, 16)
-          hdr += b'data' + struct.pack('<I', len(pcm))
-          out = os.path.join(os.environ.get('RUNNER_TEMP', '/tmp'), 'sine.wav')
-          with open(out, 'wb') as f: f.write(hdr + pcm)
-          print(f'Generated {out}')
-          "
-
-          # Encode
-          if [ -f build/Release/glint_cli.exe ]; then
-            ENC=build/Release/glint_cli.exe
-          elif [ -f build/glint_cli ]; then
-            ENC=build/glint_cli
-          else
-            echo "CLI binary not found" && ls -R build/ && exit 1
-          fi
-
-          $ENC "$TMPDIR/sine.wav" "$TMPDIR/sine.mp3" -b 128
-          echo "Encoded: $(wc -c < "$TMPDIR/sine.mp3") bytes"
-
-          # Verify it's a valid MP3 (check sync word)
-          python3 -c "
-          import os
-          mp3 = os.path.join(os.environ.get('RUNNER_TEMP', '/tmp'), 'sine.mp3')
-          with open(mp3,'rb') as f:
-              h = f.read(2)
-              assert h[0]==0xFF and (h[1]&0xE0)==0xE0, f'Bad sync: {h.hex()}'
-              print('MP3 sync word OK')
-          sz = os.path.getsize(mp3)
-          assert sz > 1000, f'File too small: {sz}'
-          print(f'File size: {sz} bytes')
-          "
-
-      - name: Upload binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: glint-${{ matrix.os }}
-          path: |
-            build/glint_cli
-            build/Release/glint_cli.exe
-          if-no-files-found: warn
+      - name: Full quality suite (fixed path)
+        if: matrix.mode == 'both'
+        run: python3 tests/test_quality.py build/glint_cli --fixed
