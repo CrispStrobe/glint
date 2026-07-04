@@ -234,17 +234,20 @@ glint_t glint_create(const glint_config* cfg) {
     if (cfg->vbr == GLINT_VBR_ON) {
         effective_bitrate =
             (tables::detect_mpeg_version(cfg->sample_rate) == 1) ? 320 : 160;
-        // GLINT_SMALL_BUFFERS caps kMaxFrameSize at 1024 bytes; a 320 kbps
-        // MPEG-1 frame (up to 1045 B at 44.1 kHz) would overflow the frame
-        // assembler. Cap the VBR budget at the largest bitrate whose padded
-        // frame fits.
-        while (effective_bitrate > 32) {
-            int mult = (tables::detect_mpeg_version(cfg->sample_rate) == 1)
-                           ? 144 : 72;
-            if (mult * effective_bitrate * 1000 / cfg->sample_rate + 1 <=
-                kMaxFrameSize)
-                break;
-            effective_bitrate -= 32;
+        // Cap the VBR budget at the largest LEGAL bitrate whose padded
+        // frame fits the assembler (kMaxFrameSize covers every legal frame
+        // in default builds; with GLINT_SMALL_BUFFERS it is a hard limit).
+        {
+            bool m1 = (tables::detect_mpeg_version(cfg->sample_rate) == 1);
+            int mult = m1 ? 144 : 72;
+            for (int i = tables::kNumBitrates - 1; i >= 0; i--) {
+                int kbps = m1 ? tables::kBitrates[i] : tables::kBitrates_M2[i];
+                if (kbps > effective_bitrate) continue;
+                if (mult * kbps * 1000 / cfg->sample_rate + 1 <= kMaxFrameSize) {
+                    effective_bitrate = kbps;
+                    break;
+                }
+            }
         }
     }
 

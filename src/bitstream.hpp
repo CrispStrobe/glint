@@ -12,7 +12,9 @@ namespace glint {
 // Maximum frame size: 320kbps at 32kHz = 320000/8/32000*1152 + padding + overhead
 // Conservative max: ~1728 bytes (for 320kbps/32kHz) + some margin
 #ifdef GLINT_SMALL_BUFFERS
-static constexpr int kMaxFrameSize = 1024;
+// 1536 covers the largest legal frame (320 kbps @ 32 kHz = 1440 B + pad);
+// 1024 could not hold 320k at any MPEG-1 rate and silently overflowed.
+static constexpr int kMaxFrameSize = 1536;
 static constexpr int kMainDataBufSize = 2048;
 #else
 static constexpr int kMaxFrameSize = 2048;

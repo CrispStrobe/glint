@@ -7,7 +7,7 @@ encoder lineage.
 Implements the full MPEG-1/2/2.5 Layer III encoding pipeline from the
 ISO 11172-3 and ISO 13818-3 standards. No third-party encoder code
 referenced. Designed for embedded and real-time use: the fixed-point
-path needs only ~60 KB RAM and no FPU.
+path needs only ~64 KB RAM and no FPU.
 
 ## Features
 
@@ -28,7 +28,7 @@ path needs only ~60 KB RAM and no FPU.
   mu-law, WAVE_FORMAT_EXTENSIBLE, raw PCM (`-r`)
 - **Streaming API**: callback-based output for real-time use
 - **Bindings**: Python (ctypes), Rust (FFI + safe), Dart (Flutter FFI)
-- **Embedded**: ~60 KB RAM (fixed-point), fits ESP32/RP2040/STM32F4
+- **Embedded**: ~64 KB RAM (fixed-point), fits ESP32/RP2040/STM32F4
 
 ## Benchmarks
 
@@ -98,13 +98,13 @@ its `shine_global_config`):
 | | glint double (desktop) | glint fixed¹ | Shine |
 |---|---|---|---|
 | Library (flash) | ~160 KB | ~90 KB | 225 KB |
-| RAM | ~213 KB | **~60 KB** | ~96 KB |
+| RAM | ~213 KB | **~64 KB** | ~96 KB |
 | License | **MIT** | **MIT** | LGPL v2 |
 
-¹ `GLINT_MODE=fixed` defines `GLINT_SMALL_BUFFERS`: smaller frame
-buffers (bitrates whose frame exceeds them are rejected / VBR budget
-capped), single-slot model caches, and a table-free cbrt — measured
-metrics-identical to the both-build's fixed path. `-q speed` avoids
+¹ `GLINT_MODE=fixed` defines `GLINT_SMALL_BUFFERS`: frame buffers sized
+to the largest legal frame (320 kbps @ 32 kHz), single-slot model
+caches, and a table-free cbrt — measured metrics-identical to the
+both-build's fixed path, full quality suite green. `-q speed` avoids
 heap allocations entirely; the higher tiers use small transient vectors
 in the scale search. Whisper ASR round-trip: 91% word similarity.
 
@@ -118,7 +118,7 @@ cmake --build build -j$(nproc)
 | Build mode | Flag | RAM footprint (measured 2026-07) |
 |---|---|---|
 | `double` (default) | — | ~213 KB |
-| `fixed` | `-DGLINT_MODE=fixed` | **~60 KB** (no FPU; small buffers, VBR budget capped at the largest frame that fits) |
+| `fixed` | `-DGLINT_MODE=fixed` | **~64 KB** (no FPU; small buffers sized for every legal frame incl. 320 kbps) |
 | `both` | `-DGLINT_MODE=both` | ~225 KB (runtime `-p` switch) |
 
 ### Cross-compilation
@@ -245,7 +245,7 @@ glint/
 │   ├── python/                ctypes wrapper + pip packaging
 │   ├── rust/                  glint-sys (FFI) + glint (safe)
 │   └── dart/                  Flutter FFI
-├── esp-idf/                   ESP32 component (~60 KB RAM)
+├── esp-idf/                   ESP32 component (~64 KB RAM)
 ├── packaging/vcpkg/           vcpkg port
 ├── .github/workflows/         CI + release (9 platforms)
 └── CMakeLists.txt
