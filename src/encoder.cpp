@@ -475,6 +475,50 @@ static int build_xing_frame(const glint_context* enc, uint8_t* out,
             }
             out[off++] = static_cast<uint8_t>(v);
         }
+        // LAME info-tag extension (gapless playback): players that parse
+        // it skip encoder-delay + 528 + 1 samples at decode start. The
+        // version field must start with "LAME" for ffmpeg & friends to
+        // read the delay fields; the remaining 5 bytes identify glint.
+        // glint's encoder delay: 528 (filterbank+MDCT chain) plus the
+        // 576-sample one-granule lookahead on the double path — matches
+        // the measured 1633-sample total offset (1104 + decoder's 529).
+        // End padding is unknown to a streaming encoder (the CLI
+        // zero-pads the final frame), so it is written as 0.
+        std::memcpy(out + off, "LAMEglint", 9);
+        off += 9;
+        out[off++] = 0x03;                 // rev 0 / VBR method "vbr-old"
+        int lp100 = enc->lp_long_start > 0
+            ? static_cast<int>((static_cast<double>(enc->lp_long_start) /
+                                576.0) * (enc->config.sample_rate / 2) / 100.0)
+            : 0;
+        out[off++] = static_cast<uint8_t>(lp100 > 255 ? 255 : lp100);
+        off += 8;                          // replaygain fields: zero
+        out[off++] = 0;                    // flags/ATH
+        out[off++] = 0;                    // ABR byte
+        uint32_t delay = enc->use_fixed_point ? 528u : 1104u;
+        uint32_t pad = 0;
+        out[off++] = static_cast<uint8_t>(delay >> 4);
+        out[off++] = static_cast<uint8_t>(((delay & 0xF) << 4) | (pad >> 8));
+        out[off++] = static_cast<uint8_t>(pad & 0xFF);
+        out[off++] = 0;                    // misc
+        out[off++] = 0;                    // mp3gain
+        out[off++] = 0; out[off++] = 0;    // surround/preset
+        out[off++] = static_cast<uint8_t>(by >> 24);   // music length
+        out[off++] = static_cast<uint8_t>(by >> 16);
+        out[off++] = static_cast<uint8_t>(by >> 8);
+        out[off++] = static_cast<uint8_t>(by);
+        out[off++] = 0; out[off++] = 0;    // music CRC (not computed)
+        // Info-tag CRC: CRC-16/ANSI (poly 0x8005, reflected, init 0) over
+        // the first 190 bytes of the frame — what foobar2000 validates
+        // before trusting the gapless fields.
+        uint16_t crc = 0;
+        for (int i = 0; i < 190 && i < size; i++) {
+            crc ^= out[i];
+            for (int k = 0; k < 8; k++)
+                crc = (crc & 1) ? (crc >> 1) ^ 0xA001 : crc >> 1;
+        }
+        out[off++] = static_cast<uint8_t>(crc >> 8);
+        out[off++] = static_cast<uint8_t>(crc & 0xFF);
     }
     return size;
 }

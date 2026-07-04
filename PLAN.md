@@ -487,9 +487,15 @@ sufficient there (it shares the encoder's mask model).
 4. **VBR psy shaping** — TODO. The VBR path skips the NMR outer loop
    entirely; enable it with the CBR slack/2 budget discipline and judge
    bytes-vs-quality honestly (the 9.8 lesson).
-5. **Gapless LAME tag** — TODO. Add encoder delay/padding to the Xing
-   frame (LAME-tag layout) so players trim the 576-sample latency and
-   the placeholder frame.
+5. **Gapless LAME tag** — DONE (merged). The finalized Xing frame now
+   carries a LAME info-tag extension ("LAMEglint" version — must start
+   with "LAME" for ffmpeg to honor it; delay=1104 double path / 528
+   fixed, matching the measured 1633-sample total minus the decoder's
+   529; end padding 0 — unknowable in a streaming encoder; info-tag
+   CRC-16 over the first 190 bytes for foobar2000). ffmpeg now decodes
+   VBR output with a 0-sample alignment offset (was ~2785 incl. the
+   placeholder frame). CBR files carry no Xing/Info frame at all —
+   adding an "Info" frame for CBR gapless is a possible follow-up.
 6. **CI (GitHub Actions)** — TODO. Build matrix (double/fixed/both) +
    ctest incl. the m2 decode test (ffmpeg installs in runners). The wire
    -format history is the argument.
