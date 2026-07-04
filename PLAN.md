@@ -20,8 +20,12 @@ header. Stereo speech tiers: 36.7/36.1/36.2 at NMR −8.6/−11.0/−11.1
 **Remaining LAME gaps** (updated 2026-07-04): speech NMR tail (−13.7 vs
 −16.1, in-house metric only — ODG calls speech-128 for glint and PESQ
 for LAME), the drums/castanets 128k ODG gap (−1.18/−0.62 vs LAME's
-−1.03/−0.29 — attack CHARACTER, not bits: detector sensitivity, banking
-and mixed-block premises all measured out), quartet/piano SNR at 256k
+−1.03/−0.29 — attack CHARACTER, not bits: detector sensitivity at 4x/6x/8x
+identical on drums, an HF-band (subband>=8) detector term fired on piano
+hammers and speech consonants instead (ODG −0.63→−0.86 / −1.26→−1.48,
+reverted), and banking/mixed-block premises measured out earlier; the
+remaining suspects are LAME's pre-echo bit control inside the attack
+frame and its different short-window scalefactor tuning), quartet/piano SNR at 256k
 (masked per NMR/ODG). ~~castanets mean NMR~~ — CLOSED 2026-07-04 by the
 6x attack threshold: 128k 8.0→−2.1 (LAME 2.6 — glint ahead), 256k
 −3.9→−9.7 (LAME −8.6 — glint ahead).
