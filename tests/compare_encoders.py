@@ -51,7 +51,13 @@ except ImportError:
     stoi_fn = None
 
 PEAQB = os.environ.get("PEAQB", "/tmp/peaqb-fast/src/peaqb")
-VISQOL = os.environ.get("VISQOL", "/tmp/visqol/bazel-bin/visqol")
+# The Rust port (`cargo install visqol`) — the upstream bazel build of
+# google/visqol v3.3.3 no longer compiles against current Xcode SDKs
+# (2022-era TF/zlib pins). The port is conformance-tested against v3.1;
+# it needs google/visqol's libsvm model file for fullband mode.
+VISQOL = os.environ.get("VISQOL", os.path.expanduser("~/.cargo/bin/visqol"))
+VISQOL_MODEL = os.environ.get(
+    "VISQOL_MODEL", "/tmp/visqol/model/libsvm_nu_svr_model.txt")
 
 DEFAULT_CLIPS = [
     ("speech", "/tmp/glint_ref.wav", True),
@@ -124,11 +130,12 @@ def peaq_odg(ref48, mp3, tmpdir):
 
 
 def visqol_mos(ref48, mp3, tmpdir):
-    """ViSQOL audio-mode MOS-LQO (needs 48 kHz input)."""
+    """ViSQOL fullband (audio-mode) MOS-LQO at 48 kHz via visqol-rs."""
     import re
     rp, tp = aligned_pair48(ref48, mp3, tmpdir)
     out = subprocess.run([VISQOL, "--reference_file", rp,
-                          "--degraded_file", tp],
+                          "--degraded_file", tp, "fullband",
+                          "--similarity_to_quality_model", VISQOL_MODEL],
                          capture_output=True, text=True, timeout=600).stdout
     m = re.search(r"MOS-LQO:\s+([\d.]+)", out)
     return float(m.group(1)) if m else float("nan")
@@ -189,7 +196,7 @@ def main():
     print("contenders:", ", ".join(n for n, _ in encs))
     print("channel mode:", args.mode)
     has_peaq = have(PEAQB)
-    has_visqol = have(VISQOL)
+    has_visqol = have(VISQOL) and os.path.isfile(VISQOL_MODEL)
     if pesq_fn is None:
         print("(pesq not installed — PESQ column skipped)")
     if stoi_fn is None:

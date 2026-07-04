@@ -267,10 +267,18 @@ Standings at 2026-07 (CBR, joint):
 Extended 2026-07: PEAQ basic-model ODG for every clip via peaqb-fast
 (built at /tmp/peaqb-fast, github.com/akinori-ito/peaqb-fast — plain
 autotools; peaqb does NOT time-align, the harness feeds it an aligned
-48 kHz 20 s pair or every score saturates at −4), ViSQOL MOS-LQO when
-its binary exists (bazel build of github.com/google/visqol v3.3.3;
-needs USE_BAZEL_VERSION pinned and the dead armadillo sourceforge URL
-patched to the gitlab mirror), and a `--mode mono` low-rate ladder.
+48 kHz 20 s pair or every score saturates at −4), ViSQOL MOS-LQO via the
+Rust port (`cargo install visqol`, fullband mode with google/visqol's
+libsvm model file — the upstream bazel build no longer compiles against
+current Xcode SDKs: bazel 5's crosstool aborts, bazel 6 removed the
+platforms API its 2022 TF pin needs, and the cpp-only toolchain trips
+over TF's zlib on the macOS 26 SDK), and a `--mode mono` ladder.
+**Treat ViSQOL with caution on these clips**: it ranks Shine (audibly
+the worst encoder by every other measure, NMR −3 vs −14) ABOVE glint
+and LAME on quartet-256 (4.67 vs 4.38/4.63) and above glint on
+electronic-256 — its fullband SVR model appears insensitive to MP3's
+actual artifact classes here. ODG (PEAQ) and PESQ remain the trusted
+external models; keep MOS as a gross-artifact tripwire only.
 Mono-64k speech ladder standings: LAME ahead on BOTH perceptual models
 (ODG −2.47 vs glint-normal −2.94, PESQ 4.44 vs 4.22) while glint wins
 SNR/NMR — consistent with the 128k PESQ finding: below ~128k, speech
