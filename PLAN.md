@@ -353,9 +353,17 @@ m2, joint/stereo, CBR/VBR), 0 backstep, unit tests, double==fixed metrics.
    +0.34/−11.05, quartet 44.87/−14.01, m2-64k 21.06/2.41, VBR V4 −1.4%
    bytes at identical quality; electronic/castanets hold. 0 backstep,
    ffmpeg+CoreAudio validated.
-8. **NMR-driven VBR allocation** — TODO. Replace the fixed
-   vbr_target_gain table: pick the per-granule gain floor from the psy
-   masks so V-levels track perceptual quality instead of raw gain.
+8. **NMR-driven VBR allocation** — DEAD END as designed (2026-07).
+   Per-granule floor = coarsest gain whose analytic band noise stays
+   within mask*offset(V) (offset −9 dB at V0 … +18 dB at V9, binary
+   search, pow34 precomputed). Result: NOT more efficient — at V4 it
+   spends +15% bytes for better NMR, but the fixed table interpolated to
+   EQUAL bytes still wins (quartet: table-V0 2399 kB/−15.6 vs psy-V4
+   2385 kB/−15.0); at V9 the permissive offset drives the floor to gain
+   ~220 and output collapses to near-silence. The fixed table + frame
+   budget feedback is the better allocator; a real win would need the
+   full outer-loop shaping in the VBR path (it currently has none), not
+   a smarter floor. Reverted.
 9. **White-noise pathology** — TODO (edge case). Full-scale white noise
    decodes +11 dB hot and clipped; suspect the +0.4054 bias at
    ultra-coarse gains when the 4095-bit cap binds (item 2's offset work
