@@ -24,9 +24,11 @@ Usage:
 
 Defaults use the canonical clips from CLAUDE.md if present.
 Requires: numpy, scipy, ffmpeg; optional: pesq, pystoi, lame, shineenc,
-peaqb (PEAQB env or /tmp/peaqb-fast/src/peaqb; build from
-github.com/akinori-ito/peaqb-fast), visqol (VISQOL env or
-/tmp/visqol/bazel-bin/visqol; bazel build from github.com/google/visqol).
+peaqb (PEAQB env, default ~/code/glint-tools/peaqb-fast/src/peaqb; build
+from github.com/akinori-ito/peaqb-fast), visqol (`cargo install visqol`
+plus google/visqol's model file at VISQOL_MODEL, default
+~/code/glint-tools/visqol-model/). See ~/code/glint-tools/ for the
+persistent tool checkouts.
 """
 
 import argparse
@@ -50,14 +52,16 @@ try:
 except ImportError:
     stoi_fn = None
 
-PEAQB = os.environ.get("PEAQB", "/tmp/peaqb-fast/src/peaqb")
+PEAQB = os.environ.get(
+    "PEAQB", os.path.expanduser("~/code/glint-tools/peaqb-fast/src/peaqb"))
 # The Rust port (`cargo install visqol`) — the upstream bazel build of
 # google/visqol v3.3.3 no longer compiles against current Xcode SDKs
 # (2022-era TF/zlib pins). The port is conformance-tested against v3.1;
 # it needs google/visqol's libsvm model file for fullband mode.
 VISQOL = os.environ.get("VISQOL", os.path.expanduser("~/.cargo/bin/visqol"))
 VISQOL_MODEL = os.environ.get(
-    "VISQOL_MODEL", "/tmp/visqol/model/libsvm_nu_svr_model.txt")
+    "VISQOL_MODEL",
+    os.path.expanduser("~/code/glint-tools/visqol-model/libsvm_nu_svr_model.txt"))
 
 DEFAULT_CLIPS = [
     ("speech", "/tmp/glint_ref.wav", True),
@@ -172,7 +176,8 @@ def speech_scores(ref16, dec16):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--glint", default="build/glint_cli")
-    ap.add_argument("--shine", default="/tmp/shine/shineenc")
+    ap.add_argument("--shine",
+                    default=os.path.expanduser("~/code/glint-tools/shine/shineenc"))
     ap.add_argument("--bitrates", type=int, nargs="+", default=[128, 256])
     ap.add_argument("--mode", choices=["joint", "mono"], default="joint")
     ap.add_argument("--clips", nargs="*", default=None,

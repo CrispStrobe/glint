@@ -265,14 +265,17 @@ Standings at 2026-07 (CBR, joint):
 - glint-speed on quartet-128 (NMR −0.8 vs normal's −3.8) shows what the
   psy shaping buys.
 Extended 2026-07: PEAQ basic-model ODG for every clip via peaqb-fast
-(built at /tmp/peaqb-fast, github.com/akinori-ito/peaqb-fast — plain
-autotools; peaqb does NOT time-align, the harness feeds it an aligned
-48 kHz 20 s pair or every score saturates at −4), ViSQOL MOS-LQO via the
-Rust port (`cargo install visqol`, fullband mode with google/visqol's
-libsvm model file — the upstream bazel build no longer compiles against
+(github.com/akinori-ito/peaqb-fast, plain autotools; peaqb does NOT
+time-align, the harness feeds it an aligned 48 kHz 20 s pair or every
+score saturates at −4), ViSQOL MOS-LQO via the Rust port
+(`cargo install visqol`, fullband mode with google/visqol's libsvm
+model file — the upstream bazel build no longer compiles against
 current Xcode SDKs: bazel 5's crosstool aborts, bazel 6 removed the
 platforms API its 2022 TF pin needs, and the cpp-only toolchain trips
 over TF's zlib on the macOS 26 SDK), and a `--mode mono` ladder.
+The tools live PERSISTENTLY in ~/code/glint-tools/ (peaqb-fast/, shine/
+— static-built with --disable-shared, visqol-model/); the visqol binary
+itself is ~/.cargo/bin/visqol. The harness defaults point there.
 **Treat ViSQOL with caution on these clips**: it ranks Shine (audibly
 the worst encoder by every other measure, NMR −3 vs −14) ABOVE glint
 and LAME on quartet-256 (4.67 vs 4.38/4.63) and above glint on
