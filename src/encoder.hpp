@@ -60,6 +60,10 @@ struct glint_context {
     // bounds the anchor's drift.
     int rc_anchor;
     int rc_gain_ema_x16;
+    int rc_frames_since_short;  // transient-adaptive banking: while recent
+                                // frames contained short blocks, the fill
+                                // target rises so the NEXT attack in a
+                                // burst train finds a fuller reservoir
 
     glint::FrameAssembler frame_asm;
     // Sized to hold several frames: with the reservoir, one encode call can

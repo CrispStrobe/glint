@@ -485,10 +485,19 @@ sufficient there (it shares the encoder's mask model).
    slack/2 shaping budget bind long before mask SHAPE matters — the
    same lesson as 9.3/9.5 from the other direction. Mask-model work is
    exhausted as a lever until the guard/budget structure changes.
-3. **Attack bit banking** — TODO. Extend the encoder lookahead to 2-3
-   granules so the rate controller can deliberately underspend ahead of
-   a detected attack and release the banked reservoir at the transient
-   (the piece the "spend whole reservoir at attacks" dead end lacked).
+3. **Attack bit banking** — repurposed into a WIN (merged as
+   post-transient reservoir banking). The original goal is dead: on
+   castanets the trivial inter-burst bed keeps the reservoir AT CAP
+   before every attack (banking variants were bit-identical), so the
+   castanets mean gap is definitively NOT a bits-at-attack problem —
+   scratch lookahead extension for that purpose. But the mechanism
+   (fill target 70-90% + anchor clamp ema+24 for ~0.7 s after any
+   short-block frame) is a measured win wherever transients neighbor
+   hard content: electronic-256 NMR −15.9→−18.0 (now clearly ahead of
+   LAME's −16.1) at +1.26 dB SNR, electronic-128 +1.41 dB / NMR −0.85,
+   speech-128 +0.62 dB / audible 14.1→13.3%, speech-256 +0.43 dB.
+   Quartet/castanets bit-identical (state never triggers / no
+   headroom). Enabled by default.
 4. **VBR psy shaping** — TODO. The VBR path skips the NMR outer loop
    entirely; enable it with the CBR slack/2 budget discipline and judge
    bytes-vs-quality honestly (the 9.8 lesson).
