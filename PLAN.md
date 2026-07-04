@@ -29,8 +29,13 @@ for LAME), the drums/castanets 128k ODG gap (−1.18/−0.62 vs LAME's
 identical on drums, an HF-band (subband>=8) detector term fired on piano
 hammers and speech consonants instead (ODG −0.63→−0.86 / −1.26→−1.48,
 reverted), and banking/mixed-block premises measured out earlier; the
-remaining suspects are LAME's pre-echo bit control inside the attack
-frame and its different short-window scalefactor tuning), quartet/piano SNR at 256k
+remaining suspects were LAME's pre-echo control and short-window tuning
+— also now measured out: tightening pre-attack window masks inside
+short granules is a wash (castanets +0.02 ODG, speech −0.02, drums
+untouched — drums has only 1.6% shorts and LAME's own block counts are
+similar at 2.7%; the drums gap is diffuse psymodel character, not any
+single mechanism; investigation closed at diminishing returns),
+quartet/piano SNR at 256k
 (masked per NMR/ODG). ~~castanets mean NMR~~ — CLOSED 2026-07-04 by the
 6x attack threshold: 128k 8.0→−2.1 (LAME 2.6 — glint ahead), 256k
 −3.9→−9.7 (LAME −8.6 — glint ahead).
