@@ -547,7 +547,15 @@ sufficient there (it shares the encoder's mask model).
     Reverted. The remaining normal-tier cost is inherent to shaping;
     next real lever would be evaluating candidates on the thread pool
     (the -j machinery), not caching.
-11. **Mixed blocks** — TODO (big, stretch). mixed_block_flag=1 (long LF +
-    short HF) keeps bass resolution through attacks; new MDCT hybrid,
-    scalefactor semantics, and region layout.
-12. **Intensity stereo / ABR** — stretch, only if 1-11 land.
+11. **Mixed blocks** — DESCOPED on evidence (2026-07). The feature buys
+    LF resolution during short-block frames, but glint's castanets-128k
+    0-1k band-SNR is already 31.8 dB vs LAME's 24.9 — 7 dB AHEAD in
+    exactly the region mixed blocks improve (subblock_gain + short
+    scalefactors cover it). The remaining perceptual gap (ODG −0.63 vs
+    −0.29) is not an LF problem, so the largest wire-format surface in
+    the format (per-subband window chains, dual scalefactor layout,
+    switch_point regions) would target a non-problem. Revisit only if a
+    clip ever shows an LF-during-transients deficit.
+12. **Intensity stereo / ABR** — not attempted (the queue's measured
+    priorities ran out before them; intensity stereo only matters below
+    the rates glint targets, ABR is a rate-control mode without a user).
