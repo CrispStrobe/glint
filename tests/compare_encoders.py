@@ -173,6 +173,69 @@ def speech_scores(ref16, dec16):
     return p, s
 
 
+def gate_mode(args):
+    """Regression gate: measure glint-best on every (clip, bitrate) and
+    compare against recorded baselines. Metrics are SNR (higher better),
+    mean NMR (lower better) and audible band-frame %% (lower better) —
+    the fast, deterministic subset (no ODG/PESQ; those gate manually).
+    Baselines are machine+ffmpeg-version specific: regenerate with
+    --write-baselines after intentional quality changes."""
+    import json
+    import tempfile
+    g = args.glint
+    if not have(g):
+        print(f"encoder not found: {g}")
+        sys.exit(1)
+    clips = ([c for c in DEFAULT_CLIPS if os.path.isfile(c[1])]
+             if not args.clips else
+             [(c.split("=", 1)[0],
+               c.split("=", 1)[1].replace(":speech", ""),
+               c.endswith(":speech")) for c in args.clips])
+    tmpdir = tempfile.mkdtemp(prefix="enc_gate_")
+    results = {}
+    for cname, cpath, _sp in clips:
+        sr = ma.probe_sr(cpath)
+        ref = ma.load_mono(cpath, sr)
+        for kbps in args.bitrates:
+            mp3 = os.path.join(tmpdir, f"{cname}_{kbps}.mp3")
+            r = subprocess.run([g, "-b", str(kbps), "-m", args.mode if args.mode != "joint" else "joint",
+                                "-q", "best", "-p", "double", cpath, mp3],
+                               capture_output=True, timeout=600)
+            if r.returncode != 0:
+                print(f"ENCODE FAILED: {cname}@{kbps}")
+                sys.exit(1)
+            dec = ma.load_mono(mp3, sr)
+            snr, _seg, _l, _b, _n = ma.fidelity(ref, dec, sr)
+            nm, _p95, pos = ma.nmr_metrics(ref, dec, sr)
+            results[f"{cname}@{kbps}"] = {
+                "snr": round(snr, 2), "nmr": round(nm, 2), "aud": round(pos, 2)}
+    if args.write_baselines:
+        with open(args.write_baselines, "w") as f:
+            json.dump(results, f, indent=1, sort_keys=True)
+        print(f"wrote {len(results)} baselines to {args.write_baselines}")
+        return
+    with open(args.check) as f:
+        base = json.load(f)
+    failed = False
+    for key, cur in sorted(results.items()):
+        if key not in base:
+            print(f"{key:<18} NEW (no baseline)")
+            continue
+        b = base[key]
+        d_snr = cur["snr"] - b["snr"]
+        d_nmr = cur["nmr"] - b["nmr"]
+        d_aud = cur["aud"] - b["aud"]
+        bad = (d_snr < -args.tol_snr or d_nmr > args.tol_nmr
+               or d_aud > args.tol_aud)
+        mark = "FAIL" if bad else "ok"
+        print(f"{key:<18} {mark}  SNR {cur['snr']:6.2f} ({d_snr:+.2f})  "
+              f"NMR {cur['nmr']:6.2f} ({d_nmr:+.2f})  "
+              f"aud {cur['aud']:5.2f} ({d_aud:+.2f})")
+        failed |= bad
+    print("REGRESSION" if failed else "ALL WITHIN TOLERANCE")
+    sys.exit(1 if failed else 0)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--glint", default="build/glint_cli")
@@ -182,6 +245,15 @@ def main():
     ap.add_argument("--mode", choices=["joint", "mono"], default="joint")
     ap.add_argument("--clips", nargs="*", default=None,
                     help="name=path[:speech] entries; default = canonical set")
+    ap.add_argument("--write-baselines", metavar="FILE",
+                    help="run glint-best over the clips/bitrates and record "
+                         "SNR/NMR/aud%% per (clip,rate) into FILE")
+    ap.add_argument("--check", metavar="FILE",
+                    help="regression gate: re-measure glint-best and fail if "
+                         "any metric regresses past the tolerances")
+    ap.add_argument("--tol-snr", type=float, default=0.3)
+    ap.add_argument("--tol-nmr", type=float, default=0.5)
+    ap.add_argument("--tol-aud", type=float, default=1.0)
     args = ap.parse_args()
 
     if args.clips:
@@ -193,6 +265,10 @@ def main():
             clips.append((name, path, speech))
     else:
         clips = [c for c in DEFAULT_CLIPS if os.path.isfile(c[1])]
+
+    if args.write_baselines or args.check:
+        gate_mode(args)
+        return
 
     encs = contenders(args)
     if not encs:
