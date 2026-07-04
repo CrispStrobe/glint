@@ -24,7 +24,10 @@ header. Stereo speech tiers: 36.7/36.1/36.2 at NMR −8.6/−11.0/−11.1
 (normal/best trade ~0.6 dB SNR for NMR vs the target-1.0 era).
 **Remaining LAME gaps** (updated 2026-07-04): speech NMR tail (−13.7 vs
 −16.1, in-house metric only — ODG calls speech-128 for glint and PESQ
-for LAME), the drums/castanets 128k ODG gap (−1.18/−0.62 vs LAME's
+for LAME; INFORMAL LISTENING 2026-07-04: the maintainer could not tell
+glint-128 from LAME-128 on the speech clip, so the model contradiction
+is below this listener's audibility threshold — do not spend further
+tuning effort on speech-128 metric deltas of this size), the drums/castanets 128k ODG gap (−1.18/−0.62 vs LAME's
 −1.03/−0.29 — attack CHARACTER, not bits: detector sensitivity at 4x/6x/8x
 identical on drums, an HF-band (subband>=8) detector term fired on piano
 hammers and speech consonants instead (ODG −0.63→−0.86 / −1.26→−1.48,
