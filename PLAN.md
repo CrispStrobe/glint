@@ -476,10 +476,15 @@ sufficient there (it shares the encoder's mask model).
    remaining mono-64 PESQ lead is not bandwidth). Discovered en route:
    LAME's own low-rate lever is RESAMPLING (64k stereo → 24 kHz LSF,
    96k → 32 kHz); an auto-resample would be a CLI-level feature.
-2. **Tonality-adaptive mask offset** — TODO. The psy loops use a flat
-   −14 dB offset; real maskers differ ~15 dB between tonal and noisy
-   bands. Cheap per-band tonality (spectral flatness or inter-frame
-   prediction) modulating the offset (tonal stricter, noisy looser).
+2. **Tonality-adaptive mask offset** — DEAD END (measured 2026-07).
+   Per-band SFM → tonality index, per-masker offset inside the
+   spreading sum, two ranges tried (−6…−18 dB and −4…−24 dB): a
+   complete no-op on PESQ/ODG at 64/128/256k speech, quartet and
+   electronic (all deltas ≤0.03 ODG / ≤0.03 PESQ, some NMR hair worse).
+   In this architecture the outer loop's total-noise guard and the
+   slack/2 shaping budget bind long before mask SHAPE matters — the
+   same lesson as 9.3/9.5 from the other direction. Mask-model work is
+   exhausted as a lever until the guard/budget structure changes.
 3. **Attack bit banking** — TODO. Extend the encoder lookahead to 2-3
    granules so the rate controller can deliberately underspend ahead of
    a detected attack and release the banked reservoir at the transient
