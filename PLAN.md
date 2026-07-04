@@ -241,6 +241,30 @@ content within 0.4 dB at unchanged NMR.
   lowpass + the 44.1k short-table fix (see scoreboard).
 - `GLINT_FORCE_SHORT=1` forces all-short for diagnostics.
 
+## 6b. Encoder league table — tests/compare_encoders.py (2026-07)
+
+Automated comparison harness: encodes every clip with glint
+(speed/normal/best), LAME (`lame -q2`/`-q0`), and Shine (`shineenc`,
+build from github.com/toots/shine — fixed-point, no psymodel: a floor
+baseline), decodes via ffmpeg, reports SNR/seg-SNR/NMR (+PESQ-WB and
+STOI via pip `pesq`/`pystoi` for speech clips) and encode speed.
+Standings at 2026-07 (CBR, joint):
+- Music: glint ahead or tied at BOTH rates — electronic-128 decisively
+  (NMR −6.3 vs LAME −3.1, audible 5.4% vs 16%), electronic-256 tied
+  (−16.0 vs −16.1), quartet-128 −3.8 vs −2.0, quartet-256 −14.0 vs −11.2.
+- Speech-256: LAME ahead on NMR (−15.5 vs −13.8), PESQ saturated/tied
+  (4.62-4.64), glint ahead on SNR (38.0 vs 35.9).
+- Speech-128: glint ahead on NMR (−2.9 vs −2.2) and audible (14% vs 20%)
+  BUT **PESQ prefers LAME (4.57 vs 4.43)** — the first independent
+  perceptual model disagreeing with our NMR ranking. Our NMR metric and
+  the encoder share the mask model, so it is partially self-confirming;
+  treat low-rate speech tuning wins as unproven until PESQ agrees.
+  (PESQ is only discriminative below ~192k; at 256k everything including
+  Shine scores 4.6.)
+- Shine: 10-20 dB below everyone everywhere (psymodel-free floor ✓).
+- glint-speed on quartet-128 (NMR −0.8 vs normal's −3.8) shows what the
+  psy shaping buys.
+
 ## 6. Perceptual measurement — DONE (NMR in measure_audio.py, merged)
 
 `nmr_metrics` in `tests/measure_audio.py`: Bark-band noise-to-mask with
