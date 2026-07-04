@@ -375,8 +375,11 @@ m2, joint/stereo, CBR/VBR), 0 backstep, unit tests, double==fixed metrics.
    Level- and bitrate-independent by construction. LAME measures 8.9 dB
    via its 17.5k lowpass + exact level. Not a defect worth machinery;
    revisit only if the level bias shows up on real content.
-10. **fast_pow34 fast path** — TODO-if-hot: profile first; encode times
-    were unchanged when it became std::pow.
+10. **fast_pow34 fast path** — NOT NEEDED (profiled 2026-07, macOS
+    `sample` on -q best speech): std::pow is absent from the flat
+    profile; exp2 (pow's backend plus the mask model's pow10) totals
+    ~1.3%. The heat is in huffman_select_and_count / quantize_and_count
+    / gain_search (~55%) as pass 3 found. No fast path.
 11. **Speed re-measure + docs** — TODO. All ×-realtime figures predate
     the 2026-07 pass and were taken under load; re-measure (at least
     relative, interleaved A/B) and refresh README/CLAUDE.md.
