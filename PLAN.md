@@ -308,11 +308,14 @@ m2, joint/stereo, CBR/VBR), 0 backstep, unit tests, double==fixed metrics.
    quartet ≈, at +2 quantize_base runs/granule. MSE cannot see what the
    NMR metric penalizes here. Reverted; per-BAND offsets (LAME's actual
    trick is tonality-dependent) would need a tonality estimate first.
-3. **Per-band-frame outlier control** — TODO. The metric's mean-dB is
-   dominated by the worst band-frames (castanets: p95 already beats LAME
-   while the mean doesn't). Try an objective term that squashes outliers
-   (e.g. minimize Σmax(NMR,0) or a soft-max weight) instead of the plain
-   linear sum.
+3. **Per-band-frame outlier control** — DEAD END (measured 2026-07).
+   Two alternative outer-loop objectives tried: Σlog(max(r, target))
+   (matches the metric's mean-dB) and Σmax(r−target, 0) (audible-excess
+   only). Log objective: castanets-128k mean 8.37→7.99 but everything
+   else a hair WORSE (elec −15.92→−15.87, quartet −13.87→−13.81, m2
+   speech 2.50→2.59, stereo SNR −0.07); excess objective: pure no-op.
+   The castanets mean outliers are attack-frame-local — there the noise
+   guard and shaping budget bind, not the objective's shape. Reverted.
 4. **Xing/VBRI header for VBR** — TODO. Players currently misreport
    duration/seek for VBR files. Emit a Xing frame (frame count, bytes,
    TOC) as frame 0; CLI rewrites it after flush (streaming callers get a
