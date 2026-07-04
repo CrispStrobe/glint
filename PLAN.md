@@ -527,9 +527,17 @@ sufficient there (it shares the encoder's mask model).
 9. **Fixed-point short blocks** — TODO (big). Port the window scheduler +
    short MDCT to the fixed path so embedded builds match desktop
    transient quality.
-10. **Psy-loop noise caching** — TODO (perf). Normal tier is +60% vs
-    pre-pass; cache per-band noise across outer-loop iterations where
-    possible.
+10. **Psy-loop noise caching** — DEAD END as planned (2026-07). The
+    -q normal profile shows compute_band_noise at 2% — caching it is
+    pointless. The psy loop's real cost is its per-iteration gain
+    re-searches (select_and_count + quantize_and_count ≈ 52% of the
+    tier), already LUT-optimal since perf pass 3. A warm-started binary
+    search (lower bound seeded from the previous iterate's gain, -4
+    margin) was metrics-identical but measured 0% faster — the probe
+    count barely shrinks and probe cost concentrates near the answer.
+    Reverted. The remaining normal-tier cost is inherent to shaping;
+    next real lever would be evaluating candidates on the thread pool
+    (the -j machinery), not caching.
 11. **Mixed blocks** — TODO (big, stretch). mixed_block_flag=1 (long LF +
     short HF) keeps bass resolution through attacks; new MDCT hybrid,
     scalefactor semantics, and region layout.
