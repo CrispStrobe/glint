@@ -49,8 +49,9 @@ this clip: 38.4 dB SNR vs LAME 256k's 36.9**, with mean noise-to-mask
 mask (LAME 0.0%). Music (256 kbps joint): electronic 44.8 dB / **NMR
 −18.0** (LAME 44.5 / −15.8 — glint ahead on both), string quartet 44.9 /
 **−14.0** with 0.0% audible (LAME 46.0 / −11.1 — glint ahead on NMR).
-Transients (castanet burst train, 128 kbps): audible band-frames 2.5%
-vs LAME's 6.2%, p95 NMR −1.7 vs 2.6. Low rates: at 64 kbps stereo the
+Transients (castanet burst train): glint ahead of LAME on mean NMR at
+both rates (128k: −2.1 vs 2.6; 256k: −9.7 vs −8.6) with audible
+band-frames 2.4% vs 6.2%. Low rates: at 64 kbps stereo the
 bitrate-scaled lowpass puts glint ahead of LAME on PEAQ ODG (−3.17 vs
 −3.32). VBR with real variable-size frames, a Xing header and a gapless
 LAME tag (players seek, report duration, and trim the codec delay
