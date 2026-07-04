@@ -13,7 +13,9 @@
 
 using namespace glint;
 
-#if !defined(GLINT_FIXED_POINT) || defined(GLINT_BOTH_PATHS)
+// (Shared by both signal paths: the reorder operates on doubles, which the
+// fixed path produces after its Q24->double conversion, and the scheduler
+// only touches integer context state.)
 // Reorder short-block MDCT coefficients from [subband][window][freq] to
 // the order expected by the decoder: grouped by scalefactor band, then
 // window interleaved.  ISO 11172-3 B.8 short block reorder.
@@ -122,8 +124,6 @@ static void schedule_block_types(glint_context* enc,
 
 // Short blocks: enabled together with the transition-window scheduler above.
 static constexpr bool kShortBlocksEnabled = true;
-
-#endif // double-precision path helpers
 
 // Encoder-side lowpass: zero everything from the context's precomputed
 // start index before quantization.
@@ -305,6 +305,10 @@ glint_t glint_create(const glint_config* cfg) {
 #if !defined(GLINT_FIXED_POINT) || defined(GLINT_BOTH_PATHS)
     std::memset(ctx->held_sub_d, 0, sizeof(ctx->held_sub_d));
     ctx->have_held = false;
+#endif
+#ifdef GLINT_FIXED_POINT
+    std::memset(ctx->held_sub_fp, 0, sizeof(ctx->held_sub_fp));
+    ctx->have_held_fp = false;
 #endif
 
     ctx->write_cb = nullptr;
@@ -496,7 +500,8 @@ static int build_xing_frame(const glint_context* enc, uint8_t* out,
         off += 8;                          // replaygain fields: zero
         out[off++] = 0;                    // flags/ATH
         out[off++] = 0;                    // ABR byte
-        uint32_t delay = enc->use_fixed_point ? 528u : 1104u;
+        uint32_t delay = 1104u;  // 528 filterbank chain + 576 lookahead
+                                 // (both signal paths since PLAN 10.9)
         uint32_t pad = 0;
         out[off++] = static_cast<uint8_t>(delay >> 4);
         out[off++] = static_cast<uint8_t>(((delay & 0xF) << 4) | (pad >> 8));
@@ -1022,9 +1027,48 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
 #ifdef GLINT_FIXED_POINT
     // Helper lambda: encode one frame through the fixed-point Q24 path
     auto encode_fixed = [&]() {
+        int32_t sb_new_fp[2][32][36];
+        for (int ch = 0; ch < nch; ch++)
+            enc->subband_fp[ch].analyze(channel_data[ch], sb_new_fp[ch], num_slots);
+
+        // One-granule encoder lookahead, mirroring the double path: emitted
+        // frame = held granule + this call's granules minus the last, which
+        // becomes the new held granule. glint_flush releases it.
         int32_t subband_out_fp[2][32][36];
         for (int ch = 0; ch < nch; ch++)
-            enc->subband_fp[ch].analyze(channel_data[ch], subband_out_fp[ch], num_slots);
+            for (int sb = 0; sb < 32; sb++) {
+                for (int ts = 0; ts < 18; ts++)
+                    subband_out_fp[ch][sb][ts] =
+                        enc->have_held_fp ? enc->held_sub_fp[ch][sb][ts] : 0;
+                for (int g = 1; g < num_gr; g++)
+                    for (int ts = 0; ts < 18; ts++)
+                        subband_out_fp[ch][sb][g * 18 + ts] =
+                            sb_new_fp[ch][sb][(g - 1) * 18 + ts];
+                for (int ts = 0; ts < 18; ts++)
+                    enc->held_sub_fp[ch][sb][ts] =
+                        sb_new_fp[ch][sb][(num_gr - 1) * 18 + ts];
+            }
+        enc->have_held_fp = true;
+
+        // Block-type scheduling (see encode_double).
+        int btypes[2] = { 0, 0 };
+        if (kShortBlocksEnabled && enc->quality_mode >= 1) {
+            double gr_energy[3] = { 0.0, 0.0, 0.0 };
+            for (int g = 0; g < num_gr; g++)
+                for (int ch = 0; ch < nch; ch++)
+                    for (int sb = 0; sb < 32; sb++)
+                        for (int ts = g * 18; ts < g * 18 + 18; ts++) {
+                            double v = static_cast<double>(subband_out_fp[ch][sb][ts]);
+                            gr_energy[g] += v * v;
+                        }
+            for (int ch = 0; ch < nch; ch++)
+                for (int sb = 0; sb < 32; sb++)
+                    for (int ts = 0; ts < 18; ts++) {
+                        double v = static_cast<double>(enc->held_sub_fp[ch][sb][ts]);
+                        gr_energy[num_gr] += v * v;
+                    }
+            schedule_block_types(enc, gr_energy, num_gr, btypes);
+        }
 
         int bits_gr[2] = { bits_per_granule, bits_per_granule };
         if (kGranuleRedistribution && enc->quality_mode >= 2 && num_gr == 2 && !enc->vbr_mode) {
@@ -1082,6 +1126,7 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
 
             for (int ch = 0; ch < nch; ch++) {
                 int gr_bits = bits_ch[ch];
+                int bt = btypes[gr];
 
                 // Frequency inversion and extract granule slice in one pass
                 int32_t sub_gr[32][18];
@@ -1091,23 +1136,33 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                         sub_gr[sb][ts] = ((sb & 1) && (ts & 1)) ? -v : v;
                     }
 
-                // Fused MDCT + alias reduction + Q24->double conversion.
-                // Outputs flat double[576] directly for the quantizer.
                 double mdct_flat[576];
-                enc->mdct_fp[ch].process_and_convert(sub_gr, mdct_flat);
-                apply_lowpass(mdct_flat, enc, false);
+                if (bt == 2) {
+                    double mdct_out_short[32][3][6];
+                    enc->mdct_fp[ch].process_short_and_convert(sub_gr,
+                                                               mdct_out_short);
+                    reorder_short_blocks(mdct_out_short, mdct_flat,
+                                         enc->sr_index);
+                    apply_lowpass(mdct_flat, enc, true);
+                } else {
+                    // Fused MDCT + alias reduction + Q24->double conversion
+                    // (long path integer, transition windows double).
+                    enc->mdct_fp[ch].process_and_convert(sub_gr, mdct_flat, bt);
+                    apply_lowpass(mdct_flat, enc, false);
+                }
 
                 if (enc->vbr_mode) {
                     granule_info[gr][ch] = quantize_granule_vbr(mdct_flat, gr_bits,
                         enc->sr_index, enc->quality_mode, enc->vbr_quality,
-                        /*block_type=*/0, !use_ms || ch == 0);
+                        /*block_type=*/bt, !use_ms || ch == 0);
                 } else {
                     granule_info[gr][ch] = quantize_granule(mdct_flat, gr_bits,
                                                              enc->sr_index, enc->quality_mode,
-                                                             /*block_type=*/0,
+                                                             /*block_type=*/bt,
                                                              gain_floor,
                                                              !use_ms || ch == 0);
                 }
+                granule_info[gr][ch].block_type = bt;
                 total_main_bits += granule_info[gr][ch].part2_3_length;
             }
         }
@@ -1472,6 +1527,19 @@ const uint8_t* glint_flush(glint_t enc, int* out_size) {
         delete[] silence;
         enc->have_held = false;
         total = sz;  // already at the start of output_buf
+    }
+#endif
+#ifdef GLINT_FIXED_POINT
+    // Same held-granule release for the fixed path.
+    if (enc->have_held_fp && enc->use_fixed_point) {
+        int spf = glint_samples_per_frame(enc);
+        int16_t* silence = new int16_t[spf]();
+        const int16_t* ptrs[2] = { silence, silence };
+        int sz = 0;
+        glint_encode(enc, ptrs, &sz);
+        delete[] silence;
+        enc->have_held_fp = false;
+        total = sz;
     }
 #endif
 

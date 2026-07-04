@@ -376,10 +376,93 @@ void alias_reduce_fp(int32_t mdct_out[32][18]) {
     }
 }
 
-void MDCT_FP::process_and_convert(const int32_t subband[32][18], double mdct_flat[576]) {
+// Transition/short window tables for the fixed path (double precision —
+// see the class comment). Separate copies from the double-path statics so
+// pure-fixed builds have them too.
+static double fp_wincos_start[36][18];
+static double fp_wincos_stop[36][18];
+static double fp_short_win[12];
+static double fp_short_cos[12][6];
+static bool fp_win_tables_init = false;
+
+static void init_fp_win_tables() {
+    if (fp_win_tables_init) return;
+    constexpr double PI = 3.14159265358979323846;
+    for (int n = 0; n < 36; n++) {
+        double win_start, win_stop;
+        double win = std::sin(PI / 36.0 * (n + 0.5));
+        if (n < 18)      win_start = win;
+        else if (n < 24) win_start = 1.0;
+        else if (n < 30) win_start = std::sin(PI / 12.0 * (n - 18 + 0.5));
+        else             win_start = 0.0;
+        if (n < 6)       win_stop = 0.0;
+        else if (n < 12) win_stop = std::sin(PI / 12.0 * (n - 6 + 0.5));
+        else if (n < 18) win_stop = 1.0;
+        else             win_stop = win;
+        for (int k = 0; k < 18; k++) {
+            double c = std::cos(PI / 72.0 * (2.0*n + 19.0) * (2.0*k + 1.0)) / 288.0;
+            fp_wincos_start[n][k] = win_start * c;
+            fp_wincos_stop[n][k] = win_stop * c;
+        }
+    }
+    for (int n = 0; n < 12; n++) {
+        fp_short_win[n] = std::sin(PI / 12.0 * (n + 0.5));
+        for (int k = 0; k < 6; k++)
+            fp_short_cos[n][k] = std::cos(PI / 24.0 * (2.0*n + 7.0) * (2.0*k + 1.0));
+    }
+    fp_win_tables_init = true;
+}
+
+void MDCT_FP::process_short_and_convert(const int32_t subband[32][18],
+                                        double mdct_out[32][3][6]) {
+    init_fp_win_tables();
+    const double kQ = 1.0 / 16777216.0;
+    for (int sb = 0; sb < 32; sb++) {
+        double x[36];
+        for (int n = 0; n < 18; n++) x[n] = prev_[sb][n] * kQ;
+        for (int n = 0; n < 18; n++) x[n + 18] = subband[sb][n] * kQ;
+        for (int win = 0; win < 3; win++) {
+            int offset = 6 + win * 6;
+            double z[12];
+            for (int n = 0; n < 12; n++)
+                z[n] = x[offset + n] * fp_short_win[n];
+            for (int k = 0; k < 6; k++) {
+                double sum = 0.0;
+                for (int n = 0; n < 12; n++)
+                    sum += z[n] * fp_short_cos[n][k];
+                mdct_out[sb][win][k] = sum / 96.0;
+            }
+        }
+        for (int n = 0; n < 18; n++) prev_[sb][n] = subband[sb][n];
+    }
+}
+
+void MDCT_FP::process_and_convert(const int32_t subband[32][18], double mdct_flat[576],
+                                  int block_type) {
     // Fused MDCT + alias reduction + Q24->double conversion.
     // Outputs flat double[576] directly for the quantizer.
     double mdct_d[32][18];
+
+    if (block_type == 1 || block_type == 3) {
+        // Transition windows: rare granules, double-precision scalar path.
+        init_fp_win_tables();
+        const double (*wincos)[18] = (block_type == 1) ? fp_wincos_start
+                                                       : fp_wincos_stop;
+        const double kQ = 1.0 / 16777216.0;
+        for (int sb = 0; sb < 32; sb++) {
+            double x[36];
+            for (int n = 0; n < 18; n++) x[n] = prev_[sb][n] * kQ;
+            for (int n = 0; n < 18; n++) x[n + 18] = subband[sb][n] * kQ;
+            for (int k = 0; k < 18; k++) {
+                double sum = 0.0;
+                for (int n = 0; n < 36; n++)
+                    sum += x[n] * wincos[n][k];
+                mdct_d[sb][k] = sum;
+            }
+            for (int n = 0; n < 18; n++) prev_[sb][n] = subband[sb][n];
+        }
+    } else {
+
 
     // Pre-compute double MDCT window
     static double mdct_win_d_fp[36];
@@ -461,6 +544,7 @@ void MDCT_FP::process_and_convert(const int32_t subband[32][18], double mdct_fla
 
         for (int n = 0; n < 18; n++) prev_[sb][n] = subband[sb][n];
     }
+    }  // end long-path branch
 
     // Alias reduction in double
     static double ar_cs[8], ar_ca[8];

@@ -97,6 +97,11 @@ struct glint_context {
     double held_sub_d[2][32][18];
     bool have_held;
 #endif
+#ifdef GLINT_FIXED_POINT
+    // Same one-granule lookahead for the fixed-point path (Q24 slots).
+    int32_t held_sub_fp[2][32][18];
+    bool have_held_fp;
+#endif
 
     // VBR Xing header bookkeeping. Frame 0 of a VBR stream is a silent
     // placeholder frame of the exact size glint_vbr_header() produces;

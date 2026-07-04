@@ -37,8 +37,17 @@ class MDCT_FP {
 public:
     MDCT_FP();
     void process(const int32_t subband[32][18], int32_t mdct_out[32][18]);
-    // Fused MDCT + alias reduction + Q24->double conversion.
-    void process_and_convert(const int32_t subband[32][18], double mdct_flat[576]);
+    // Fused MDCT + alias reduction + Q24->double conversion. block_type 1/3
+    // (start/stop transition windows) take a double-precision branch — the
+    // quantizer downstream is double anyway and those granules are rare;
+    // block_type 0 keeps the byte-stable integer path.
+    void process_and_convert(const int32_t subband[32][18], double mdct_flat[576],
+                             int block_type = 0);
+    // Short-block MDCT (block_type 2): Q24 -> double, then the same
+    // 12-point window/cos math as the double path. No alias reduction
+    // (ISO). prev_ overlap handled like the long transform.
+    void process_short_and_convert(const int32_t subband[32][18],
+                                   double mdct_out[32][3][6]);
     void reset();
 private:
     int32_t prev_[32][18];

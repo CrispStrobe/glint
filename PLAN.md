@@ -524,9 +524,18 @@ sufficient there (it shares the encoder's mask model).
    with recorded per-clip baselines and thresholds, wired for nightly CI.
 8. **ABX script** — TODO. Small terminal ABX tool for the model-contested
    cases (speech-128, electronic-128).
-9. **Fixed-point short blocks** — TODO (big). Port the window scheduler +
-   short MDCT to the fixed path so embedded builds match desktop
-   transient quality.
+9. **Fixed-point short blocks** — DONE (merged). The fixed path now has
+   the one-granule lookahead (held_sub_fp), the shared window scheduler,
+   and short/start/stop transforms: MDCT_FP::process_short_and_convert
+   plus a transition-window branch in process_and_convert, both running
+   Q24→double + double window/cos math — the quantizer downstream is
+   double anyway and those granules are rare; the hot LONG path keeps
+   its byte-stable integer transform. reorder/scheduler helpers moved
+   out of the double-only guard; glint_flush releases the fixed held
+   granule; the gapless delay is 1104 for both paths now. Metrics:
+   fixed==double to ≤0.06 dB on every config INCLUDING castanets (the
+   fixed path previously had no shorts at all) and m2-64k. 28/28 +
+   16/16 tests, 0 backstep, full quality suite green on --fixed.
 10. **Psy-loop noise caching** — DEAD END as planned (2026-07). The
     -q normal profile shows compute_band_noise at 2% — caching it is
     pointless. The psy loop's real cost is its per-iteration gain
