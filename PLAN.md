@@ -463,10 +463,19 @@ only). Gate: the standard battery PLUS — for anything targeting ≤128k
 speech — PESQ and ODG must improve or hold; our in-house NMR alone is not
 sufficient there (it shares the encoder's mask model).
 
-1. **Bitrate-scaled lowpass** — TODO. LAME's biggest low-rate lever: cut
-   ~11-12 kHz at 64k and spend the bits below. Generalize the sfb21
-   lowpass to a rate-dependent sfb boundary (zero bands above a cutoff
-   derived from bits-per-channel-per-granule). Highest-confidence item.
+1. **Bitrate-scaled lowpass** — DONE (merged). Cutoff by per-channel
+   kbps (anchors PESQ/ODG-calibrated: 32/ch→9500 Hz, 48/ch→11000;
+   ≥64/ch keeps the sfb21 band — a 12-13.5k cut there helped speech
+   mildly but hurt music ODG), resolved once in glint_create to
+   long/short wire start indices, snapping to the sample rate's sfb
+   grid. 64k-stereo speech: ODG −3.76→−3.17 (LAME −3.32 — glint now
+   AHEAD on ODG), PESQ 3.68→4.01 (LAME 4.21), audible 45→41%;
+   96k-stereo: ODG −2.68→−2.45, PESQ 4.21→4.34, audible 30→22%.
+   128k/256k outputs byte-identical (cut==sfb21 there); mono-64
+   unchanged BY DESIGN (LAME also keeps ~full band at 64 kbps/ch — its
+   remaining mono-64 PESQ lead is not bandwidth). Discovered en route:
+   LAME's own low-rate lever is RESAMPLING (64k stereo → 24 kHz LSF,
+   96k → 32 kHz); an auto-resample would be a CLI-level feature.
 2. **Tonality-adaptive mask offset** — TODO. The psy loops use a flat
    −14 dB offset; real maskers differ ~15 dB between tonal and noisy
    bands. Cheap per-band tonality (spectral flatness or inter-frame

@@ -28,6 +28,15 @@ struct glint_context {
     int mean_bits_per_frame;
     int side_info_bits;
 
+    // Encoder-side lowpass start indices (wire order), resolved once in
+    // glint_create from the per-channel bitrate: at high rates these equal
+    // the sfb21 boundaries (the region carries no scalefactor and only
+    // collects quantizer spray); at low rates the cutoff scales down,
+    // LAME-style, so the freed bits stay below the cut. VBR quantizes
+    // under the max-rate budget and keeps the full band.
+    int lp_long_start;   // first zeroed bin of a long/start/stop granule
+    int lp_short_start;  // first zeroed wire index of a short granule
+
     bool use_fixed_point;  // runtime path selection
     int quality_mode;      // 0=speed, 1=normal, 2=best (psychoacoustic masking)
 

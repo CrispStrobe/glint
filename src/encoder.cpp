@@ -125,27 +125,53 @@ static constexpr bool kShortBlocksEnabled = true;
 
 #endif // double-precision path helpers
 
-// Encoder-side lowpass at the sfb21 boundary (~15.8 kHz at 44.1k, ~10 kHz
-// at 22.05k): zero the region before quantization. The sfb21 region carries
-// NO scalefactor, so the psy loop cannot shape its noise — left alone the
-// quantizer sprays noise into it (measured -1 dB band-SNR above 16k on
-// castanets, i.e. more noise than signal, and audible hiss into EMPTY HF
-// bands on tonal music). Zeroing it improves mean NMR on every test clip
-// at every rate (castanets-128k 15.0 -> 8.7, quartet-256k -10.1 -> -15.1,
-// VBR V0 speech +0.27 dB SNR) and matches LAME's measured 128k spectrum
-// almost exactly (rolloff 15.1k vs 15.05k). Cost: content above the
-// boundary is dropped (LSD rises on clips that had any); at 256k LAME
-// keeps up to ~17.7k instead — revisit if a shapeable sfb21 alternative
-// (e.g. gain-region trades) ever lands. Applied in ALL modes and paths so
-// double==fixed metrics hold. Attack-only zeroing (window-switching
-// granules) kept the p95 win but lost the mean win — most spray comes from
-// LONG granules between transients.
-static void apply_sfb21_lowpass(double* mdct_flat, int sr_index,
-                                bool short_block) {
-    int start = short_block
-        ? tables::get_sfb_short_by_unified(sr_index)[12] * 3
-        : tables::get_sfb_long_by_unified(sr_index)[21];
+// Encoder-side lowpass: zero everything from the context's precomputed
+// start index before quantization.
+//
+// At high rates the cut sits exactly at the sfb21 boundary (~15.8 kHz at
+// 44.1k, ~10 kHz at 22.05k) — that region carries NO scalefactor, so the
+// psy loop cannot shape its noise and the quantizer sprays into it
+// (measured -1 dB band-SNR above 16k on castanets and audible hiss into
+// EMPTY HF bands on tonal music); zeroing it improved mean NMR on every
+// clip at every rate and matches LAME's measured 128k spectrum (rolloff
+// 15.1k vs 15.05k). Cost: content above the cut is dropped (LSD rises
+// where any existed).
+//
+// At LOW rates the cutoff scales down with per-channel bitrate
+// (LAME-style, see lowpass_cutoff_hz): a 64k stereo channel cannot code
+// 15.8 kHz of bandwidth cleanly, and PESQ/ODG both preferred LAME's
+// narrower band before this existed. Applied in ALL modes and paths so
+// double==fixed metrics hold. Attack-only zeroing was measured worse
+// (keeps the p95 win, loses the mean win — most spray comes from LONG
+// granules between transients).
+static void apply_lowpass(double* mdct_flat, const glint_context* enc,
+                          bool short_block) {
+    int start = short_block ? enc->lp_short_start : enc->lp_long_start;
     for (int i = start; i < 576; i++) mdct_flat[i] = 0.0;
+}
+
+// Cutoff frequency by per-channel bitrate (linear interpolation between
+// anchors; >= 64 kbps/ch keeps the full sfb21-bounded band — a 12-13.5k
+// cut at 64/ch measured mildly better for speech PESQ but mildly WORSE
+// music ODG, so the cut starts below that). Anchors calibrated by
+// PESQ+ODG sweep on the speech clip: 32/ch optimum 9500 Hz (11500 was
+// -3.46 ODG vs 9500's -3.17; 8000 over-cuts), 48/ch optimum ~11000
+// (ODG -2.45 vs full band's -2.68, audible band-frames 30%->22%).
+// The effective cut snaps to the next sfb boundary at the granule's
+// sample rate. GLINT_LP_HZ overrides for experiments.
+static double lowpass_cutoff_hz(int kbps_per_ch) {
+    if (const char* e = getenv("GLINT_LP_HZ")) {
+        double v = atof(e);
+        if (v > 0.0) return v;
+    }
+    static const int kb[] =    {  8,    16,   24,   32,   40,    48,    64 };
+    static const double hz[] = { 5500, 7000, 8500, 9500, 10200, 11000, 22050 };
+    if (kbps_per_ch >= kb[6]) return hz[6];
+    if (kbps_per_ch <= kb[0]) return hz[0];
+    int i = 0;
+    while (kbps_per_ch > kb[i + 1]) i++;
+    double t = double(kbps_per_ch - kb[i]) / (kb[i + 1] - kb[i]);
+    return hz[i] + t * (hz[i + 1] - hz[i]);
 }
 
 int glint_check_config(int sample_rate, int bitrate) {
@@ -231,6 +257,25 @@ glint_t glint_create(const glint_config* cfg) {
 
     int total_frame_bits = ctx->frame_size * 8;
     ctx->mean_bits_per_frame = total_frame_bits - 32 - ctx->side_info_bits;
+
+    // Resolve the encoder-side lowpass start indices (see apply_lowpass).
+    {
+        const int* sfl = tables::get_sfb_long_by_unified(ctx->sr_index);
+        const int* sfs = tables::get_sfb_short_by_unified(ctx->sr_index);
+        int kbps_ch = effective_bitrate / cfg->num_channels;
+        double cut = lowpass_cutoff_hz(kbps_ch);
+        double nyq = cfg->sample_rate * 0.5;
+        int cut_long = static_cast<int>(cut / nyq * 576.0);
+        int cut_short = static_cast<int>(cut / nyq * 192.0);
+        int bl = 21;
+        for (int b = 1; b <= 21; b++)
+            if (sfl[b] >= cut_long) { bl = b; break; }
+        int bs = 12;
+        for (int b = 1; b <= 12; b++)
+            if (sfs[b] >= cut_short) { bs = b; break; }
+        ctx->lp_long_start = std::min(sfl[bl], sfl[21]);
+        ctx->lp_short_start = std::min(sfs[bs] * 3, sfs[12] * 3);
+    }
 
     // Reservoir capacity = what the main_data_begin field can express:
     // 9 bits (511 bytes) for MPEG-1, 8 bits (255) for MPEG-2/2.5.
@@ -863,7 +908,7 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                     // Reorder to flat 576 array
                     double mdct_flat[576];
                     reorder_short_blocks(mdct_out_short, mdct_flat, enc->sr_index);
-                    apply_sfb21_lowpass(mdct_flat, enc->sr_index, true);
+                    apply_lowpass(mdct_flat, enc, true);
 
                     // Quantize with short-block region layout so the gain
                     // search fits the bit budget under the SAME layout the
@@ -894,7 +939,7 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                     alias_reduce_d(mdct_out);
 
                     double* mdct_flat = &mdct_out[0][0];
-                    apply_sfb21_lowpass(mdct_flat, enc->sr_index, false);
+                    apply_lowpass(mdct_flat, enc, false);
 
                     if (enc->vbr_mode) {
                         granule_info[gr][ch] = quantize_granule_vbr(mdct_flat, gr_bits,
@@ -992,7 +1037,7 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                 // Outputs flat double[576] directly for the quantizer.
                 double mdct_flat[576];
                 enc->mdct_fp[ch].process_and_convert(sub_gr, mdct_flat);
-                apply_sfb21_lowpass(mdct_flat, enc->sr_index, false);
+                apply_lowpass(mdct_flat, enc, false);
 
                 if (enc->vbr_mode) {
                     granule_info[gr][ch] = quantize_granule_vbr(mdct_flat, gr_bits,
@@ -1229,7 +1274,7 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
 
                 double mdct_flat[576];
                 reorder_short_blocks(mdct_out_short, mdct_flat, enc->sr_index);
-                apply_sfb21_lowpass(mdct_flat, enc->sr_index, true);
+                apply_lowpass(mdct_flat, enc, true);
 
                 if (enc->vbr_mode) {
                     granule_info[gr][ch] = quantize_granule_vbr(mdct_flat, gr_bits,
@@ -1250,7 +1295,7 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
                 alias_reduce_d(mdct_out);
 
                 double* mdct_flat = &mdct_out[0][0];
-                apply_sfb21_lowpass(mdct_flat, enc->sr_index, false);
+                apply_lowpass(mdct_flat, enc, false);
 
                 if (enc->vbr_mode) {
                     granule_info[gr][ch] = quantize_granule_vbr(mdct_flat, gr_bits,
