@@ -334,8 +334,16 @@ m2, joint/stereo, CBR/VBR), 0 backstep, unit tests, double==fixed metrics.
    the outer loop already harvests those trades SAFELY because its
    total-noise guard bounds the damage — the factor search has no such
    guard. Raw MSE stays the factor-search objective. Reverted.
-6. **Per-frame M/S vs L/R decision** — TODO. Estimate bits/NMR both ways
-   per frame, pick the cheaper (mode_ext is per-frame already).
+6. **Per-frame M/S vs L/R decision** — DEAD END as tried (2026-07).
+   Energy-skew criterion (pick the representation concentrating more
+   energy, letting the 45/55 bit split starve the cheap channel):
+   regressions wherever it switched to L/R — quartet-256k 44.7→42.5 dB /
+   NMR −13.9→−11.0, speech −13.5→−12.6; electronic never switched
+   (identical). The test set has no truly decorrelated wide-stereo clip,
+   so the upside is unmeasurable here while the criterion's mistakes are
+   expensive. Revisit only with (a) a real wide-stereo test clip and
+   (b) a trial-encode decision (quantize both ways, compare NMR), not an
+   energy heuristic. Reverted.
 7. **Region boundary search** — TODO. DP over per-sfb cumulative bit
    costs for region0/region1_count (LAME-style) instead of the fixed
    heuristic; run OUTSIDE the gain search (once on the final ix) first.
