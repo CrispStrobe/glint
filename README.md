@@ -35,26 +35,30 @@ path needs only 50 KB RAM and no FPU.
 **Quality** — speech, 256 kbps stereo, vs. the original (1-min clip, measured
 with `tests/measure_audio.py`; `double` and `fixed` paths are identical):
 
-| Mode | SNR | seg-SNR | centroid | %E>10 kHz | 95% rolloff | RMS vs src | speed |
+| Mode | SNR | seg-SNR | centroid | %E>10 kHz | 95% rolloff | mean NMR | speed |
 |---|---|---|---|---|---|---|---|
-| -q speed | 36.7 dB | 38.0 dB | 882 Hz | 0.71% | 5.34 kHz | ±0.2 dB | ~190× |
-| **-q normal** | **36.3 dB** | **37.8 dB** | 885 Hz | 0.71% | 5.37 kHz | ±0.2 dB | ~85× |
-| -q best | 36.5 dB | 37.9 dB | 890 Hz | 0.72% | 5.41 kHz | ±0.2 dB | ~40× |
+| -q speed | 36.7 dB | 38.0 dB | 882 Hz | 0.71% | 5.34 kHz | −8.6 dB | ~260× |
+| **-q normal** | **36.1 dB** | **35.6 dB** | 885 Hz | 0.71% | 5.37 kHz | **−11.0 dB** | ~52× |
+| -q best | 36.2 dB | 35.7 dB | 891 Hz | 0.72% | 5.41 kHz | −11.1 dB | ~34× |
 
-Source rolloff 5.4 kHz, centroid 892 Hz, %E>10 kHz 0.72%. **In joint mode
-glint measures ahead of LAME on this clip: 37.7 dB SNR vs LAME 256k's
-36.9**, with mean noise-to-mask −12.1 dB (LAME −16.1) and 0.3% of Bark
-band-frames above the estimated mask (LAME 0.0%). Music (256 kbps joint):
-electronic 43.0 dB / NMR −12.3 (LAME 44.5 / −15.8), string quartet 43.8 /
-−9.2 with 1.0% audible (LAME 46.0 / −11.1). Transients: on a castanet
-click-train at 256 kbps the noise sits below the masking threshold (mean
-NMR −0.7 dB; long-blocks-only measured +17.5). VBR with real variable-size
-frames: V0 319 kbps / 40.4 dB / NMR −15.2, V4 257 kbps / 40.3 dB, V9
-45 kbps / 22.0 dB. MPEG-2 rates work and beat LAME (22.05 kHz CBR-64k:
-21.4 dB vs 17.6). The machinery behind this: exact pow34 companding, bit
-reservoir with buffer-feedback rate control, short blocks with start/stop
-transition windows, one-granule lookahead, subblock_gain and short-window
-scalefactors, and psychoacoustic bit allocation (Schroeder-Bark masks
+Source rolloff 5.4 kHz, centroid 892 Hz, %E>10 kHz 0.72%; normal/best
+deliberately trade ~0.6 dB SNR for noise-to-mask (the psy loops shape
+~9 dB below the mask). **In joint mode glint measures ahead of LAME on
+this clip: 38.0 dB SNR vs LAME 256k's 36.9**, with mean noise-to-mask
+−13.8 dB (LAME −16.1) and 0.2% of Bark band-frames above the estimated
+mask (LAME 0.0%). Music (256 kbps joint): electronic 43.5 dB / NMR −15.9
+(LAME 44.5 / −15.8), string quartet 44.9 / **−14.0** with 0.0% audible
+(LAME 46.0 / −11.1 — glint ahead on NMR). Transients (castanet burst
+train, 128 kbps): audible band-frames 2.5% vs LAME's 6.2%, p95 NMR −1.7
+vs 2.6. VBR with real variable-size frames and a Xing header (players
+seek and report duration correctly): V0 319 kbps / 40.7 dB / NMR −15.3,
+V9 46 kbps. MPEG-2 rates work and beat LAME (22.05 kHz CBR-64k: 21.1 dB
+/ NMR 2.4 vs 17.6 / 2.4), including LSF short blocks. The machinery
+behind this: exact pow34 companding, bit reservoir with buffer-feedback
+rate control, short blocks with start/stop transition windows,
+one-granule lookahead, subblock_gain and short-window scalefactors,
+optimal Huffman region splits on finished granules, an encoder-side
+sfb21 lowpass, and psychoacoustic bit allocation (Schroeder-Bark masks
 driving scalefactor noise-shaping loops for long and short granules); see
 PLAN.md. Both signal paths
 are metrics-identical. Apple M1, 256 kbps stereo, single-threaded (`-j1`),

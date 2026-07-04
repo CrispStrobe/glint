@@ -3,18 +3,18 @@
 **Scoreboard** (256 kbps joint, `-q best`, vs LAME on identical inputs,
 after the 2026-07 pass: shape-below-mask + attack-decay shorts + sfb21
 lowpass + short-sfb table fixes + LSF shorts + shaping/rate-control
-budget fix): speech SNR **37.7 vs 36.9** (glint ahead), NMR −13.5 vs
-−16.1, audible band-frames 0.2% vs 0.0%; electronic 43.5 vs 44.5 / NMR
-−15.9 vs −15.8 (tied); quartet 44.7 vs 46.0 / **NMR −13.9 vs −11.1
-(glint ahead)**, audible 0.0%. Castanets (clip REGENERATED 2026-07 —
+budget fix + region-split polish): speech SNR **38.0 vs 36.9** (glint
+ahead), NMR −13.8 vs −16.1, audible band-frames 0.2% vs 0.0%;
+electronic 43.5 vs 44.5 / NMR −15.9 vs −15.8 (tied); quartet 44.9 vs
+46.0 / **NMR −14.0 vs −11.1 (glint ahead)**, audible 0.0%. Castanets (clip REGENERATED 2026-07 —
 noise-burst train over a 220 Hz bed, `tests/gen_castanet.py`; harsher
 than the old clip, absolute NMRs not comparable to older scoreboards)
-128k: mean NMR 8.4 vs LAME 1.2, but **p95 −1.7 vs 2.6 and audible 2.6%
+128k: mean NMR 8.4 vs LAME 1.2, but **p95 −1.7 vs 2.6 and audible 2.5%
 vs 6.2% (glint ahead on both)**; 256k −3.9 vs −8.6. MPEG-2 64k speech
-**21.0 vs 17.6 SNR** / NMR 2.5 vs 2.4; m2-64k castanets 15.2/17.8 vs
-14.7/16.5. VBR V0: 40.7 dB / NMR −15.3 / 0.0% audible. Stereo speech
-tiers: 36.7/35.7/35.9 at NMR −8.6/−10.7/−10.8 (normal/best traded
-−0.6 dB SNR for +0.6 NMR vs the target-1.0 era).
+**21.1 vs 17.6 SNR** / NMR 2.4 vs 2.4; m2-64k castanets 15.2/17.8 vs
+14.7/16.5. VBR V0: 40.7 dB / NMR −15.3 / 0.0% audible, now with a Xing
+header. Stereo speech tiers: 36.7/36.1/36.2 at NMR −8.6/−11.0/−11.1
+(normal/best trade ~0.6 dB SNR for NMR vs the target-1.0 era).
 **Remaining LAME gaps**: speech NMR tail (−13.5 vs −16.1; the shaping
 target is exhausted — 0.0625 costs seg-SNR; next: per-band-frame outlier
 control, adaptive rounding offset), castanets-128k MEAN (8.4 vs 1.2 —
@@ -380,9 +380,16 @@ m2, joint/stereo, CBR/VBR), 0 backstep, unit tests, double==fixed metrics.
     profile; exp2 (pow's backend plus the mask model's pow10) totals
     ~1.3%. The heat is in huffman_select_and_count / quantize_and_count
     / gain_search (~55%) as pass 3 found. No fast path.
-11. **Speed re-measure + docs** — TODO. All ×-realtime figures predate
-    the 2026-07 pass and were taken under load; re-measure (at least
-    relative, interleaved A/B) and refresh README/CLAUDE.md.
+11. **Speed re-measure + docs** — DONE. Interleaved A/B vs pre-pass
+    main (2de393e) initially showed the quality pass cost
+    +59%/+81%/+58% (speed/normal/best). Recouped (metrics-neutral,
+    committed as PLAN 9.11): lazy per-table prefix memoization + suffix
+    cost sharing in huffman_optimize_regions (byte-identical), no region
+    polish at -q speed (was ~30% of that tier's profile), and a 3-stall
+    early exit in both NMR outer loops (metrics identical ±0.01 dB).
+    Final: speed +1.8%, normal +60%, best +33% vs pre-pass — the
+    remainder is the shape-below-mask iterations themselves. Absolutes
+    (M1, moderate load): ~260×/52×/34× realtime. README refreshed.
 
 Not queued: ViSQOL/PEAQ (needs external tooling), sfb21 partial-keep at
 high rates (blocked on a shapeable-sfb21 mechanism), mode-dependent
