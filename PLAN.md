@@ -454,3 +454,47 @@ m2, joint/stereo, CBR/VBR), 0 backstep, unit tests, double==fixed metrics.
 Not queued: ViSQOL/PEAQ (needs external tooling), sfb21 partial-keep at
 high rates (blocked on a shapeable-sfb21 mechanism), mode-dependent
 shaping target for stereo (only if a stereo-SNR use case shows up).
+
+## 10. Second follow-up queue (2026-07-04, prioritized)
+
+Grounded in the league-table findings (PESQ+ODG both confirm the low-rate
+speech gap; ODG confirms the castanets mean gap; ViSQOL is a tripwire
+only). Gate: the standard battery PLUS — for anything targeting ≤128k
+speech — PESQ and ODG must improve or hold; our in-house NMR alone is not
+sufficient there (it shares the encoder's mask model).
+
+1. **Bitrate-scaled lowpass** — TODO. LAME's biggest low-rate lever: cut
+   ~11-12 kHz at 64k and spend the bits below. Generalize the sfb21
+   lowpass to a rate-dependent sfb boundary (zero bands above a cutoff
+   derived from bits-per-channel-per-granule). Highest-confidence item.
+2. **Tonality-adaptive mask offset** — TODO. The psy loops use a flat
+   −14 dB offset; real maskers differ ~15 dB between tonal and noisy
+   bands. Cheap per-band tonality (spectral flatness or inter-frame
+   prediction) modulating the offset (tonal stricter, noisy looser).
+3. **Attack bit banking** — TODO. Extend the encoder lookahead to 2-3
+   granules so the rate controller can deliberately underspend ahead of
+   a detected attack and release the banked reservoir at the transient
+   (the piece the "spend whole reservoir at attacks" dead end lacked).
+4. **VBR psy shaping** — TODO. The VBR path skips the NMR outer loop
+   entirely; enable it with the CBR slack/2 budget discipline and judge
+   bytes-vs-quality honestly (the 9.8 lesson).
+5. **Gapless LAME tag** — TODO. Add encoder delay/padding to the Xing
+   frame (LAME-tag layout) so players trim the 576-sample latency and
+   the placeholder frame.
+6. **CI (GitHub Actions)** — TODO. Build matrix (double/fixed/both) +
+   ctest incl. the m2 decode test (ffmpeg installs in runners). The wire
+   -format history is the argument.
+7. **League regression gate** — TODO. compare_encoders.py --check mode
+   with recorded per-clip baselines and thresholds, wired for nightly CI.
+8. **ABX script** — TODO. Small terminal ABX tool for the model-contested
+   cases (speech-128, electronic-128).
+9. **Fixed-point short blocks** — TODO (big). Port the window scheduler +
+   short MDCT to the fixed path so embedded builds match desktop
+   transient quality.
+10. **Psy-loop noise caching** — TODO (perf). Normal tier is +60% vs
+    pre-pass; cache per-band noise across outer-loop iterations where
+    possible.
+11. **Mixed blocks** — TODO (big, stretch). mixed_block_flag=1 (long LF +
+    short HF) keeps bass resolution through attacks; new MDCT hybrid,
+    scalefactor semantics, and region layout.
+12. **Intensity stereo / ABR** — stretch, only if 1-11 land.
