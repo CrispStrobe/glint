@@ -17,11 +17,14 @@ vs 6.2% (glint ahead on both)**; 256k −3.9 vs −8.6. MPEG-2 64k speech
 14.7/16.5. VBR V0: 40.7 dB / NMR −15.3 / 0.0% audible, now with a Xing
 header. Stereo speech tiers: 36.7/36.1/36.2 at NMR −8.6/−11.0/−11.1
 (normal/best trade ~0.6 dB SNR for NMR vs the target-1.0 era).
-**Remaining LAME gaps**: speech NMR tail (−13.5 vs −16.1; the shaping
-target is exhausted — 0.0625 costs seg-SNR; next: per-band-frame outlier
-control, adaptive rounding offset), castanets-128k MEAN (8.4 vs 1.2 —
-p95/audible already ahead; the mean is dominated by the attack instant
-itself), music SNR (elec −1.0, quartet −1.3 — masked per NMR).
+**Remaining LAME gaps** (updated 2026-07-04): speech NMR tail (−13.7 vs
+−16.1, in-house metric only — ODG calls speech-128 for glint and PESQ
+for LAME), the drums/castanets 128k ODG gap (−1.18/−0.62 vs LAME's
+−1.03/−0.29 — attack CHARACTER, not bits: detector sensitivity, banking
+and mixed-block premises all measured out), quartet/piano SNR at 256k
+(masked per NMR/ODG). ~~castanets mean NMR~~ — CLOSED 2026-07-04 by the
+6x attack threshold: 128k 8.0→−2.1 (LAME 2.6 — glint ahead), 256k
+−3.9→−9.7 (LAME −8.6 — glint ahead).
 Done in the 2026-07 pass (commit messages have full numbers): outer-loop
 shaping target 0.125 = push bands ~9 dB below mask; kShortAttackExtend=2
 decay granules; **sfb21 lowpass** (the region has no scalefactor ⇒

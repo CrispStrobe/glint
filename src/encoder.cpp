@@ -73,14 +73,21 @@ static void schedule_block_types(glint_context* enc,
                                  int types[2]) {
     bool want[3] = { false, false, false };
     for (int g = 0; g < num_gr + 1; g++) {
+        // Attack threshold: 6x (~7.8 dB) energy jump. Was 8x — lowering
+        // it catches the secondary bumps in a burst's decay, which turned
+        // out to be the WHOLE remaining castanets mean-NMR gap: 128k
+        // 8.0 -> -2.1 (LAME: 2.6 — glint now ahead), 256k -3.9 -> -9.7
+        // (LAME -8.6), at identical ODG/audible%. Speech/quartet/drums/
+        // electronic move <= 0.11 dB. 4x starts costing speech ODG.
+        // GLINT_ATTACK_RATIO overrides for experiments.
         static const double kAttackRatio = [] {
             const char* e = getenv("GLINT_ATTACK_RATIO");
-            double v = e ? atof(e) : 8.0;
-            return v > 1.0 ? v : 8.0;
+            double v = e ? atof(e) : 6.0;
+            return v > 1.0 ? v : 6.0;
         }();
         if (enc->sched_energy_valid && enc->sched_prev_energy > 0.0 &&
             gr_energy[g] > kAttackRatio * enc->sched_prev_energy)
-            want[g] = true;   // >9 dB energy jump = transient (default)
+            want[g] = true;
         enc->sched_prev_energy = gr_energy[g];
         enc->sched_energy_valid = true;
     }
