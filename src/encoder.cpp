@@ -73,9 +73,14 @@ static void schedule_block_types(glint_context* enc,
                                  int types[2]) {
     bool want[3] = { false, false, false };
     for (int g = 0; g < num_gr + 1; g++) {
+        static const double kAttackRatio = [] {
+            const char* e = getenv("GLINT_ATTACK_RATIO");
+            double v = e ? atof(e) : 8.0;
+            return v > 1.0 ? v : 8.0;
+        }();
         if (enc->sched_energy_valid && enc->sched_prev_energy > 0.0 &&
-            gr_energy[g] > 8.0 * enc->sched_prev_energy)
-            want[g] = true;   // >9 dB energy jump = transient
+            gr_energy[g] > kAttackRatio * enc->sched_prev_energy)
+            want[g] = true;   // >9 dB energy jump = transient (default)
         enc->sched_prev_energy = gr_energy[g];
         enc->sched_energy_valid = true;
     }
@@ -145,8 +150,30 @@ static constexpr bool kShortBlocksEnabled = true;
 // (keeps the p95 win, loses the mean win — most spray comes from LONG
 // granules between transients).
 static void apply_lowpass(double* mdct_flat, const glint_context* enc,
-                          bool short_block) {
+                          int block_type) {
+    bool short_block = (block_type == 2);
     int start = short_block ? enc->lp_short_start : enc->lp_long_start;
+    if (enc->lp_adaptive && block_type == 0 &&
+        enc->rc_frames_since_short >= 26) {
+        // (The post-transient window check keeps burst DECAY granules
+        // zeroed too — castanet long granules near attacks kept enough HF
+        // to swing in-house NMR +7.7 dB even though ODG called it equal.)
+        // Content-aware keep (>96 kbps/ch, LONG granules only): zero the
+        // sfb21 region only when it holds no real content. The zeroing
+        // exists to stop quantizer SPRAY into near-empty HF bands
+        // (quartet-256 NMR −10→−15); but a hard cut deletes genuine
+        // content — the torture clip's 15.8-18k sweep capped SNR at
+        // 17.5 dB regardless of bitrate (fixed: 48.9 dB, ODG −0.45→−0.16).
+        // An energy share of 1e-3 separates the two on the corpus. Short
+        // and transition granules ALWAYS zero: keeping castanet-burst HF
+        // re-created the attack-spray problem (NMR −3.9→+4.0, ODG
+        // −0.08→−0.43) — attack bits belong below the cut.
+        double e_hf = 0.0, e_tot = 0.0;
+        for (int i = 0; i < start; i++) e_tot += mdct_flat[i] * mdct_flat[i];
+        for (int i = start; i < 576; i++) e_hf += mdct_flat[i] * mdct_flat[i];
+        e_tot += e_hf;
+        if (e_tot > 0.0 && e_hf > 1e-3 * e_tot) return;  // real content: keep
+    }
     for (int i = start; i < 576; i++) mdct_flat[i] = 0.0;
 }
 
@@ -276,6 +303,7 @@ glint_t glint_create(const glint_config* cfg) {
         ctx->lp_long_start = std::min(sfl[bl], sfl[21]);
         ctx->lp_short_start = std::min(sfs[bs] * 3, sfs[12] * 3);
         ctx->tonal_masks = (kbps_ch <= 96);
+        ctx->lp_adaptive = (kbps_ch > 96);
     }
 
     // Reservoir capacity = what the main_data_begin field can express:
@@ -979,7 +1007,7 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                     // Reorder to flat 576 array
                     double mdct_flat[576];
                     reorder_short_blocks(mdct_out_short, mdct_flat, enc->sr_index);
-                    apply_lowpass(mdct_flat, enc, true);
+                    apply_lowpass(mdct_flat, enc, 2);
 
                     // Quantize with short-block region layout so the gain
                     // search fits the bit budget under the SAME layout the
@@ -1012,7 +1040,7 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                     alias_reduce_d(mdct_out);
 
                     double* mdct_flat = &mdct_out[0][0];
-                    apply_lowpass(mdct_flat, enc, false);
+                    apply_lowpass(mdct_flat, enc, bt);
 
                     if (enc->vbr_mode) {
                         granule_info[gr][ch] = quantize_granule_vbr(mdct_flat, gr_bits,
@@ -1155,12 +1183,12 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                                                                mdct_out_short);
                     reorder_short_blocks(mdct_out_short, mdct_flat,
                                          enc->sr_index);
-                    apply_lowpass(mdct_flat, enc, true);
+                    apply_lowpass(mdct_flat, enc, 2);
                 } else {
                     // Fused MDCT + alias reduction + Q24->double conversion
                     // (long path integer, transition windows double).
                     enc->mdct_fp[ch].process_and_convert(sub_gr, mdct_flat, bt);
-                    apply_lowpass(mdct_flat, enc, false);
+                    apply_lowpass(mdct_flat, enc, bt);
                 }
 
                 if (enc->vbr_mode) {
@@ -1197,13 +1225,15 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
 
     // Rate controller: track the achieved operating point (mean global_gain)
     // so the constant-quality anchor stays tethered to the content.
-    if (!enc->vbr_mode) {
+    {
         bool any_short = false;
         for (int gr = 0; gr < num_gr; gr++)
             if (granule_info[gr][0].block_type == 2) any_short = true;
         if (any_short) enc->rc_frames_since_short = 0;
         else if (enc->rc_frames_since_short < (1 << 20))
             enc->rc_frames_since_short++;
+    }
+    if (!enc->vbr_mode) {
         int gsum = 0, gn = 0;
         for (int gr = 0; gr < num_gr; gr++)
             for (int ch = 0; ch < nch; ch++) {
@@ -1428,7 +1458,7 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
 
                 double mdct_flat[576];
                 reorder_short_blocks(mdct_out_short, mdct_flat, enc->sr_index);
-                apply_lowpass(mdct_flat, enc, true);
+                apply_lowpass(mdct_flat, enc, 2);
 
                 if (enc->vbr_mode) {
                     granule_info[gr][ch] = quantize_granule_vbr(mdct_flat, gr_bits,
@@ -1451,7 +1481,7 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
                 alias_reduce_d(mdct_out);
 
                 double* mdct_flat = &mdct_out[0][0];
-                apply_lowpass(mdct_flat, enc, false);
+                apply_lowpass(mdct_flat, enc, bt);
 
                 if (enc->vbr_mode) {
                     granule_info[gr][ch] = quantize_granule_vbr(mdct_flat, gr_bits,
@@ -1477,13 +1507,15 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
 
     // Rate controller: track the achieved operating point (mean global_gain)
     // so the constant-quality anchor stays tethered to the content.
-    if (!enc->vbr_mode) {
+    {
         bool any_short = false;
         for (int gr = 0; gr < num_gr; gr++)
             if (granule_info[gr][0].block_type == 2) any_short = true;
         if (any_short) enc->rc_frames_since_short = 0;
         else if (enc->rc_frames_since_short < (1 << 20))
             enc->rc_frames_since_short++;
+    }
+    if (!enc->vbr_mode) {
         int gsum = 0, gn = 0;
         for (int gr = 0; gr < num_gr; gr++)
             for (int ch = 0; ch < nch; ch++) {

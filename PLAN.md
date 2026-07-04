@@ -480,9 +480,14 @@ m2, joint/stereo, CBR/VBR), 0 backstep, unit tests, double==fixed metrics.
     remainder is the shape-below-mask iterations themselves. Absolutes
     (M1, moderate load): ~260×/52×/34× realtime. README refreshed.
 
-Not queued: ViSQOL/PEAQ (needs external tooling), sfb21 partial-keep at
-high rates (blocked on a shapeable-sfb21 mechanism), mode-dependent
-shaping target for stereo (only if a stereo-SNR use case shows up).
+Not queued: ViSQOL/PEAQ (needs external tooling — since done, §6b),
+~~sfb21 partial-keep at high rates~~ (DONE 2026-07-04: content-aware
+keep at >96 kbps/ch for LONG granules outside a post-transient window —
+share>1e-3 of granule energy above the cut keeps it. Torture-sweep SNR
+17.5→33.8 / ODG −0.45→−0.16, quartet ODG 0.02→0.08; castanets exactly
+unchanged — keeping burst/decay HF re-created attack spray, hence the
+block-type + transient-context gates), mode-dependent shaping target
+for stereo (only if a stereo-SNR use case shows up).
 
 ## 10. Second follow-up queue (2026-07-04, prioritized)
 
