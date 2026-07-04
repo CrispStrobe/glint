@@ -264,6 +264,19 @@ Standings at 2026-07 (CBR, joint):
 - Shine: 10-20 dB below everyone everywhere (psymodel-free floor ✓).
 - glint-speed on quartet-128 (NMR −0.8 vs normal's −3.8) shows what the
   psy shaping buys.
+Extended 2026-07: PEAQ basic-model ODG for every clip via peaqb-fast
+(built at /tmp/peaqb-fast, github.com/akinori-ito/peaqb-fast — plain
+autotools; peaqb does NOT time-align, the harness feeds it an aligned
+48 kHz 20 s pair or every score saturates at −4), ViSQOL MOS-LQO when
+its binary exists (bazel build of github.com/google/visqol v3.3.3;
+needs USE_BAZEL_VERSION pinned and the dead armadillo sourceforge URL
+patched to the gitlab mirror), and a `--mode mono` low-rate ladder.
+Mono-64k speech ladder standings: LAME ahead on BOTH perceptual models
+(ODG −2.47 vs glint-normal −2.94, PESQ 4.44 vs 4.22) while glint wins
+SNR/NMR — consistent with the 128k PESQ finding: below ~128k, speech
+tuning wins measured only by our NMR are not to be trusted. At 96k
+mono it's mixed (glint edges ODG −1.70 vs −1.74, LAME PESQ 4.58 vs
+4.50).
 
 ## 6. Perceptual measurement — DONE (NMR in measure_audio.py, merged)
 
