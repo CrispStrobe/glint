@@ -1,13 +1,18 @@
 # Quality improvement plan
 
-**Scoreboard** (256 kbps joint, `-q best`, vs LAME on identical inputs,
-after the 2026-07 passes through PLAN items 9 and 10): speech SNR
-**38.4 vs 36.9** (glint ahead), NMR −13.8 vs −16.1, audible band-frames
-0.2% vs 0.0%; electronic **44.8 vs 44.5 / NMR −18.0 vs −15.8 (glint
-ahead on BOTH)**; quartet 44.9 vs 46.0 / **NMR −14.0 vs −11.1 (glint
-ahead)**, audible 0.0%. 64k-stereo speech: ODG −3.17 vs LAME's −3.32
-(glint ahead; PESQ still LAME's, 4.21 vs 4.01). VBR now psy-shaped: V0
-−15.9, V4 266 kbps / −13.5 with gapless playback (Xing + LAME tag,
+**Scoreboard** (vs LAME -q2 on identical inputs, after the 2026-07
+passes through PLAN items 9/10 and the corpus-driven round of
+2026-07-04). 128 kbps joint PEAQ-ODG league over the 10-clip corpus:
+glint ahead on 8 (choir −1.28 vs −2.06, orchestral −0.75 vs −1.09,
+quartet −0.46 vs −0.88, industrial −0.82 vs −1.00, piano −0.63 vs
+−0.70, torture −0.32 vs −0.45, speech −1.24 vs −1.29, electronic
+≈tied); LAME ahead on drums (−1.03 vs −1.18) and castanets-ODG (−0.29
+vs −0.62) — though castanets mean NMR is now glint's at BOTH rates
+(128k −2.1 vs 2.6; 256k −9.7 vs −8.6). 256k: everything transparent
+(ODG ≈0), glint ahead on SNR throughout (speech 38.4 vs 36.9,
+electronic 44.8/NMR −18.0 vs 44.5/−15.8, quartet 44.9/−13.7 vs
+46.0/−11.2). 64k-stereo speech: ODG −3.17 vs −3.32 (glint; PESQ still
+LAME's). VBR psy-shaped with gapless playback (Xing + LAME tag,
 0-sample decode offset). fixed==double everywhere incl. transients. Castanets (clip REGENERATED 2026-07 —
 noise-burst train over a 220 Hz bed, `tests/gen_castanet.py`; harsher
 than the old clip, absolute NMRs not comparable to older scoreboards)
