@@ -497,7 +497,12 @@ sufficient there (it shares the encoder's mask model).
    LAME's −16.1) at +1.26 dB SNR, electronic-128 +1.41 dB / NMR −0.85,
    speech-128 +0.62 dB / audible 14.1→13.3%, speech-256 +0.43 dB.
    Quartet/castanets bit-identical (state never triggers / no
-   headroom). Enabled by default.
+   headroom). Enabled by default — JOINT MODE ONLY: the final stereo
+   canonical run caught −1.0 dB SNR / −1.15 NMR in plain stereo, where
+   no unshaped side channel funds the forced-saving regime (softer
+   variants — fill-gated, hold-only — either kept the stereo damage or
+   eroded the joint wins). Stereo keeps baseline rate control and its
+   pre-banking numbers exactly.
 4. **VBR psy shaping** — DONE (merged). quantize_granule_vbr now routes
    through the full quantize_granule (factor search + NMR loops + region
    polish) at the VBR gain floor, with a VBR-specific shaping budget of

@@ -817,9 +817,16 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
             // +0.6 dB SNR / NMR -2.84 -> -2.98 / audible 14.1 -> 13.3%,
             // 256k +0.43 dB at equal NMR. Music without short blocks is
             // bit-identical (the state never triggers).
-            int hi = 6, lo = 4, clamp_hi = 12;
-            if (enc->rc_frames_since_short < 26) {
-                hi = 9; lo = 7; clamp_hi = 24;
+            int hi = 6, lo = 4;
+            const int clamp_hi = 12;
+            // Post-transient banking is JOINT-mode only: its wins need the
+            // forced-saving regime (lo=7), which the unshaped M/S side
+            // channel funds for free. In plain stereo the same regime
+            // coarsens real content chasing an unreachable fill target
+            // (measured -1.0 dB SNR / -1.15 NMR on stereo speech).
+            if (enc->config.mode == GLINT_JOINT &&
+                enc->rc_frames_since_short < 26) {
+                hi = 9; lo = 7;
             }
             if (mdb_bits * 10 > resv_cap_bits * hi) enc->rc_anchor--;
             else if (mdb_bits * 10 < resv_cap_bits * lo) enc->rc_anchor++;
@@ -1289,9 +1296,16 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
             // +0.6 dB SNR / NMR -2.84 -> -2.98 / audible 14.1 -> 13.3%,
             // 256k +0.43 dB at equal NMR. Music without short blocks is
             // bit-identical (the state never triggers).
-            int hi = 6, lo = 4, clamp_hi = 12;
-            if (enc->rc_frames_since_short < 26) {
-                hi = 9; lo = 7; clamp_hi = 24;
+            int hi = 6, lo = 4;
+            const int clamp_hi = 12;
+            // Post-transient banking is JOINT-mode only: its wins need the
+            // forced-saving regime (lo=7), which the unshaped M/S side
+            // channel funds for free. In plain stereo the same regime
+            // coarsens real content chasing an unreachable fill target
+            // (measured -1.0 dB SNR / -1.15 NMR on stereo speech).
+            if (enc->config.mode == GLINT_JOINT &&
+                enc->rc_frames_since_short < 26) {
+                hi = 9; lo = 7;
             }
             if (mdb_bits * 10 > resv_cap_bits * hi) enc->rc_anchor--;
             else if (mdb_bits * 10 < resv_cap_bits * lo) enc->rc_anchor++;
