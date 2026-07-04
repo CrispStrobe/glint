@@ -290,11 +290,15 @@ Work these in order; record measured results (or dead-end learnings) per
 item, in place. Gate: the standard battery (speech + music + castanets +
 m2, joint/stereo, CBR/VBR), 0 backstep, unit tests, double==fixed metrics.
 
-1. **Decode-based m2 regression test** — TODO. Encode 22.05k CBR-64k +
-   VBR (with short blocks exercised) in-test, decode with ffmpeg, assert
-   SNR floors. The unit suite has never caught a single m2 wire bug
-   (invented sfc mapping, MPEG-1-copied short tables) — all were found by
-   external decoders. Python level (tests/), wired into ctest if cheap.
+1. **Decode-based m2 regression test** — DONE. `test_m2_decode` in
+   tests/test_quality.py (also `--m2-only`), registered in ctest as
+   `m2_decode_quality` when python3+numpy and ffmpeg exist (~3 s, FFT
+   alignment). Three cases at 22.05k: CBR-64k best (21.5 dB), forced
+   all-short (22.7 dB — pins the LSF short wire format), VBR V4
+   (24.9 dB); floors 16/16/18. Verified discriminative: re-breaking the
+   22.05k short-sfb table drops allshort to 11.4 dB -> FAIL. Note the
+   test passes `-p double` explicitly — the CLI default is the FIXED
+   path, which has no short blocks.
 2. **Adaptive rounding offset** — TODO. The quantizer dead-zone is fixed
    at 0.4054; LAME adapts by tonality. Try per-granule (or per-band)
    offset selection scored by the existing MSE/NMR machinery. Targets

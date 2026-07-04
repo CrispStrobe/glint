@@ -189,6 +189,113 @@ def test_vbr_range(enc_bin, tmpdir, enc_extra=None):
     return passed
 
 
+def fft_align_snr(orig, dec, max_delay=3000):
+    """Find the encode+decode delay via FFT cross-correlation (aperiodic
+    signals only), then compute correlation and SNR at that alignment.
+    Equivalent to best_correlation but O(n log n) instead of O(delays*n)."""
+    n = min(len(orig), len(dec))
+    o, d = orig[:n], dec[:n]
+    size = 1
+    while size < 2 * n:
+        size *= 2
+    xc = np.fft.irfft(np.fft.rfft(d, size) * np.conj(np.fft.rfft(o, size)))
+    delay = int(np.argmax(xc[:max_delay]))
+    m = min(len(orig), len(dec) - delay) - 500
+    o = orig[:m]
+    d2 = dec[delay:delay + m]
+    err = np.mean((o - d2) ** 2)
+    corr = np.corrcoef(o, d2)[0, 1]
+    snr = 10 * np.log10(np.mean(o ** 2) / err) if err > 0 else 99.0
+    return corr, snr, delay
+
+
+def test_m2_decode(enc_bin, tmpdir, enc_extra=None):
+    """Decode-based MPEG-2 (LSF) quality test.
+
+    The wire-format bugs that plagued the m2 path (invented
+    scalefac_compress mapping, MPEG-1-copied short-sfb tables) were
+    invisible to encode-side checks: glint's own emission matched its own
+    assumptions, ffmpeg reported no bitstream errors, yet every real
+    decoder produced ~4-10 dB garbage. This test round-trips through
+    ffmpeg and asserts decoded SNR floors. Signals are noise-based
+    (aperiodic) so the alignment search is unambiguous.
+
+    Measured on the correct encoder: 21.5 / 22.7 / 24.9 dB SNR
+    (cbr64_best / allshort / vbr4); re-breaking the 22.05k short-sfb
+    table drops allshort to 11.4 dB. Floors sit between the two.
+    """
+    sr = 22050
+    rng = np.random.RandomState(42)
+    n = sr * 4
+    t = np.arange(n) / sr
+    # Speech-band noise bed + tonal component + click bursts every 0.4 s
+    # (bursts trigger the short-block scheduler at -q best).
+    sig = rng.randn(n) * 3000
+    # crude lowpass: cumulative average to concentrate energy at LF
+    sig = np.convolve(sig, np.ones(8) / 8, mode='same')
+    sig += np.sin(2 * np.pi * 300 * t) * 8000
+    burst_len = int(0.02 * sr)
+    decay = np.exp(-np.arange(burst_len) / (0.004 * sr))
+    for pos in np.arange(0.2, 3.8, 0.4):
+        i0 = int(pos * sr)
+        sig[i0:i0 + burst_len] += rng.randn(burst_len) * decay * 15000
+    sig = np.clip(sig, -32000, 32000)
+    stereo = np.column_stack([sig, sig * 0.8]).flatten()
+    mono_mix = (sig + sig * 0.8) / 2.0
+
+    wav = os.path.join(tmpdir, 'm2_decode.wav')
+    gen_wav(wav, stereo, sr=sr, nch=2)
+
+    def run_case(name, args_list, env_extra, min_snr):
+        mp3 = os.path.join(tmpdir, f'm2_{name}.mp3')
+        dec = os.path.join(tmpdir, f'm2_{name}_dec.wav')
+        env = dict(os.environ)
+        env.update(env_extra)
+        r = subprocess.run([enc_bin, wav, mp3] + args_list + (enc_extra or []),
+                           capture_output=True, text=True, timeout=60, env=env)
+        if r.returncode != 0:
+            print(f"  FAIL m2_{name}: encode failed: {r.stderr[:200]}")
+            return False
+        r = subprocess.run(['ffmpeg', '-y', '-i', mp3, '-ar', str(sr), '-ac', '1',
+                            '-acodec', 'pcm_s16le', dec],
+                           capture_output=True, text=True, timeout=60)
+        if r.returncode != 0:
+            print(f"  FAIL m2_{name}: decode failed")
+            return False
+        decoded = read_wav(dec)
+        corr, snr, delay = fft_align_snr(mono_mix, decoded, max_delay=3000)
+        errors = check_ffmpeg_errors(mp3)
+        ok = abs(corr) >= 0.9 and snr >= min_snr and not errors
+        status = "PASS" if ok else "FAIL"
+        print(f"  {status} m2_{name}: corr={corr:+.4f} SNR={snr:.1f}dB "
+              f"(floor {min_snr})={'ok' if snr >= min_snr else 'LOW'}"
+              f"{' DECODE ERRORS' if errors else ''}")
+        return ok
+
+    passed = True
+    # -p double: short blocks (and GLINT_FORCE_SHORT) only exist on the
+    # double path — the CLI's default is the FIXED path in a both-build.
+    # Pure-fixed builds ignore the flag and still pass the floors (the m2
+    # long-block path is shared).
+    dbl = ['-p', 'double']
+    # CBR 64k, best quality: exercises LSF long + scheduled short blocks.
+    if not run_case('cbr64_best',
+                    ['-b', '64', '-m', 'joint', '-q', 'best'] + dbl,
+                    {}, 16.0):
+        passed = False
+    # All-short: pins the LSF short-block wire format (reorder tables,
+    # four-slen scalefactors, region boundaries) directly.
+    if not run_case('allshort',
+                    ['-b', '64', '-m', 'joint', '-q', 'best'] + dbl,
+                    {'GLINT_FORCE_SHORT': '1'}, 16.0):
+        passed = False
+    # VBR at LSF rates.
+    if not run_case('vbr4', ['-V', '4', '-m', 'joint', '-q', 'best'] + dbl,
+                    {}, 18.0):
+        passed = False
+    return passed
+
+
 def main():
     parser = argparse.ArgumentParser(description='glint quality tests')
     parser.add_argument('encoder', nargs='?', default='build/glint_cli',
@@ -197,6 +304,9 @@ def main():
                         help='Path to speech WAV file for ASR test')
     parser.add_argument('--fixed', action='store_true',
                         help='Test fixed-point path (-p fixed)')
+    parser.add_argument('--m2-only', action='store_true',
+                        help='Run only the decode-based MPEG-2 test (fast, '
+                             'used by ctest)')
     args = parser.parse_args()
 
     enc = args.encoder
@@ -222,6 +332,13 @@ def main():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         all_pass = True
+
+        if args.m2_only:
+            print("\n=== MPEG-2 decode quality ===")
+            ok = test_m2_decode(enc_bin, tmpdir, enc_extra=enc_extra)
+            print(f"\n{'ALL TESTS PASSED' if ok else 'SOME TESTS FAILED'}")
+            sys.exit(0 if ok else 1)
+
         t5 = np.arange(SR * 5) / SR
         t3 = np.arange(SR * 3) / SR
 
@@ -307,6 +424,11 @@ def main():
         status = "PASS" if ok_t else "FAIL"
         print(f"  {status} transient signal (silence + burst)")
         if not ok_t:
+            all_pass = False
+
+        # --- MPEG-2 decode quality ---
+        print("\n=== MPEG-2 decode quality ===")
+        if not test_m2_decode(enc_bin, tmpdir, enc_extra=enc_extra):
             all_pass = False
 
         # --- Summary ---

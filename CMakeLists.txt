@@ -65,3 +65,25 @@ add_executable(glint_test tests/test_unit.cpp)
 target_link_libraries(glint_test PRIVATE glint_static)
 target_include_directories(glint_test PRIVATE src)
 add_test(NAME unit_tests COMMAND glint_test)
+
+# Decode-based MPEG-2 regression test: encodes at 22.05 kHz (long + forced
+# short blocks + VBR), decodes with ffmpeg, asserts SNR floors. This is the
+# only test that catches m2 WIRE bugs — the unit suite historically passed
+# while every real decoder produced garbage (invented scalefac_compress
+# mapping, MPEG-1-copied short-sfb tables). Registered only when a Python
+# with numpy and an ffmpeg binary are available.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_FOUND)
+    execute_process(COMMAND ${Python3_EXECUTABLE} -c "import numpy"
+                    RESULT_VARIABLE GLINT_PY_NUMPY_RC
+                    OUTPUT_QUIET ERROR_QUIET)
+    find_program(GLINT_FFMPEG ffmpeg)
+    if(GLINT_PY_NUMPY_RC EQUAL 0 AND GLINT_FFMPEG)
+        add_test(NAME m2_decode_quality
+                 COMMAND ${Python3_EXECUTABLE}
+                         ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_quality.py
+                         $<TARGET_FILE:glint_cli> --m2-only)
+    else()
+        message(STATUS "m2_decode_quality test skipped (needs python3+numpy and ffmpeg)")
+    endif()
+endif()
