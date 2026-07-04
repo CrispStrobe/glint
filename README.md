@@ -83,10 +83,13 @@ builds with statistics, byte-identity, and quality regression flags, use
 | -q best | 44.4 dB | 31.9 dB | 27.8 dB | 24.5 dB |
 
 (speed/normal within 0.5 dB of best per band.) Noise sits where masking
-absorbs it: most error power above 4 kHz, ~14% in 0–1 kHz. A Bark-band
-noise-to-mask metric (`tests/measure_audio.py`) measures mean NMR −10.2 dB
-stereo / −12.2 dB joint with 0.3–0.5% of band-frames above the mask
-(LAME: −16.1 dB / 0.0%).
+absorbs it: most error power above 4 kHz, ~13% in 0–1 kHz. A Bark-band
+noise-to-mask metric (`tests/measure_audio.py`) measures mean NMR −11.1 dB
+stereo / −13.8 dB joint with 0.2–0.7% of band-frames above the mask
+(LAME: −16.1 dB / 0.0%). For a full cross-encoder league table with
+PEAQ ODG, ViSQOL, PESQ and STOI, run `python tests/compare_encoders.py`
+(see PLAN.md §6b for tooling setup); `--check tests/quality_baselines.json`
+is the regression gate.
 
 **Footprint**:
 
@@ -178,6 +181,7 @@ glint_destroy(enc);
 | `glint_encode(enc, int16**, &size)` | Encode from int16 |
 | `glint_encode_float(enc, float**, &size)` | Encode from float [-1,1] |
 | `glint_encode_int32(enc, int32**, &size)` | Encode from int32 |
+| `glint_vbr_header(enc, buf, cap)` | Finalized Xing+LAME frame (VBR; call after flush, rewrite frame 0) |
 | `glint_flush(enc, &size)` | Drain buffered frames — required at end of stream |
 | `glint_destroy(enc)` | Free encoder |
 | `glint_set_threads(n)` | Worker threads for the scale-factor search (process-global; output byte-identical for any `n`) |
