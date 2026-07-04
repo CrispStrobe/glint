@@ -282,10 +282,54 @@ correct duration/seek for VBR files.
 
 ## Smaller dials (experiment-sized)
 
-- Per-frame M/S vs L/R decision (estimate bits/NMR both ways, pick per frame).
-- Region boundary search (`region0_count`/`region1_count`) via per-sfb
-  cumulative bit costs + DP over splits (LAME-style); the fixed heuristic
-  wastes bits. Too hot to brute-force inside the gain search.
-- Adaptive rounding offset (fixed 0.4054 dead-zone today; LAME adapts by
-  tonality).
-- VBR: replace the fixed `vbr_target_gain` table with NMR-driven allocation.
+(Absorbed into the follow-up queue below.)
+
+## 9. Follow-up queue (2026-07, prioritized)
+
+Work these in order; record measured results (or dead-end learnings) per
+item, in place. Gate: the standard battery (speech + music + castanets +
+m2, joint/stereo, CBR/VBR), 0 backstep, unit tests, double==fixed metrics.
+
+1. **Decode-based m2 regression test** — TODO. Encode 22.05k CBR-64k +
+   VBR (with short blocks exercised) in-test, decode with ffmpeg, assert
+   SNR floors. The unit suite has never caught a single m2 wire bug
+   (invented sfc mapping, MPEG-1-copied short tables) — all were found by
+   external decoders. Python level (tests/), wired into ctest if cheap.
+2. **Adaptive rounding offset** — TODO. The quantizer dead-zone is fixed
+   at 0.4054; LAME adapts by tonality. Try per-granule (or per-band)
+   offset selection scored by the existing MSE/NMR machinery. Targets
+   both remaining NMR gaps (speech tail −13.5 vs −16.1, castanets mean).
+3. **Per-band-frame outlier control** — TODO. The metric's mean-dB is
+   dominated by the worst band-frames (castanets: p95 already beats LAME
+   while the mean doesn't). Try an objective term that squashes outliers
+   (e.g. minimize Σmax(NMR,0) or a soft-max weight) instead of the plain
+   linear sum.
+4. **Xing/VBRI header for VBR** — TODO. Players currently misreport
+   duration/seek for VBR files. Emit a Xing frame (frame count, bytes,
+   TOC) as frame 0; CLI rewrites it after flush (streaming callers get a
+   documented placeholder).
+5. **Perceptual scale-search objective (old item 4)** — TODO. granule_mse
+   is raw MSE; weight per-band error by the outer-loop masks (minimize
+   NMR in the factor search itself). Evaluate honestly against the
+   battery — the envelope-penalty history says expect a dead end.
+6. **Per-frame M/S vs L/R decision** — TODO. Estimate bits/NMR both ways
+   per frame, pick the cheaper (mode_ext is per-frame already).
+7. **Region boundary search** — TODO. DP over per-sfb cumulative bit
+   costs for region0/region1_count (LAME-style) instead of the fixed
+   heuristic; run OUTSIDE the gain search (once on the final ix) first.
+8. **NMR-driven VBR allocation** — TODO. Replace the fixed
+   vbr_target_gain table: pick the per-granule gain floor from the psy
+   masks so V-levels track perceptual quality instead of raw gain.
+9. **White-noise pathology** — TODO (edge case). Full-scale white noise
+   decodes +11 dB hot and clipped; suspect the +0.4054 bias at
+   ultra-coarse gains when the 4095-bit cap binds (item 2's offset work
+   may fix this for free — re-measure after it).
+10. **fast_pow34 fast path** — TODO-if-hot: profile first; encode times
+    were unchanged when it became std::pow.
+11. **Speed re-measure + docs** — TODO. All ×-realtime figures predate
+    the 2026-07 pass and were taken under load; re-measure (at least
+    relative, interleaved A/B) and refresh README/CLAUDE.md.
+
+Not queued: ViSQOL/PEAQ (needs external tooling), sfb21 partial-keep at
+high rates (blocked on a shapeable-sfb21 mechanism), mode-dependent
+shaping target for stereo (only if a stereo-SNR use case shows up).
