@@ -69,6 +69,10 @@ DEFAULT_CLIPS = [
     ("quartet", "/Users/christianstrobele/Downloads/glint_samples/02_music_quartet_60s.wav", False),
     ("industrial", "/Users/christianstrobele/Downloads/glint_samples/03_music_industrial_60s.wav", False),
     ("piano", "/Users/christianstrobele/Downloads/glint_samples/04_music_piano_60s.wav", False),
+    ("orchestral", "/Users/christianstrobele/Downloads/glint_samples/05_music_orchestral_60s.wav", False),
+    ("drums", "/Users/christianstrobele/Downloads/glint_samples/06_music_drums_60s.wav", False),
+    ("choir", "/Users/christianstrobele/Downloads/glint_samples/07_music_choir_60s.wav", False),
+    ("torture", "/Users/christianstrobele/Downloads/glint_samples/08_torture_60s.wav", False),
     ("castanets", "/tmp/castanet.wav", False),
 ]
 

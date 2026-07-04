@@ -257,6 +257,15 @@ are dark — rolloff 474/1141 Hz):
   First standings: LAME slightly ahead at 128k (audible 1.4 vs 5.5%,
   ODG −0.70 vs −0.79) — a NEW measured weakness worth chasing.
 Sources kept alongside as ghosts19_src.m4a / goldberg_var1_src.flac.
+Corpus extended to 10 clips (2026-07-04, user request): additionally
+- `05_music_orchestral_60s.wav` — Beethoven Eroica mvt 1 (Musopen
+  `MusopenCollectionAsFlac`, PD mark, 24/48 FLAC), full orchestra.
+- `06_music_drums_60s.wav` — NIN "22 Ghosts III" (same CC BY-NC-SA
+  item), drum-forward.
+- `07_music_choir_60s.wav` — The Tudor Consort, Animuccia Credo
+  (archive.org, CC BY 3.0, 16/44.1 FLAC), a cappella polyphony.
+- `08_torture_60s.wav` — deterministic synthetic (tests/gen_torture.py):
+  log sweep, AM multitone, glockenspiel-like bursts, stepped band noise.
 For more material: archive.org lossless items are the reliable pool
 (Pixabay/FMA serve lossy MP3 downloads — unusable as codec references);
 EBU SQAM is now behind an EBU login; Jamendo offers FLAC for CC tracks.
