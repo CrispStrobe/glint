@@ -299,10 +299,15 @@ m2, joint/stereo, CBR/VBR), 0 backstep, unit tests, double==fixed metrics.
    22.05k short-sfb table drops allshort to 11.4 dB -> FAIL. Note the
    test passes `-p double` explicitly — the CLI default is the FIXED
    path, which has no short blocks.
-2. **Adaptive rounding offset** — TODO. The quantizer dead-zone is fixed
-   at 0.4054; LAME adapts by tonality. Try per-granule (or per-band)
-   offset selection scored by the existing MSE/NMR machinery. Targets
-   both remaining NMR gaps (speech tail −13.5 vs −16.1, castanets mean).
+2. **Adaptive rounding offset** — DEAD END (measured 2026-07). Global
+   sweep (0.30/0.4054/0.50, 256k best): 0.4054 wins or ties on speech
+   joint+stereo, quartet, castanets — the per-granule factor search
+   already owns the level dimension. Per-granule offset candidates
+   {0.30, 0.50} at the winning factor, picked by granule_mse: speech
+   joint NMR −13.48→−13.36 (worse), stereo/castanets marginally worse,
+   quartet ≈, at +2 quantize_base runs/granule. MSE cannot see what the
+   NMR metric penalizes here. Reverted; per-BAND offsets (LAME's actual
+   trick is tonality-dependent) would need a tonality estimate first.
 3. **Per-band-frame outlier control** — TODO. The metric's mean-dB is
    dominated by the worst band-frames (castanets: p95 already beats LAME
    while the mean doesn't). Try an objective term that squashes outliers
