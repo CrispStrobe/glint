@@ -746,6 +746,7 @@ static GranuleInfo nmr_outer_loop_short(const GranuleInfo& start, double factor,
     double cur_noise[13][3];
     std::memcpy(cur_noise, noise0, sizeof(cur_noise));
 
+    int stall = 0;
     for (int iter = 0; iter < max_iters; iter++) {
         double worst = 0.0;
         for (int b = 0; b < 13; b++)
@@ -786,6 +787,9 @@ static GranuleInfo nmr_outer_loop_short(const GranuleInfo& start, double factor,
         if (j_cand < j_best && cand_total <= total0 * kNoiseGuard) {
             j_best = j_cand;
             best = cand;
+            stall = 0;
+        } else if (++stall >= 3) {
+            break;  // see nmr_outer_loop
         }
         cur = cand;
         std::memcpy(cur_noise, cand_noise, sizeof(cur_noise));
@@ -898,6 +902,7 @@ static GranuleInfo nmr_outer_loop(const GranuleInfo& start, double factor,
     double cur_noise[21];
     std::memcpy(cur_noise, noise0, sizeof(cur_noise));
 
+    int stall = 0;
     for (int iter = 0; iter < max_iters; iter++) {
         // Amplify the bands driving the objective: everything within 6 dB of
         // the worst band's ratio, provided it is actually over the mask.
@@ -953,6 +958,13 @@ static GranuleInfo nmr_outer_loop(const GranuleInfo& start, double factor,
         if (j_cand < j_best && cand_total <= total0 * kNoiseGuard) {
             j_best = j_cand;
             best = cand;
+            stall = 0;
+        } else if (++stall >= 3) {
+            // Three consecutive iterations without an accepted improvement:
+            // the walk has left the productive region. Measured metrics-
+            // neutral on the whole battery; saves the tail of the
+            // (8|20)-iteration budget.
+            break;
         }
         cur = cand;
         std::memcpy(cur_noise, cand_noise, sizeof(cur_noise));
@@ -989,10 +1001,11 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
     init_quant_tables();
 
     if (quality_mode <= 0) {
-        GranuleInfo info = quantize_base(mdct_in, available_bits, sr_index,
-                                         block_type, gain_floor);
-        polish_regions(info, sr_index);
-        return info;
+        // No region polish at -q speed: the tier's contract is throughput,
+        // and the polish measured ~30% of the whole speed-tier profile for
+        // a bit-savings win the tier's users didn't ask for.
+        return quantize_base(mdct_in, available_bits, sr_index, block_type,
+                             gain_floor);
     }
 
     static const double kNormal[] = { 1.0, 1.04, 1.09, 1.15, 1.22, 1.30 };

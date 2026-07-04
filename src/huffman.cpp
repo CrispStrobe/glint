@@ -356,11 +356,8 @@ int huffman_optimize_regions(const int16_t* ix, int sr_index, HuffRegions* r) {
         if (sfb[b] >= bve) { nb = b; break; }
     }
 
-    // Per-table prefix costs and prefix band maxima at band boundaries
-    // (band b's slice is [sfb[b], min(sfb[b+1], bve)) ).
-    int pref[32][23];
+    // Band maxima (band b's slice is [sfb[b], min(sfb[b+1], bve)) ).
     int band_max[23];
-    for (int t = 0; t < 32; t++) pref[t][0] = 0;
     for (int b = 0; b < nb; b++) {
         int start = sfb[b];
         int end = std::min(sfb[b + 1], bve);
@@ -370,9 +367,24 @@ int huffman_optimize_regions(const int16_t* ix, int sr_index, HuffRegions* r) {
             if (v > bmax) bmax = v;
         }
         band_max[b] = bmax;
-        for (int t = 0; t < 32; t++)
-            pref[t][b + 1] = pref[t][b] + count_region_bits(ix, start, end, t);
     }
+    // Prefix costs are memoized PER TABLE on first use: the split search
+    // only ever queries the few tables that are candidates for some range
+    // maximum (plus the best-cost pruning skips many ranges outright), so
+    // computing all 32 rows up front made the polish ~30% of the -q speed
+    // profile for nothing.
+    int pref[32][23];
+    bool have[32] = {};
+    auto ensure = [&](int t) {
+        if (have[t]) return;
+        have[t] = true;
+        pref[t][0] = 0;
+        for (int b = 0; b < nb; b++) {
+            int start = sfb[b];
+            int end = std::min(sfb[b + 1], bve);
+            pref[t][b + 1] = pref[t][b] + count_region_bits(ix, start, end, t);
+        }
+    };
     // Suffix/range maxima via a running scan per query would be O(1) with a
     // prefix-max from the left and right; ranges are arbitrary, so build a
     // small sparse table alternative: nb <= 22, just recompute per range.
@@ -390,9 +402,11 @@ int huffman_optimize_regions(const int16_t* ix, int sr_index, HuffRegions* r) {
         if (m == 0) { *tsel = 0; return 0; }
         int cand[3];
         int nc = table_candidates(m, cand);
+        ensure(cand[0]);
         int best_t = cand[0];
         int best_c = pref[cand[0]][b] - pref[cand[0]][a];
         for (int c = 1; c < nc; c++) {
+            ensure(cand[c]);
             int cost = pref[cand[c]][b] - pref[cand[c]][a];
             if (cost < best_c) { best_c = cost; best_t = cand[c]; }
         }
@@ -415,6 +429,17 @@ int huffman_optimize_regions(const int16_t* ix, int sr_index, HuffRegions* r) {
     int best_cost = cur_cost;
     int best_i = -1, best_j = -1;
     int best_t[3] = { 0, 0, 0 };
+    // Suffix region [j, nb) costs are shared by every i — memoize them.
+    int suf_cost[24], suf_t[24];
+    bool suf_have[24] = {};
+    auto suffix_cost = [&](int j, int* tsel) {
+        if (!suf_have[j]) {
+            suf_have[j] = true;
+            suf_cost[j] = region_cost(j, nb, &suf_t[j]);
+        }
+        *tsel = suf_t[j];
+        return suf_cost[j];
+    };
     for (int i = 1; i <= std::min(16, nb); i++) {
         int t0;
         int c0 = region_cost(0, i, &t0);
@@ -425,7 +450,7 @@ int huffman_optimize_regions(const int16_t* ix, int sr_index, HuffRegions* r) {
             // dedupe happens naturally since costs are equal.
             int t1, t2;
             int c1 = region_cost(i, j, &t1);
-            int c2 = region_cost(j, nb, &t2);
+            int c2 = suffix_cost(std::min(j, nb), &t2);
             int total = c0 + c1 + c2;
             if (total < best_cost) {
                 best_cost = total;
