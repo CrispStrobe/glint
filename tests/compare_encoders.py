@@ -67,6 +67,8 @@ DEFAULT_CLIPS = [
     ("speech", "/tmp/glint_ref.wav", True),
     ("electronic", "/Users/christianstrobele/Downloads/glint_samples/01_music_electronic_60s.wav", False),
     ("quartet", "/Users/christianstrobele/Downloads/glint_samples/02_music_quartet_60s.wav", False),
+    ("industrial", "/Users/christianstrobele/Downloads/glint_samples/03_music_industrial_60s.wav", False),
+    ("piano", "/Users/christianstrobele/Downloads/glint_samples/04_music_piano_60s.wav", False),
     ("castanets", "/tmp/castanet.wav", False),
 ]
 

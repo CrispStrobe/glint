@@ -243,6 +243,24 @@ content within 0.4 dB at unchanged NMR.
   lowpass + the 44.1k short-table fix (see scoreboard).
 - `GLINT_FORCE_SHORT=1` forces all-short for diagnostics.
 
+## 6c. Test clips — canonical set (extended 2026-07-04)
+
+Two higher-quality lossless clips added (the electronic/quartet sources
+are dark — rolloff 474/1141 Hz):
+- `03_music_industrial_60s.wav` — NIN "19 Ghosts III" 60-120s, from the
+  official 24bit/48k ALAC on archive.org (NineInchNailsGhostsI-Iv24bit48khz,
+  CC BY-NC-SA 3.0); broadband to ~17 kHz, dense production. First
+  standings: glint-128 ahead of LAME on everything (NMR −1.9 vs 0.0,
+  audible 18 vs 31%, ODG −0.80 vs −1.00).
+- `04_music_piano_60s.wav` — Kimiko Ishizaka, Open Goldberg Variations
+  Var. 1 (OpenGoldbergVariations on archive.org, CC0, 24bit/96k FLAC).
+  First standings: LAME slightly ahead at 128k (audible 1.4 vs 5.5%,
+  ODG −0.70 vs −0.79) — a NEW measured weakness worth chasing.
+Sources kept alongside as ghosts19_src.m4a / goldberg_var1_src.flac.
+For more material: archive.org lossless items are the reliable pool
+(Pixabay/FMA serve lossy MP3 downloads — unusable as codec references);
+EBU SQAM is now behind an EBU login; Jamendo offers FLAC for CC tracks.
+
 ## 6b. Encoder league table — tests/compare_encoders.py (2026-07)
 
 Automated comparison harness: encodes every clip with glint
