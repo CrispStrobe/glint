@@ -51,11 +51,17 @@ void quantize_set_threads(int n);
 // vbr_shaping: bound the psy loops' budget at unshaped-spend*1.25 instead
 // of CBR's spend + slack/2 — VBR's slack is the max-rate frame and lets
 // V9 frames balloon 2.4x otherwise.
+// tonal_masks: per-band tonality (spectral flatness) modulates the masker
+// offset (-6 dB noisy ... -18 dB tonal) instead of the flat -14 dB. Wins
+// on strongly tonal content at low rates (piano-128 ODG -0.79 -> -0.63,
+// drums-128 -1.31 -> -1.18); costs in-house NMR at 256k where everything
+// is transparent — the encoder enables it at <= 96 kbps/channel only.
 GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
                               int sr_index, int quality_mode = 0,
                               int block_type = 0, int gain_floor = 0,
                               bool allow_psy = true,
-                              bool vbr_shaping = false);
+                              bool vbr_shaping = false,
+                              bool tonal_masks = false);
 
 // VBR quantization: starts from a fixed target gain (vbr_quality 0=best to
 // 9=worst) for variable quality, but never exceeds available_bits per

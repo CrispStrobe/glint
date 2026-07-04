@@ -603,15 +603,46 @@ static const BandMaskModel* get_mask_model(int sr_index) {
     return &models[sr_index];
 }
 
+static void compute_band_tonality(const double* mdct_in, int sr_index,
+                                  double alpha[21]) {
+    const int* sfb = tables::get_sfb_long_by_unified(sr_index);
+    for (int b = 0; b < 21; b++) {
+        int start = sfb[b], end = sfb[b + 1];
+        int n = end - start;
+        double am = 0.0, lg = 0.0;
+        for (int i = start; i < end; i++) {
+            double e = mdct_in[i] * mdct_in[i] + 1e-30;
+            am += e;
+            lg += std::log(e);
+        }
+        am /= n;
+        double gm = std::exp(lg / n);
+        double sfm_db = 10.0 * std::log10(gm / am + 1e-30);
+        double a = sfm_db / -20.0;
+        alpha[b] = a > 1.0 ? 1.0 : a;
+    }
+}
+
 static void compute_band_masks(const double* src_band, int sr_index,
-                               double mask_band[21]) {
+                               double mask_band[21],
+                               const double* alpha = nullptr) {
     const BandMaskModel* m = get_mask_model(sr_index);
     static const double kOffset = std::pow(10.0, -14.0 / 10.0);
+    double off[21];
+    if (alpha)
+        for (int j = 0; j < 21; j++)
+            off[j] = std::pow(10.0, -(6.0 + 12.0 * alpha[j]) / 10.0);
     for (int b = 0; b < 21; b++) {
         double acc = 0.0;
-        for (int j = 0; j < 21; j++)
-            acc += src_band[j] * m->spread[b][j];
-        mask_band[b] = std::max(acc * kOffset, m->ath[b]);
+        if (alpha) {
+            for (int j = 0; j < 21; j++)
+                acc += src_band[j] * m->spread[b][j] * off[j];
+            mask_band[b] = std::max(acc, m->ath[b]);
+        } else {
+            for (int j = 0; j < 21; j++)
+                acc += src_band[j] * m->spread[b][j];
+            mask_band[b] = std::max(acc * kOffset, m->ath[b]);
+        }
     }
 }
 
@@ -856,9 +887,15 @@ static GranuleInfo nmr_outer_loop(const GranuleInfo& start, double factor,
                                   const double* mdct_in, int available_bits,
                                   int sr_index, int max_iters,
                                   const double* src_band, int gain_floor,
-                                  bool vbr_shaping) {
+                                  bool vbr_shaping, bool tonal_masks) {
     double mask_band[21];
-    compute_band_masks(src_band, sr_index, mask_band);
+    if (tonal_masks) {
+        double alpha[21];
+        compute_band_tonality(mdct_in, sr_index, alpha);
+        compute_band_masks(src_band, sr_index, mask_band, alpha);
+    } else {
+        compute_band_masks(src_band, sr_index, mask_band);
+    }
 
     double noise0[21];
     compute_band_noise(start, mdct_in, sr_index, noise0);
@@ -1004,7 +1041,7 @@ static void polish_regions(GranuleInfo& info, int sr_index) {
 GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
                               int sr_index, int quality_mode, int block_type,
                               int gain_floor, bool allow_psy,
-                              bool vbr_shaping) {
+                              bool vbr_shaping, bool tonal_masks) {
     init_quant_tables();
 
     if (quality_mode <= 0) {
@@ -1101,7 +1138,8 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
             // preflag fold is gated off above.
             best_result = nmr_outer_loop(best_result, best_factor, mdct_in,
                                          available_bits, sr_index, max_iters,
-                                         src_band, gain_floor, vbr_shaping);
+                                         src_band, gain_floor, vbr_shaping,
+                                         tonal_masks);
         }
         // Types 1/3 (start/stop) are deliberately NOT shaped: their masks
         // would come from attack-dominated spectra and measured +3 dB NMR
@@ -1437,7 +1475,8 @@ GranuleInfo quantize_granule_vbr(const double* mdct_in, int available_bits,
     if (vbr_quality > 9) vbr_quality = 9;
     return quantize_granule(mdct_in, available_bits, sr_index, quality_mode,
                             block_type, vbr_target_gain[vbr_quality],
-                            allow_psy, /*vbr_shaping=*/true);
+                            allow_psy, /*vbr_shaping=*/true,
+                            /*tonal_masks=*/false);
 }
 
 } // namespace glint

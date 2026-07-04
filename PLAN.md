@@ -505,15 +505,17 @@ sufficient there (it shares the encoder's mask model).
    remaining mono-64 PESQ lead is not bandwidth). Discovered en route:
    LAME's own low-rate lever is RESAMPLING (64k stereo → 24 kHz LSF,
    96k → 32 kHz); an auto-resample would be a CLI-level feature.
-2. **Tonality-adaptive mask offset** — DEAD END (measured 2026-07).
-   Per-band SFM → tonality index, per-masker offset inside the
-   spreading sum, two ranges tried (−6…−18 dB and −4…−24 dB): a
-   complete no-op on PESQ/ODG at 64/128/256k speech, quartet and
-   electronic (all deltas ≤0.03 ODG / ≤0.03 PESQ, some NMR hair worse).
-   In this architecture the outer loop's total-noise guard and the
-   slack/2 shaping budget bind long before mask SHAPE matters — the
-   same lesson as 9.3/9.5 from the other direction. Mask-model work is
-   exhausted as a lever until the guard/budget structure changes.
+2. **Tonality-adaptive mask offset** — RESURRECTED and merged
+   (2026-07-04), rate-gated. First measured as a dead end — but only
+   because the ORIGINAL clips had no strongly tonal content. On the
+   extended corpus it wins exactly where theory says: piano-128 ODG
+   −0.79→−0.63 (overtaking LAME's −0.70), audible 5.5→3.3%; drums-128
+   ODG −1.31→−1.18; quartet-256 +0.4 dB SNR. Elsewhere ≤±0.03 ODG, but
+   it costs ~1 dB of in-house NMR at 256k (metric mismatch — our NMR
+   uses the flat −14 dB offset) where everything is transparent anyway.
+   Enabled at ≤96 kbps/channel (128k stereo/joint and below), same
+   philosophy as the lowpass gate; 256k outputs unchanged. LESSON: a
+   "dead end" verdict is only as good as the test corpus.
 3. **Attack bit banking** — repurposed into a WIN (merged as
    post-transient reservoir banking). The original goal is dead: on
    castanets the trivial inter-burst bed keeps the reservoir AT CAP

@@ -275,6 +275,7 @@ glint_t glint_create(const glint_config* cfg) {
             if (sfs[b] >= cut_short) { bs = b; break; }
         ctx->lp_long_start = std::min(sfl[bl], sfl[21]);
         ctx->lp_short_start = std::min(sfs[bs] * 3, sfs[12] * 3);
+        ctx->tonal_masks = (kbps_ch <= 96);
     }
 
     // Reservoir capacity = what the main_data_begin field can express:
@@ -995,7 +996,9 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                                                                  enc->sr_index, enc->quality_mode,
                                                                  /*block_type=*/2,
                                                                  gain_floor,
-                                                                 !use_ms || ch == 0);
+                                                                 !use_ms || ch == 0,
+                                                                 false,
+                                                                 enc->tonal_masks);
                     }
                     granule_info[gr][ch].block_type = 2;
                 } else {
@@ -1020,7 +1023,9 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                                                                  enc->sr_index, enc->quality_mode,
                                                                  /*block_type=*/bt,
                                                                  gain_floor,
-                                                                 !use_ms || ch == 0);
+                                                                 !use_ms || ch == 0,
+                                                                 false,
+                                                                 enc->tonal_masks);
                     }
                     granule_info[gr][ch].block_type = bt;
                 }
@@ -1167,7 +1172,9 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                                                              enc->sr_index, enc->quality_mode,
                                                              /*block_type=*/bt,
                                                              gain_floor,
-                                                             !use_ms || ch == 0);
+                                                             !use_ms || ch == 0,
+                                                             false,
+                                                             enc->tonal_masks);
                 }
                 granule_info[gr][ch].block_type = bt;
                 total_main_bits += granule_info[gr][ch].part2_3_length;
@@ -1432,7 +1439,9 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
                                                              enc->sr_index, enc->quality_mode,
                                                              /*block_type=*/2,
                                                              gain_floor,
-                                                             !use_ms || ch == 0);
+                                                             !use_ms || ch == 0,
+                                                             false,
+                                                             enc->tonal_masks);
                 }
                 granule_info[gr][ch].block_type = 2;
             } else {
@@ -1453,7 +1462,9 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
                                                              enc->sr_index, enc->quality_mode,
                                                              /*block_type=*/bt,
                                                              gain_floor,
-                                                             !use_ms || ch == 0);
+                                                             !use_ms || ch == 0,
+                                                             false,
+                                                             enc->tonal_masks);
                 }
                 granule_info[gr][ch].block_type = bt;
             }

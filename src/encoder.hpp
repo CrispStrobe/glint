@@ -36,6 +36,8 @@ struct glint_context {
     // under the max-rate budget and keeps the full band.
     int lp_long_start;   // first zeroed bin of a long/start/stop granule
     int lp_short_start;  // first zeroed wire index of a short granule
+    bool tonal_masks;    // tonality-adaptive masker offsets in the psy
+                         // loop (<= 96 kbps/channel; see quantize.hpp)
 
     bool use_fixed_point;  // runtime path selection
     int quality_mode;      // 0=speed, 1=normal, 2=best (psychoacoustic masking)
