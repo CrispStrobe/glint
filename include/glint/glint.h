@@ -78,6 +78,16 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data, int* 
 const uint8_t* glint_encode_int32(glint_t enc, const int32_t** channel_data, int* out_size);
 
 const uint8_t* glint_flush(glint_t enc, int* out_size);
+
+// VBR only: fill `buf` with the finalized Xing header frame (frame count,
+// byte count, 100-point seek TOC). Call AFTER glint_flush, then overwrite
+// the beginning of the output file with it — frame 0 of a VBR stream is a
+// silent placeholder of exactly this size. Returns the frame size, or 0
+// when not applicable (CBR, no frames emitted, buf too small). Streaming
+// consumers that cannot seek may skip this; the placeholder decodes as
+// ~26 ms of leading silence.
+int            glint_vbr_header(glint_t enc, uint8_t* buf, int buf_capacity);
+
 void           glint_destroy(glint_t enc);
 
 #ifdef __cplusplus

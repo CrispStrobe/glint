@@ -251,6 +251,11 @@ glint_t glint_create(const glint_config* cfg) {
     ctx->sched_energy_valid = false;
     ctx->next_block_carry = 0;
     ctx->sched_short_run = 0;
+    ctx->xing_frame_size = 0;
+    ctx->vbr_total_bytes = 0;
+    ctx->vbr_frame_count = 0;
+    ctx->toc_count = 0;
+    ctx->toc_stride = 1;
 #if !defined(GLINT_FIXED_POINT) || defined(GLINT_BOTH_PATHS)
     std::memset(ctx->held_sub_d, 0, sizeof(ctx->held_sub_d));
     ctx->have_held = false;
@@ -377,6 +382,57 @@ static int vbr_pick_frame_size(const glint_context* enc, int total_main_bits,
 // SNR in joint mode even though mid-band metrics improve.
 static constexpr double kChSplitLo = 0.45;
 static constexpr double kChSplitHi = 0.55;
+
+// Xing header frame for VBR: a fixed-size (64 kbps index) frame whose main
+// data carries "Xing" + flags + frame count + byte count + 100-byte TOC.
+// The placeholder (with_data=false) leaves the main data all-zero so it
+// decodes as silence for consumers that never rewrite it.
+static int build_xing_frame(const glint_context* enc, uint8_t* out,
+                            bool with_data) {
+    int slot_mult = (enc->mpeg_version == 1) ? 144 : 72;
+    int size = slot_mult * 64000 / enc->config.sample_rate;
+    std::memset(out, 0, size);
+    int br_index = (enc->mpeg_version == 1) ? tables::bitrate_to_index(64)
+                                            : tables::bitrate_to_index_m2(64);
+    int hdr_sr = (enc->sr_index < 3) ? enc->sr_index : enc->sr_index - 3;
+    int ver_bits = (enc->mpeg_version == 1) ? 0x3
+                 : (enc->mpeg_version == 0) ? 0x2 : 0x0;
+    out[0] = 0xFF;
+    out[1] = static_cast<uint8_t>(0xE0 | (ver_bits << 3) | (0x1 << 1) | 1);
+    out[2] = static_cast<uint8_t>((br_index << 4) | (hdr_sr << 2));
+    out[3] = static_cast<uint8_t>((mode_to_mpeg(enc->config.mode) << 6) |
+                                  (1 << 2));  // original=1
+    if (with_data) {
+        int off = 4 + enc->side_info_bits / 8;
+        std::memcpy(out + off, "Xing", 4);
+        off += 4;
+        out[off + 3] = 0x07;  // flags: frames | bytes | TOC
+        off += 4;
+        uint32_t fr = enc->vbr_frame_count;
+        uint32_t by = enc->vbr_total_bytes;
+        out[off++] = static_cast<uint8_t>(fr >> 24);
+        out[off++] = static_cast<uint8_t>(fr >> 16);
+        out[off++] = static_cast<uint8_t>(fr >> 8);
+        out[off++] = static_cast<uint8_t>(fr);
+        out[off++] = static_cast<uint8_t>(by >> 24);
+        out[off++] = static_cast<uint8_t>(by >> 16);
+        out[off++] = static_cast<uint8_t>(by >> 8);
+        out[off++] = static_cast<uint8_t>(by);
+        for (int i = 0; i < 100; i++) {
+            uint32_t v = 0;
+            if (fr > 0 && by > 0 && enc->toc_count > 0) {
+                uint64_t f = static_cast<uint64_t>(i) * fr / 100;
+                int j = static_cast<int>(f / enc->toc_stride);
+                if (j >= enc->toc_count) j = enc->toc_count - 1;
+                v = static_cast<uint32_t>(
+                    static_cast<uint64_t>(enc->toc_off[j]) * 256 / by);
+                if (v > 255) v = 255;
+            }
+            out[off++] = static_cast<uint8_t>(v);
+        }
+    }
+    return size;
+}
 
 // Shared frame-emission tail for all encode paths: SCFSI, header, side info,
 // main data, then either the bit-reservoir stream (CBR: frames are buffered
@@ -567,9 +623,32 @@ static const uint8_t* finish_frame(glint_t enc, GranuleInfo granule_info[2][2],
     md.flush();
 
     if (enc->vbr_mode) {
-        // VBR: each frame is self-contained.
+        // VBR: each frame is self-contained. The very first output is
+        // preceded by the silent Xing placeholder frame (rewritten by the
+        // caller via glint_vbr_header after flush).
+        int pre = 0;
+        if (enc->frame_count == 0) {
+            pre = build_xing_frame(enc, enc->output_buf, false);
+            enc->xing_frame_size = pre;
+            enc->vbr_total_bytes = static_cast<uint32_t>(pre);
+        }
         const uint8_t* frame = enc->frame_asm.assemble(this_frame_size, out_size);
-        std::memcpy(enc->output_buf, frame, *out_size);
+        // Seek-TOC bookkeeping: store this frame's start offset every
+        // toc_stride-th frame; decimate by 2 when the table fills.
+        if (enc->vbr_frame_count % enc->toc_stride == 0) {
+            if (enc->toc_count == 256) {
+                for (int i = 0; i < 128; i++)
+                    enc->toc_off[i] = enc->toc_off[2 * i];
+                enc->toc_count = 128;
+                enc->toc_stride *= 2;
+            }
+            if (enc->vbr_frame_count % enc->toc_stride == 0)
+                enc->toc_off[enc->toc_count++] = enc->vbr_total_bytes;
+        }
+        enc->vbr_frame_count++;
+        enc->vbr_total_bytes += static_cast<uint32_t>(*out_size);
+        std::memcpy(enc->output_buf + pre, frame, *out_size);
+        *out_size += pre;
     } else {
         // CBR: append to the reservoir stream; complete slots are released.
         uint8_t hs[64];
@@ -1279,6 +1358,12 @@ const uint8_t* glint_flush(glint_t enc, int* out_size) {
     }
     *out_size = total;
     return enc->output_buf;
+}
+
+int glint_vbr_header(glint_t enc, uint8_t* buf, int buf_capacity) {
+    if (!enc || !buf || !enc->vbr_mode || enc->xing_frame_size == 0) return 0;
+    if (buf_capacity < enc->xing_frame_size) return 0;
+    return build_xing_frame(enc, buf, true);
 }
 
 void glint_destroy(glint_t enc) {

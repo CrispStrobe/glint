@@ -85,6 +85,18 @@ struct glint_context {
     bool have_held;
 #endif
 
+    // VBR Xing header bookkeeping. Frame 0 of a VBR stream is a silent
+    // placeholder frame of the exact size glint_vbr_header() produces;
+    // file-based callers rewrite it after glint_flush (streaming consumers
+    // that cannot seek just get ~26 ms of leading silence). The TOC keeps
+    // up to 256 frame offsets with stride doubling — fixed memory.
+    int xing_frame_size;        // placeholder size; 0 = none emitted yet
+    uint32_t vbr_total_bytes;   // stream bytes incl. the placeholder
+    uint32_t vbr_frame_count;   // audio frames (excl. the placeholder)
+    uint32_t toc_off[256];      // start offset of every toc_stride-th frame
+    int toc_count;
+    int toc_stride;
+
     // Streaming callback (optional)
     glint_write_cb write_cb;
     void* write_cb_data;

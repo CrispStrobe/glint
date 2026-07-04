@@ -316,10 +316,14 @@ m2, joint/stereo, CBR/VBR), 0 backstep, unit tests, double==fixed metrics.
    speech 2.50→2.59, stereo SNR −0.07); excess objective: pure no-op.
    The castanets mean outliers are attack-frame-local — there the noise
    guard and shaping budget bind, not the objective's shape. Reverted.
-4. **Xing/VBRI header for VBR** — TODO. Players currently misreport
-   duration/seek for VBR files. Emit a Xing frame (frame count, bytes,
-   TOC) as frame 0; CLI rewrites it after flush (streaming callers get a
-   documented placeholder).
+4. **Xing/VBRI header for VBR** — DONE. VBR streams start with a silent
+   placeholder frame (64 kbps-index size); `glint_vbr_header()` (public
+   API, call after glint_flush) produces the finalized Xing frame —
+   frames, bytes, 100-point TOC (up to 256 stored offsets with stride
+   doubling, fixed memory) — and the CLI rewrites frame 0 with it.
+   ffprobe now reports exact duration and true average bitrate (V0
+   318.7k / V9 46k); streaming consumers that cannot seek get ~26 ms of
+   leading silence instead of a bogus header. Metrics unchanged.
 5. **Perceptual scale-search objective (old item 4)** — TODO. granule_mse
    is raw MSE; weight per-band error by the outer-loop masks (minimize
    NMR in the factor search itself). Evaluate honestly against the

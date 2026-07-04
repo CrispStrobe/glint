@@ -640,6 +640,19 @@ int main(int argc, char** argv) {
         bytes_written += flush_size;
     }
 
+    // VBR: rewrite the placeholder frame 0 with the finalized Xing header
+    // (frame count, byte count, seek TOC) so players report duration/seek
+    // correctly.
+    if (vbr_quality >= 0) {
+        uint8_t xing[512];
+        int xn = glint_vbr_header(enc, xing, static_cast<int>(sizeof(xing)));
+        if (xn > 0) {
+            fseek(mp3_file, 0, SEEK_SET);
+            fwrite(xing, 1, xn, mp3_file);
+            fseek(mp3_file, 0, SEEK_END);
+        }
+    }
+
     auto end_time = std::chrono::steady_clock::now();
     double elapsed = std::chrono::duration<double>(end_time - start_time).count();
     double audio_duration = static_cast<double>(samples_encoded) / wav.sample_rate;
