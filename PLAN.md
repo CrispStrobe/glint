@@ -364,10 +364,17 @@ m2, joint/stereo, CBR/VBR), 0 backstep, unit tests, double==fixed metrics.
    budget feedback is the better allocator; a real win would need the
    full outer-loop shaping in the VBR path (it currently has none), not
    a smarter floor. Reverted.
-9. **White-noise pathology** — TODO (edge case). Full-scale white noise
-   decodes +11 dB hot and clipped; suspect the +0.4054 bias at
-   ultra-coarse gains when the 4095-bit cap binds (item 2's offset work
-   may fix this for free — re-measure after it).
+9. **White-noise pathology** — RESOLVED by earlier fixes / explained
+   (2026-07). The "+11 dB hot and clipped" behavior no longer exists
+   (killed by the pow34-curve and gain-clipping-bound fixes). Current
+   full-scale white noise: raw SNR −2.4 dB looks alarming but decomposes
+   into (a) the sfb21 lowpass deleting the ~28% of white-noise energy
+   above 15.8 kHz — a structural corr ceiling of √0.72 ≈ 0.85, measured
+   0.84, with per-band coherence 0.99 everywhere below the cutoff — and
+   (b) a −1.6 dB level bias from the dead zone at ultra-coarse gains.
+   Level- and bitrate-independent by construction. LAME measures 8.9 dB
+   via its 17.5k lowpass + exact level. Not a defect worth machinery;
+   revisit only if the level bias shows up on real content.
 10. **fast_pow34 fast path** — TODO-if-hot: profile first; encode times
     were unchanged when it became std::pow.
 11. **Speed re-measure + docs** — TODO. All ×-realtime figures predate
