@@ -324,10 +324,16 @@ m2, joint/stereo, CBR/VBR), 0 backstep, unit tests, double==fixed metrics.
    ffprobe now reports exact duration and true average bitrate (V0
    318.7k / V9 46k); streaming consumers that cannot seek get ~26 ms of
    leading silence instead of a bogus header. Metrics unchanged.
-5. **Perceptual scale-search objective (old item 4)** — TODO. granule_mse
-   is raw MSE; weight per-band error by the outer-loop masks (minimize
-   NMR in the factor search itself). Evaluate honestly against the
-   battery — the envelope-penalty history says expect a dead end.
+5. **Perceptual scale-search objective (old item 4)** — DEAD END
+   (measured 2026-07, as the envelope-penalty history predicted).
+   Weighting granule_mse per band by 1/mask (same masks as the outer
+   loop): NMR improves only marginally (speech −13.48→−13.61, elec
+   −15.92→−16.02) while SNR collapses — quartet 44.7→36.9 (−7.7 dB!),
+   speech 37.7→35.4, 0-1k band-SNR −8 dB. The mask-relative objective
+   happily degrades loud (self-masked) low bands for slivers of NMR;
+   the outer loop already harvests those trades SAFELY because its
+   total-noise guard bounds the damage — the factor search has no such
+   guard. Raw MSE stays the factor-search objective. Reverted.
 6. **Per-frame M/S vs L/R decision** — TODO. Estimate bits/NMR both ways
    per frame, pick the cheaper (mode_ext is per-frame already).
 7. **Region boundary search** — TODO. DP over per-sfb cumulative bit
