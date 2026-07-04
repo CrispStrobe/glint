@@ -379,8 +379,13 @@ void alias_reduce_fp(int32_t mdct_out[32][18]) {
 // Transition/short window tables for the fixed path (double precision —
 // see the class comment). Separate copies from the double-path statics so
 // pure-fixed builds have them too.
+#ifdef GLINT_SMALL_BUFFERS
+static float fp_wincos_start[36][18];   // rare transition granules: float
+static float fp_wincos_stop[36][18];    // precision is ample, half the RAM
+#else
 static double fp_wincos_start[36][18];
 static double fp_wincos_stop[36][18];
+#endif
 static double fp_short_win[12];
 static double fp_short_cos[12][6];
 static bool fp_win_tables_init = false;
@@ -446,8 +451,13 @@ void MDCT_FP::process_and_convert(const int32_t subband[32][18], double mdct_fla
     if (block_type == 1 || block_type == 3) {
         // Transition windows: rare granules, double-precision scalar path.
         init_fp_win_tables();
+#ifdef GLINT_SMALL_BUFFERS
+        const float (*wincos)[18] = (block_type == 1) ? fp_wincos_start
+                                                      : fp_wincos_stop;
+#else
         const double (*wincos)[18] = (block_type == 1) ? fp_wincos_start
                                                        : fp_wincos_stop;
+#endif
         const double kQ = 1.0 / 16777216.0;
         for (int sb = 0; sb < 32; sb++) {
             double x[36];

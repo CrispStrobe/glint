@@ -127,19 +127,42 @@ static void quant_parallel_for(int n, const std::function<void(int)>& fn) {
 
 static double gain_table[256];
 static double sf_table[2][16];
+#ifndef GLINT_SMALL_BUFFERS
 // cbrt_lut[a] = a * cbrt(a), for a = |ix| in [0, 8191] (ix is clamped to 8191
 // in the quantizer). Used in granule_mse to avoid a std::cbrt per nonzero
 // coefficient. Holds exactly the same double the inline expression produced,
 // so the MSE — and the scale-factor it selects — is bit-identical.
 static double cbrt_lut[8192];
+#else
+// Small-footprint a^(4/3): mantissa cube-root table (65 floats) + the three
+// 2^(k/3) constants. Relative error ~1e-5 — indistinguishable in the MSE
+// ranking (measured metrics-identical on the battery) — for 64 KB saved.
+static float cbrt_mant[65];
+static inline double pow43_small(int a) {
+    if (a <= 0) return 0.0;
+    int n = 31 - __builtin_clz(static_cast<unsigned>(a));
+    double m = static_cast<double>(a) / static_cast<double>(1 << n);  // [1,2)
+    double f = (m - 1.0) * 64.0;
+    int i = static_cast<int>(f);
+    double c = cbrt_mant[i] + (f - i) * (cbrt_mant[i + 1] - cbrt_mant[i]);
+    static const double k3[3] = { 1.0, 1.2599210498948732, 1.5874010519681994 };
+    double cr = std::ldexp(k3[n % 3], n / 3) * c;   // cbrt(a)
+    return static_cast<double>(a) * cr;             // a^(4/3)
+}
+#endif
 static bool tables_init = false;
 
 static void init_quant_tables() {
     if (tables_init) return;
     for (int g = 0; g < 256; g++)
         gain_table[g] = std::pow(2.0, -3.0 * (g - 210.0) / 16.0);
+#ifndef GLINT_SMALL_BUFFERS
     for (int a = 0; a < 8192; a++)
         cbrt_lut[a] = static_cast<double>(a) * std::cbrt(static_cast<double>(a));
+#else
+    for (int i = 0; i <= 64; i++)
+        cbrt_mant[i] = static_cast<float>(std::cbrt(1.0 + i / 64.0));
+#endif
     for (int sf = 0; sf < 16; sf++) {
         // Encoder uses positive exponent to compensate decoder's negative:
         // Decoder: 2^(-0.5*(1+sfs)*sf), Encoder: 2^(+0.75*0.5*(1+sfs)*sf)
@@ -167,29 +190,44 @@ static double fast_pow34(double x) {
 // short analog of sfb21 — no scalefactor).
 struct ShortWindowMap { uint8_t win[576]; uint8_t band[576]; };
 static const ShortWindowMap* get_short_window_map(int sr_index) {
+#ifdef GLINT_SMALL_BUFFERS
+    // Single-slot cache: one sample rate per encoder in embedded use;
+    // rebuilding on a rate switch is a one-time cost.
+    static ShortWindowMap maps[1];
+    static int slot_sr = -1;
+    if (sr_index < 0 || sr_index > 5) sr_index = 0;
+    bool need = (slot_sr != sr_index);
+    int slot = 0;
+    slot_sr = sr_index;
+    if (need) {
+#else
     static ShortWindowMap maps[6];
     static bool init[6] = {};
     if (sr_index < 0 || sr_index > 5) sr_index = 0;
+    int slot = sr_index;
     if (!init[sr_index]) {
+#endif
         const int* sfb = tables::get_sfb_short_by_unified(sr_index);
         int idx = 0;
         for (int b = 0; b < 13; b++) {
             int len = sfb[b + 1] - sfb[b];
             for (int w = 0; w < 3; w++)
                 for (int j = 0; j < len && idx < 576; j++) {
-                    maps[sr_index].win[idx] = static_cast<uint8_t>(w);
-                    maps[sr_index].band[idx] = static_cast<uint8_t>(b);
+                    maps[slot].win[idx] = static_cast<uint8_t>(w);
+                    maps[slot].band[idx] = static_cast<uint8_t>(b);
                     idx++;
                 }
         }
         while (idx < 576) {
-            maps[sr_index].win[idx] = 2;
-            maps[sr_index].band[idx] = 12;
+            maps[slot].win[idx] = 2;
+            maps[slot].band[idx] = 12;
             idx++;
         }
+#ifndef GLINT_SMALL_BUFFERS
         init[sr_index] = true;
+#endif
     }
-    return &maps[sr_index];
+    return &maps[slot];
 }
 
 // Cache for pre-computed per-coefficient values (constant across binary search)
@@ -355,9 +393,6 @@ static int encode_scalefac_compress_m2(int slen0, int slen1, int slen2, int slen
     return -1;  // not representable in this range
 }
 
-// Thread-local psycho model for use by quantize_granule
-static PsychoModel s_psycho;
-
 // Compute headroom-based scalefactors using Vorbis/Opus/FLAC psychoacoustic
 // masking model. Assigns SF inversely proportional to masking headroom:
 // loud bands (high SMR) get sf=0 (noise masked by signal), bands near
@@ -480,8 +515,12 @@ static double granule_mse(const GranuleInfo& gi, const double* mdct_in,
                 // a^(4/3) == a * a^(1/3); precomputed in cbrt_lut[a]. ix is
                 // always in [0,8191], but guard the index defensively.
                 int a = std::abs(static_cast<int>(gi.ix[i]));
+#ifndef GLINT_SMALL_BUFFERS
                 double a43 = (a < 8192) ? cbrt_lut[a]
                                         : static_cast<double>(a) * std::cbrt(static_cast<double>(a));
+#else
+                double a43 = pow43_small(a);
+#endif
                 double g = wmap ? decoder_gain * sbg_fac[wmap[i]] *
                                       sfd_s[bmap[i]][wmap[i]]
                                 : decoder_gain * sf_d;
@@ -546,8 +585,12 @@ static void compute_band_noise(const GranuleInfo& gi, const double* mdct_in,
             double xr_hat = 0.0;
             if (gi.ix[i] != 0) {
                 int a = std::abs(static_cast<int>(gi.ix[i]));
+#ifndef GLINT_SMALL_BUFFERS
                 double a43 = (a < 8192) ? cbrt_lut[a]
                                         : static_cast<double>(a) * std::cbrt(static_cast<double>(a));
+#else
+                double a43 = pow43_small(a);
+#endif
                 double g = wmap ? decoder_gain * sbg_fac[wmap[i]] *
                                       sfd_s[bmap[i]][wmap[i]]
                                 : decoder_gain * sf_d;
@@ -574,11 +617,23 @@ struct BandMaskModel {
 };
 
 static const BandMaskModel* get_mask_model(int sr_index) {
+#ifdef GLINT_SMALL_BUFFERS
+    static BandMaskModel models[1];
+    static int slot_sr = -1;
+    if (sr_index < 0 || sr_index > 5) sr_index = 0;
+    bool need = (slot_sr != sr_index);
+    int slot = 0;
+    slot_sr = sr_index;
+    if (need) {
+        BandMaskModel& m = models[slot];
+#else
     static BandMaskModel models[6];
     static bool init[6] = {};
     if (sr_index < 0 || sr_index > 5) sr_index = 0;
+    int slot = sr_index;
     if (!init[sr_index]) {
         BandMaskModel& m = models[sr_index];
+#endif
         static const int rates[6] = { 44100, 48000, 32000, 22050, 24000, 16000 };
         double srate = rates[sr_index];
         const int* sfb = tables::get_sfb_long_by_unified(sr_index);
@@ -598,9 +653,11 @@ static const BandMaskModel* get_mask_model(int sr_index) {
                               17.5 * std::sqrt(1.0 + (dz + 0.474) * (dz + 0.474));
                 m.spread[b][j] = std::pow(10.0, s_db / 10.0);
             }
+#ifndef GLINT_SMALL_BUFFERS
         init[sr_index] = true;
+#endif
     }
-    return &models[sr_index];
+    return &models[slot];
 }
 
 static void compute_band_tonality(const double* mdct_in, int sr_index,
@@ -650,11 +707,23 @@ static void compute_band_masks(const double* src_band, int sr_index,
 // sfbs of one window (temporal masking between the 3 windows is ignored).
 struct ShortMaskModel { double spread[13][13]; double ath[13]; };
 static const ShortMaskModel* get_short_mask_model(int sr_index) {
+#ifdef GLINT_SMALL_BUFFERS
+    static ShortMaskModel models[1];
+    static int slot_sr = -1;
+    if (sr_index < 0 || sr_index > 5) sr_index = 0;
+    bool need = (slot_sr != sr_index);
+    int slot = 0;
+    slot_sr = sr_index;
+    if (need) {
+        ShortMaskModel& m = models[slot];
+#else
     static ShortMaskModel models[6];
     static bool init[6] = {};
     if (sr_index < 0 || sr_index > 5) sr_index = 0;
+    int slot = sr_index;
     if (!init[sr_index]) {
         ShortMaskModel& m = models[sr_index];
+#endif
         static const int rates[6] = { 44100, 48000, 32000, 22050, 24000, 16000 };
         double srate = rates[sr_index];
         const int* sfb = tables::get_sfb_short_by_unified(sr_index);
@@ -673,9 +742,11 @@ static const ShortMaskModel* get_short_mask_model(int sr_index) {
                               17.5 * std::sqrt(1.0 + (dz + 0.474) * (dz + 0.474));
                 m.spread[b][j] = std::pow(10.0, s_db / 10.0);
             }
+#ifndef GLINT_SMALL_BUFFERS
         init[sr_index] = true;
+#endif
     }
-    return &models[sr_index];
+    return &models[slot];
 }
 
 // Per-(band,window) noise of a short granule's reconstruction vs the
@@ -700,8 +771,12 @@ static void compute_cell_noise(const GranuleInfo& gi, const double* mdct_in,
         double xr_hat = 0.0;
         if (gi.ix[i] != 0) {
             int a = std::abs(static_cast<int>(gi.ix[i]));
+#ifndef GLINT_SMALL_BUFFERS
             double a43 = (a < 8192) ? cbrt_lut[a]
                                     : static_cast<double>(a) * std::cbrt(static_cast<double>(a));
+#else
+            double a43 = pow43_small(a);
+#endif
             xr_hat = std::copysign(a43 * decoder_gain * sbg_fac[w] * sfd_s[b][w],
                                    mdct_in[i]);
         }

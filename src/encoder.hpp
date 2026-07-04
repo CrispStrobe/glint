@@ -79,9 +79,6 @@ struct glint_context {
     int padding_threshold;
     int frame_count;
 
-    // Psychoacoustic model (quality_mode >= 2)
-    glint::PsychoModel psycho;
-
     // Block-type scheduler state (shared across channels: both channels of
     // a granule always use the same window type, which M/S coding requires).
     double sched_prev_energy;   // previous granule's total energy

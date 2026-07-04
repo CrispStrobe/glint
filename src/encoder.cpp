@@ -234,9 +234,28 @@ glint_t glint_create(const glint_config* cfg) {
     if (cfg->vbr == GLINT_VBR_ON) {
         effective_bitrate =
             (tables::detect_mpeg_version(cfg->sample_rate) == 1) ? 320 : 160;
+        // GLINT_SMALL_BUFFERS caps kMaxFrameSize at 1024 bytes; a 320 kbps
+        // MPEG-1 frame (up to 1045 B at 44.1 kHz) would overflow the frame
+        // assembler. Cap the VBR budget at the largest bitrate whose padded
+        // frame fits.
+        while (effective_bitrate > 32) {
+            int mult = (tables::detect_mpeg_version(cfg->sample_rate) == 1)
+                           ? 144 : 72;
+            if (mult * effective_bitrate * 1000 / cfg->sample_rate + 1 <=
+                kMaxFrameSize)
+                break;
+            effective_bitrate -= 32;
+        }
     }
 
     if (glint_check_config(cfg->sample_rate, effective_bitrate) != 0) return nullptr;
+    {
+        // Reject CBR configs whose padded frame cannot fit the assembler
+        // (only reachable with GLINT_SMALL_BUFFERS at high bitrates).
+        int mult = (tables::detect_mpeg_version(cfg->sample_rate) == 1) ? 144 : 72;
+        if (mult * effective_bitrate * 1000 / cfg->sample_rate + 1 > kMaxFrameSize)
+            return nullptr;
+    }
     if (cfg->num_channels < 1 || cfg->num_channels > 2) return nullptr;
     if (cfg->num_channels == 1 && cfg->mode != GLINT_MONO) return nullptr;
     if (cfg->num_channels == 2 && cfg->mode == GLINT_MONO) return nullptr;
