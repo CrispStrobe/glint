@@ -22,6 +22,15 @@ vs 6.2% (glint ahead on both)**; 256k −3.9 vs −8.6. MPEG-2 64k speech
 14.7/16.5. VBR V0: 40.7 dB / NMR −15.3 / 0.0% audible, now with a Xing
 header. Stereo speech tiers: 36.7/36.1/36.2 at NMR −8.6/−11.0/−11.1
 (normal/best trade ~0.6 dB SNR for NMR vs the target-1.0 era).
+**RAM (2026-07-04)**: fixed+GLINT_SMALL_BUFFERS measures ~60 KB (22.6 KB
+BSS + 37.5 KB context) vs Shine's 95.9 KB — after removing dead
+PsychoModel instances (10 KB), replacing the 64 KB cbrt_lut with a
+65-float mantissa table under SMALL_BUFFERS (metrics-identical), single-
+slotting the per-samplerate mask/window caches (−31 KB) and float
+transition tables. The audit also found live memory corruption: VBR's
+320 kbps budget frame overflowed the 1024-byte SMALL_BUFFERS assembler —
+glint_create now caps/rejects unfittable configs. Desktop builds are
+byte-unchanged.
 **Remaining LAME gaps** (updated 2026-07-04): speech NMR tail (−13.7 vs
 −16.1, in-house metric only — ODG calls speech-128 for glint and PESQ
 for LAME; INFORMAL LISTENING 2026-07-04: the maintainer could not tell

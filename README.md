@@ -92,16 +92,20 @@ PEAQ ODG, ViSQOL, PESQ and STOI, run `python tests/compare_encoders.py`
 (see PLAN.md §6b for tooling setup); `--check tests/quality_baselines.json`
 is the regression gate.
 
-**Footprint**:
+**Footprint** (measured 2026-07: static/BSS + encoder context; Shine =
+its `shine_global_config`):
 
-| | glint double | glint fixed | Shine |
+| | glint double (desktop) | glint embedded¹ | Shine |
 |---|---|---|---|
-| Library | 158 KB | 127 KB | 225 KB |
-| RAM | 141 KB | **50 KB** | ~100 KB |
+| Library (flash) | ~160 KB | ~90 KB | 225 KB |
+| RAM | ~213 KB | **~60 KB** | ~96 KB |
 | License | **MIT** | **MIT** | LGPL v2 |
 
-MIT licensed, 50 KB RAM in fixed-point mode. Whisper ASR round-trip:
-91% word similarity.
+¹ `GLINT_MODE=embedded` / `GLINT_SMALL_BUFFERS` + fixed-point: smaller
+frame buffers, single-slot model caches, table-free cbrt — measured
+metrics-identical to the desktop fixed build. `-q speed` avoids heap
+allocations entirely; the higher tiers use small transient vectors in
+the scale search. Whisper ASR round-trip: 91% word similarity.
 
 ## Building
 
