@@ -277,6 +277,18 @@ SNR/NMR — consistent with the 128k PESQ finding: below ~128k, speech
 tuning wins measured only by our NMR are not to be trusted. At 96k
 mono it's mixed (glint edges ODG −1.70 vs −1.74, LAME PESQ 4.58 vs
 4.50).
+Full joint table with ODG (2026-07): the perceptual models sharpen the
+map. Quartet: glint clearly ahead on EVERY model (128k ODG −0.44 vs
+LAME −0.88; 256k 0.02 vs −0.06). Electronic-128: our NMR says glint
+decisively (−6.3 vs −3.1) but ODG gives LAME a slight edge (−0.22 vs
+−0.31) — treat the electronic-128 NMR lead cautiously. Speech-128: the
+two perceptual models DISAGREE with each other (ODG prefers glint
+−1.24 vs −1.29; PESQ prefers LAME 4.57 vs 4.43) — call it a tie.
+Castanets: LAME ahead perceptually at both rates (128k ODG −0.29 vs
+−0.63) — glint's p95/audible-% advantages do not carry over to ODG,
+so the castanets mean-NMR gap is the perceptually honest signal there.
+256k everything-transparent (all ODG ~0). glint-speed's missing short
+blocks show up as ODG −3.33 on castanets-128 (vs normal's −0.63).
 
 ## 6. Perceptual measurement — DONE (NMR in measure_audio.py, merged)
 
