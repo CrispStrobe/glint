@@ -705,7 +705,8 @@ static double noise_guard();
 static GranuleInfo nmr_outer_loop_short(const GranuleInfo& start, double factor,
                                         const double* mdct_in,
                                         int available_bits, int sr_index,
-                                        int max_iters, int gain_floor) {
+                                        int max_iters, int gain_floor,
+                                        bool vbr_shaping) {
     double mask[13][3];
     compute_cell_masks(mdct_in, sr_index, mask);
 
@@ -732,8 +733,10 @@ static GranuleInfo nmr_outer_loop_short(const GranuleInfo& start, double factor,
     // controller's underspend (its reservoir-fill signal) into scalefactor
     // spending, pinning the anchor floor coarse (see nmr_outer_loop for
     // the measured slack sweep).
-    int shape_bits = start.part2_3_length +
-                     (available_bits - start.part2_3_length) / 2;
+    int shape_bits = vbr_shaping
+        ? start.part2_3_length + start.part2_3_length / 4
+        : start.part2_3_length +
+              (available_bits - start.part2_3_length) / 2;
     if (shape_bits > available_bits) shape_bits = available_bits;
 
     // Same 1.25x guard as the long loop: a looser short-loop guard (2.0)
@@ -852,7 +855,8 @@ static double nmr_objective(const double noise_band[21],
 static GranuleInfo nmr_outer_loop(const GranuleInfo& start, double factor,
                                   const double* mdct_in, int available_bits,
                                   int sr_index, int max_iters,
-                                  const double* src_band, int gain_floor) {
+                                  const double* src_band, int gain_floor,
+                                  bool vbr_shaping) {
     double mask_band[21];
     compute_band_masks(src_band, sr_index, mask_band);
 
@@ -884,8 +888,10 @@ static GranuleInfo nmr_outer_loop(const GranuleInfo& start, double factor,
     // (speech 256k best): slack/2 gives stereo 35.9/-10.8 and joint
     // 37.7/-13.5; slack*3/4 re-triggers the ratchet (stereo 33.3/-8.3);
     // zero slack starves joint shaping (-11.9).
-    int shape_bits = start.part2_3_length +
-                     (available_bits - start.part2_3_length) / 2;
+    int shape_bits = vbr_shaping
+        ? start.part2_3_length + start.part2_3_length / 4
+        : start.part2_3_length +
+              (available_bits - start.part2_3_length) / 2;
     if (shape_bits > available_bits) shape_bits = available_bits;
 
     // Loose total-noise guard: shaping means redistributing noise, and a
@@ -997,7 +1003,8 @@ static void polish_regions(GranuleInfo& info, int sr_index) {
 
 GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
                               int sr_index, int quality_mode, int block_type,
-                              int gain_floor, bool allow_psy) {
+                              int gain_floor, bool allow_psy,
+                              bool vbr_shaping) {
     init_quant_tables();
 
     if (quality_mode <= 0) {
@@ -1086,14 +1093,15 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
             // and encode_scalefac_fields handles the LSF field encoding).
             best_result = nmr_outer_loop_short(best_result, best_factor,
                                                mdct_in, available_bits,
-                                               sr_index, max_iters, gain_floor);
+                                               sr_index, max_iters, gain_floor,
+                                               vbr_shaping);
         } else if (block_type == 0) {
             // LSF long blocks too: the m2 slen group caps (15/15/7/7 over
             // bands [0-5][6-10][11-15][16-20]) are within kSfMax, and the
             // preflag fold is gated off above.
             best_result = nmr_outer_loop(best_result, best_factor, mdct_in,
                                          available_bits, sr_index, max_iters,
-                                         src_band, gain_floor);
+                                         src_band, gain_floor, vbr_shaping);
         }
         // Types 1/3 (start/stop) are deliberately NOT shaped: their masks
         // would come from attack-dominated spectra and measured +3 dB NMR
@@ -1414,22 +1422,22 @@ static const int vbr_target_gain[10] = {
 };
 
 GranuleInfo quantize_granule_vbr(const double* mdct_in, int available_bits,
-                                  int sr_index, int /*quality_mode*/,
-                                  int vbr_quality, int block_type) {
-    // Same path as CBR (energy-based scalefactors + gain search under the
-    // frame budget), with the search floored at the constant-quality target
-    // gain: "the finest gain >= target that fits". The old VBR-only
-    // preprocessing is gone: the psycho-model coefficient zeroing used the
-    // shallow-slope masks that are unusable as an allocation target (see
-    // compute_band_masks), and the headroom scalefactor assignment measured
-    // as a no-op pre-fix and a regression post-fix.
+                                  int sr_index, int quality_mode,
+                                  int vbr_quality, int block_type,
+                                  bool allow_psy) {
+    // Same path as CBR — including, since PLAN 10.4, the factor search and
+    // the NMR outer loops at -q normal/best — with the gain search floored
+    // at the constant-quality target gain: "the finest gain >= target that
+    // fits". The shaping budget (unshaped spend + slack/2) uses the same
+    // discipline as CBR; VBR's slack is the max-rate frame, so frames may
+    // grow — judged bytes-honestly in the PLAN entry. The old VBR-only
+    // preprocessing (psycho zeroing, headroom scalefactors) stays gone.
     init_quant_tables();
     if (vbr_quality < 0) vbr_quality = 0;
     if (vbr_quality > 9) vbr_quality = 9;
-    GranuleInfo info = quantize_base(mdct_in, available_bits, sr_index,
-                                     block_type, vbr_target_gain[vbr_quality]);
-    polish_regions(info, sr_index);
-    return info;
+    return quantize_granule(mdct_in, available_bits, sr_index, quality_mode,
+                            block_type, vbr_target_gain[vbr_quality],
+                            allow_psy, /*vbr_shaping=*/true);
 }
 
 } // namespace glint

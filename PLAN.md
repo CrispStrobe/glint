@@ -498,9 +498,16 @@ sufficient there (it shares the encoder's mask model).
    speech-128 +0.62 dB / audible 14.1→13.3%, speech-256 +0.43 dB.
    Quartet/castanets bit-identical (state never triggers / no
    headroom). Enabled by default.
-4. **VBR psy shaping** — TODO. The VBR path skips the NMR outer loop
-   entirely; enable it with the CBR slack/2 budget discipline and judge
-   bytes-vs-quality honestly (the 9.8 lesson).
+4. **VBR psy shaping** — DONE (merged). quantize_granule_vbr now routes
+   through the full quantize_granule (factor search + NMR loops + region
+   polish) at the VBR gain floor, with a VBR-specific shaping budget of
+   unshaped-spend × 1.25 — CBR's spend+slack/2 formula let V9 frames
+   balloon 2.4× under the max-rate budget. Bytes-honest results (48k
+   basis A/B): V0 speech NMR −15.34→−15.90 at equal size; V4 speech
+   +4.4% bytes for NMR −10.92→−13.50 (the old ladder interpolated to
+   equal bytes gives only ≈−11.7) with ODG −0.10→+0.07; V9 +6.5% bytes,
+   audible 60.5→57.9%; quartet V4 +10% bytes for NMR −2.1→−14.8. The
+   M/S side channel stays excluded (allow_psy threaded through).
 5. **Gapless LAME tag** — DONE (merged). The finalized Xing frame now
    carries a LAME info-tag extension ("LAMEglint" version — must start
    with "LAME" for ffmpeg to honor it; delay=1104 double path / 528

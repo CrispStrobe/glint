@@ -48,10 +48,14 @@ void quantize_set_threads(int n);
 // block_type: 0 long, 1 start, 2 short (reordered 3x12 spectrum), 3 stop.
 // Types 1/2/3 use the window-switching side-info/region layout; type 2
 // additionally gets per-window subblock_gain chosen from window peaks.
+// vbr_shaping: bound the psy loops' budget at unshaped-spend*1.25 instead
+// of CBR's spend + slack/2 — VBR's slack is the max-rate frame and lets
+// V9 frames balloon 2.4x otherwise.
 GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
                               int sr_index, int quality_mode = 0,
                               int block_type = 0, int gain_floor = 0,
-                              bool allow_psy = true);
+                              bool allow_psy = true,
+                              bool vbr_shaping = false);
 
 // VBR quantization: starts from a fixed target gain (vbr_quality 0=best to
 // 9=worst) for variable quality, but never exceeds available_bits per
@@ -59,9 +63,11 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
 // self-contained, so a loud granule at a fine target gain is coarsened until
 // it fits its share of the frame; otherwise the frame's main data overflows
 // and the decoder desyncs ("invalid backstep").
+// allow_psy: exclude the M/S side channel from shaping (same invariant
+// as the CBR path).
 GranuleInfo quantize_granule_vbr(const double* mdct_in, int available_bits,
                                   int sr_index, int quality_mode, int vbr_quality,
-                                  int block_type = 0);
+                                  int block_type = 0, bool allow_psy = true);
 
 } // namespace glint
 
