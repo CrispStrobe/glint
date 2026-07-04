@@ -337,6 +337,124 @@ HuffRegions huffman_determine_regions_from_bounds(const int16_t* ix, int sr_inde
     return r;
 }
 
+// Optimal region0_count/region1_count for a finished long-block granule
+// (PLAN 9.7). The gain search uses the fixed heuristic split (searching
+// boundaries inside it is too hot); this runs ONCE on the final ix and
+// re-derives the cheapest (r0c, r1c) split by exhaustive enumeration over
+// per-table prefix bit costs at scalefactor-band granularity. The heuristic
+// split is inside the search space, so the result never costs more bits.
+// Returns the number of big-values bits saved (0 if the heuristic won) and
+// updates r's counts and table selects in place.
+int huffman_optimize_regions(const int16_t* ix, int sr_index, HuffRegions* r) {
+    int bve = r->big_values * 2;
+    if (bve <= 0) return 0;
+    const int* sfb = tables::get_sfb_long_by_unified(sr_index);
+
+    // Number of sfb bands covering [0, bve); the last band may be partial.
+    int nb = 22;
+    for (int b = 1; b <= 22; b++) {
+        if (sfb[b] >= bve) { nb = b; break; }
+    }
+
+    // Per-table prefix costs and prefix band maxima at band boundaries
+    // (band b's slice is [sfb[b], min(sfb[b+1], bve)) ).
+    int pref[32][23];
+    int band_max[23];
+    for (int t = 0; t < 32; t++) pref[t][0] = 0;
+    for (int b = 0; b < nb; b++) {
+        int start = sfb[b];
+        int end = std::min(sfb[b + 1], bve);
+        int bmax = 0;
+        for (int i = start; i < end; i++) {
+            int v = std::abs(ix[i]);
+            if (v > bmax) bmax = v;
+        }
+        band_max[b] = bmax;
+        for (int t = 0; t < 32; t++)
+            pref[t][b + 1] = pref[t][b] + count_region_bits(ix, start, end, t);
+    }
+    // Suffix/range maxima via a running scan per query would be O(1) with a
+    // prefix-max from the left and right; ranges are arbitrary, so build a
+    // small sparse table alternative: nb <= 22, just recompute per range.
+    auto range_max = [&](int a, int b) {
+        int m = 0;
+        for (int k = a; k < b; k++)
+            if (band_max[k] > m) m = band_max[k];
+        return m;
+    };
+    // Cheapest table for bands [a, b): candidates from the range max, cost
+    // from the prefix sums. Returns cost and sets *tsel.
+    auto region_cost = [&](int a, int b, int* tsel) {
+        if (a >= b) { *tsel = 0; return 0; }
+        int m = range_max(a, b);
+        if (m == 0) { *tsel = 0; return 0; }
+        int cand[3];
+        int nc = table_candidates(m, cand);
+        int best_t = cand[0];
+        int best_c = pref[cand[0]][b] - pref[cand[0]][a];
+        for (int c = 1; c < nc; c++) {
+            int cost = pref[cand[c]][b] - pref[cand[c]][a];
+            if (cost < best_c) { best_c = cost; best_t = cand[c]; }
+        }
+        *tsel = best_t;
+        return best_c;
+    };
+
+    // Current cost under the existing split (same boundary clamping as
+    // huffman_count_bits).
+    int cur_r0end_band = std::min(r->region0_count + 1, nb);
+    int cur_r1end_band = std::min(r->region0_count + 1 + r->region1_count + 1, nb);
+    int dummy;
+    int cur_cost = region_cost(0, cur_r0end_band, &dummy) +
+                   region_cost(cur_r0end_band, cur_r1end_band, &dummy) +
+                   region_cost(cur_r1end_band, nb, &dummy);
+
+    // Exhaustive split search: region0 = bands [0, i), region1 = [i, j),
+    // region2 = [j, nb). Side-info fields: r0c = i-1 (4 bits), r1c = j-i-1
+    // (3 bits); sfb index r0c+r1c+2 = j must stay <= 22.
+    int best_cost = cur_cost;
+    int best_i = -1, best_j = -1;
+    int best_t[3] = { 0, 0, 0 };
+    for (int i = 1; i <= std::min(16, nb); i++) {
+        int t0;
+        int c0 = region_cost(0, i, &t0);
+        if (c0 >= best_cost) continue;
+        int jmax = std::min({ i + 8, 22, nb });
+        for (int j = i + 1; j <= jmax; j++) {
+            // j < nb with region2 empty is the same split as j == nb;
+            // dedupe happens naturally since costs are equal.
+            int t1, t2;
+            int c1 = region_cost(i, j, &t1);
+            int c2 = region_cost(j, nb, &t2);
+            int total = c0 + c1 + c2;
+            if (total < best_cost) {
+                best_cost = total;
+                best_i = i;
+                best_j = j;
+                best_t[0] = t0; best_t[1] = t1; best_t[2] = t2;
+            }
+        }
+        // Degenerate split: region0 covers everything (region1/2 empty).
+        if (i >= nb && i <= 16) {
+            if (c0 < best_cost) {
+                best_cost = c0;
+                best_i = i;
+                best_j = std::min(i + 1, 22);
+                best_t[0] = t0; best_t[1] = 0; best_t[2] = 0;
+            }
+            break;
+        }
+    }
+    if (best_i < 0) return 0;
+
+    r->region0_count = best_i - 1;
+    r->region1_count = best_j - best_i - 1;
+    r->table_select[0] = best_t[0];
+    r->table_select[1] = best_t[1];
+    r->table_select[2] = best_t[2];
+    return cur_cost - best_cost;
+}
+
 HuffRegions huffman_determine_regions(const int16_t* ix, int sr_index) {
     int rzero = 576;
     while (rzero > 0 && ix[rzero - 1] == 0) rzero--;

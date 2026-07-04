@@ -344,9 +344,15 @@ m2, joint/stereo, CBR/VBR), 0 backstep, unit tests, double==fixed metrics.
    expensive. Revisit only with (a) a real wide-stereo test clip and
    (b) a trial-encode decision (quantize both ways, compare NMR), not an
    energy heuristic. Reverted.
-7. **Region boundary search** — TODO. DP over per-sfb cumulative bit
-   costs for region0/region1_count (LAME-style) instead of the fixed
-   heuristic; run OUTSIDE the gain search (once on the final ix) first.
+7. **Region boundary search** — DONE (merged). `huffman_optimize_regions`
+   enumerates all valid (region0_count, region1_count) splits over
+   per-table prefix bit costs on the FINISHED granule (`polish_regions`
+   at the end of quantize_granule/_vbr; the gain search keeps the cheap
+   heuristic). Saved bits shrink part2_3_length and feed the reservoir:
+   speech-256k joint **+0.31 dB SNR / NMR −13.48→−13.77**, stereo
+   +0.34/−11.05, quartet 44.87/−14.01, m2-64k 21.06/2.41, VBR V4 −1.4%
+   bytes at identical quality; electronic/castanets hold. 0 backstep,
+   ffmpeg+CoreAudio validated.
 8. **NMR-driven VBR allocation** — TODO. Replace the fixed
    vbr_target_gain table: pick the per-granule gain floor from the psy
    masks so V-levels track perceptual quality instead of raw gain.

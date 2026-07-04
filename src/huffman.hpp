@@ -74,6 +74,13 @@ HuffRegions huffman_determine_regions_short_from_bounds(const int16_t* ix,
                                                         int count1_start,
                                                         int block_type = 2);
 
+// Optimal region0/region1 split for a FINISHED long-block granule: searches
+// all valid (region0_count, region1_count) pairs over per-table prefix bit
+// costs and rewrites r's counts/table selects. Returns big-values bits
+// saved (>= 0; the existing split is in the search space). Run once per
+// granule after the gain search — too hot to use inside it.
+int huffman_optimize_regions(const int16_t* ix, int sr_index, HuffRegions* r);
+
 // Select the best Huffman table for a region
 // Returns table_id that minimizes bit count
 int select_best_table(const int16_t* ix, int start, int end);

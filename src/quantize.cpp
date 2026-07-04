@@ -971,14 +971,28 @@ static GranuleInfo nmr_outer_loop(const GranuleInfo& start, double factor,
 // broken pow34 curve — post-fix they are pure level errors. -q speed skips
 // the search entirely: f=1.0 wins almost always, and the tier's contract is
 // throughput.
+// Final-granule region polish (PLAN 9.7): rerun the region0/region1 split
+// search on the finished coefficients — the gain search counts with the
+// fixed heuristic split (searching inside it is too hot), so a few bits per
+// granule are usually left on the table. Saved bits shrink part2_3_length,
+// feeding the CBR reservoir / smaller VBR frames. Long blocks only
+// (window-switching granules have no region fields).
+static void polish_regions(GranuleInfo& info, int sr_index) {
+    if (info.block_type != 0) return;
+    int saved = huffman_optimize_regions(info.ix, sr_index, &info.regions);
+    info.part2_3_length -= saved;
+}
+
 GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
                               int sr_index, int quality_mode, int block_type,
                               int gain_floor, bool allow_psy) {
     init_quant_tables();
 
     if (quality_mode <= 0) {
-        return quantize_base(mdct_in, available_bits, sr_index, block_type,
-                             gain_floor);
+        GranuleInfo info = quantize_base(mdct_in, available_bits, sr_index,
+                                         block_type, gain_floor);
+        polish_regions(info, sr_index);
+        return info;
     }
 
     static const double kNormal[] = { 1.0, 1.04, 1.09, 1.15, 1.22, 1.30 };
@@ -1072,6 +1086,7 @@ GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
         // would come from attack-dominated spectra and measured +3 dB NMR
         // on the castanet clip when tried.
     }
+    polish_regions(best_result, sr_index);
     return best_result;
 }
 
@@ -1398,8 +1413,10 @@ GranuleInfo quantize_granule_vbr(const double* mdct_in, int available_bits,
     init_quant_tables();
     if (vbr_quality < 0) vbr_quality = 0;
     if (vbr_quality > 9) vbr_quality = 9;
-    return quantize_base(mdct_in, available_bits, sr_index, block_type,
-                         vbr_target_gain[vbr_quality]);
+    GranuleInfo info = quantize_base(mdct_in, available_bits, sr_index,
+                                     block_type, vbr_target_gain[vbr_quality]);
+    polish_regions(info, sr_index);
+    return info;
 }
 
 } // namespace glint
