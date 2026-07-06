@@ -63,28 +63,38 @@ private:
 
 // One channel's fitted quantization plan for a long-window frame.
 struct AacChannelPlan {
-    int global_gain;            // = the flat scalefactor for all coded bands
+    int global_gain;            // wire value = sf of the first coded band
+    int fit_gain;               // the gain anchor G the rate search settled on
     int max_sfb;
     int num_lines;              // swb_offset[max_sfb]
     uint8_t book[kMaxSfb];      // per-sfb codebook (0 = zero band)
+    uint8_t sf[kMaxSfb];        // effective per-band scalefactor (= G - offset)
     int16_t ix[1024];           // signed quantized coefficients
     int ics_bits;               // exact individual_channel_stream cost, excl. ics_info
 };
 
-// Quantize `spec` (p34 = |spec|^0.75 precomputed) with the flat scalefactor
-// `gain`; returns max magnitude. ix gets signed values, magnitudes capped
-// implicitly by the caller's gain choice (values > kMaxQuant mean "gain too fine").
-int aac_quantize(const double* p34, const double* spec, int n, int gain, int16_t* ix);
+// Quantize with per-band scalefactors; returns max magnitude across bands.
+int aac_quantize(const double* p34, const double* spec, const uint16_t* swb,
+                 int max_sfb, const uint8_t* sf, int16_t* ix);
 
-// Choose per-band books (optimal sectioning DP) and compute the exact ICS bit
-// cost for the given quantized spectrum. Fills plan->book and plan->ics_bits.
+// Choose per-band books (optimal sectioning DP), derive the wire global_gain
+// (sf of the first coded band), and compute the exact ICS bit cost. Fills
+// plan->book, plan->global_gain and plan->ics_bits; reads plan->sf/ix.
 void aac_section_and_count(const int16_t* ix, int sr_index, AacChannelPlan* plan);
 
-// Fit a channel: binary-search the flat scalefactor so the exact ICS cost fits
-// budget_bits (and magnitudes fit kMaxQuant). spec has 1024 lines; lines at and
-// above swb_offset[max_sfb] must already be zero.
+// Fit a channel: search the gain anchor G so the exact ICS cost fits
+// budget_bits (and magnitudes fit kMaxQuant). Band b is quantized with
+// sf[b] = clamp(G - sf_offsets[b], 0, 255); sf_offsets may be null (all 0).
+// Offsets must stay in [0, 60] so the scalefactor dpcm range (+-60) holds.
+// gain_hint < 0 runs a fresh binary search; otherwise a local walk from the
+// hint (cheap refits inside the shaping loop).
 void aac_fit_channel(const double* spec, int sr_index, int max_sfb,
-                     int budget_bits, AacChannelPlan* plan);
+                     int budget_bits, const int* sf_offsets, int gain_hint,
+                     AacChannelPlan* plan);
+
+// Per-band reconstruction noise sum((spec - dequant)^2) over coded bands.
+void aac_band_noise(const AacChannelPlan& plan, const double* spec,
+                    int sr_index, double* noise);
 
 // Emit ics_info / individual_channel_stream. `include_ics_info` follows the
 // wire layout: true for SCE (and CPE with common_window=0), false for the two

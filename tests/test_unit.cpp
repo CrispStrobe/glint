@@ -448,7 +448,7 @@ static void test_aac_coder_count_matches_emission() {
         spec[i] = amp * ((static_cast<int>(s >> 16) % 2001) - 1000) / 1000.0;
     }
     glint::aac::AacChannelPlan plan;
-    glint::aac::aac_fit_channel(spec, sri, 40, 3000, &plan);
+    glint::aac::aac_fit_channel(spec, sri, 40, 3000, nullptr, -1, &plan);
     CHECK(plan.ics_bits <= 3000, "fitted plan respects the bit budget");
     CHECK(plan.global_gain >= 0 && plan.global_gain <= 255, "global_gain in range");
 
@@ -469,6 +469,7 @@ static void test_aac_api_smoke() {
     cfg.sample_rate = 44100;
     cfg.num_channels = 2;
     cfg.bitrate = 128;
+    cfg.quality = GLINT_QUALITY_NORMAL;
     glint_aac_t enc = glint_aac_create(&cfg);
     CHECK(enc != nullptr, "encoder created");
     CHECK(glint_aac_samples_per_frame(enc) == 1024, "1024 samples per frame");

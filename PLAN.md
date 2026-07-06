@@ -683,9 +683,35 @@ exact bit accounting, quality changes gated on metrics.
 Ordered by expected payoff, all gated on the standard clip set + league
 table (add AAC rows to tests/compare_encoders.py; fdk-aac and Apple
 afconvert are the yardsticks, vo-aacenc is the Shine-role baseline):
-1. **Psy model + NMR outer loop** — port the Schroeder-Bark machinery;
-   per-band scalefactors (dpcm chain is already emitted, currently all-0).
-   The 128k NMR +0.5 → target well below 0.
+1. **Psy model + NMR outer loop — DONE (2026-07-06).** Per-band
+   scalefactors (bidirectional offsets ±30 around the gain anchor, dpcm
+   chain emission), metric-aligned Schroeder-Bark masks (aac_psy.cpp),
+   outer loop at -q normal/best. Speech 128k stereo NMR +0.46 → −0.58
+   (audible 26.1→23.6%, SNR 25.8→24.2), speech 256k −10.35 → −11.54
+   (p95 −3.8→−5.7); electronic 128k 2.30→1.93; quartet 128k −0.55→−1.31,
+   quartet 256k −9.52→−12.10 with audible 2.0→0.0%. ~30× realtime.
+   **AAC-specific learnings (differ from the MP3 loop!):**
+   - MP3's 1.25× total-noise guard FREEZES the AAC loop at 128k: AAC CBR
+     has no reservoir slack, and one gain-anchor step is already ×1.41
+     total noise. The working structure: bidirectional offsets (coarsen
+     over-coded bands ≥6 dB below target to donate bits — MP3 could only
+     amplify), a per-band ceiling at the MASK (r ≤ max(1, r0)·1.05 — a
+     ceiling at the target instead froze everything), two amplification
+     tiers (r>1 audible bands every round + near-worst masked bands),
+     de-amp hysteresis (never coarsen a rescued band), and a loose 2.5×
+     total-noise backstop chosen by measurement (8.0 buys +0.2 NMR for
+     −0.8 SNR — not taken).
+   - ATH floor must be calibrated against a RUNNING max band energy, not
+     per-frame (per-frame gives quiet frames absurd floors; the loop
+     burns budget on phantom violations — the metric calibrates
+     file-globally for the same reason).
+   - normal and best currently converge to the same fixed point (caps 16
+     vs 40 iterations are both past convergence); differentiate later
+     via tonality masks / finer steps, not more iterations.
+   - Comparison points measured on the speech clip at 128k stereo:
+     glint −0.58 / ffmpeg-native AAC −0.68 / LAME MP3 −2.65 / **Apple
+     AAC −6.52, audible 5%** — the remaining gap to Apple is mostly
+     M/S + TNS + short blocks, not loop tuning.
 2. **Per-band M/S** (ms_mask_present=1) — finer than MP3's all-or-nothing
    joint stereo; mind the MP3 lesson: never shape the side channel.
 3. **Window switching + short blocks** (8×128 MDCT, start/stop windows,

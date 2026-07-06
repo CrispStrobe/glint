@@ -15,9 +15,12 @@
 
 #include "aac_coder.hpp"
 #include "aac_mdct.hpp"
+#include "aac_psy.hpp"
 #include "aac_tables.hpp"
 
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <new>
 
@@ -55,6 +58,7 @@ struct glint_aac_context {
     int num_channels;
     int bitrate_bps;
     int max_sfb;
+    int quality;                    // glint_quality
 
     double prev[2][kAacFrameLen];   // MDCT lookback (last input block)
     double spec[2][kAacFrameLen];
@@ -64,11 +68,38 @@ struct glint_aac_context {
     double target_acc;
     double bits_spent;
 
+    double emax_run;                // running max band energy (ATH calibration)
+
     int frames_in;                  // input blocks consumed
     int flushed;
 
     uint8_t out[kMaxOutBytes];
 };
+
+namespace {
+
+// NMR-driven noise shaping, ported from the MP3 nmr_outer_loop with the same
+// hard-won constants: shape to 0.125x the mask (~9 dB below), amplify every
+// band within 6 dB of the worst offender, accept only iterates that improve
+// the summed noise/mask objective under a 1.25x total-noise guard, and run
+// the gain re-search under shape_bits = unshaped spend + HALF the leftover
+// budget (full-budget shaping consumed the underspend the rate controller
+// needs to see — the MP3 stereo-best 5 dB SNR lesson).
+constexpr double kShapeTarget = 0.125;
+// Backstop only. The real safety is the per-band ceiling (no band may end
+// above max(target, its initial ratio)): bidirectional shaping is SUPPOSED
+// to raise raw noise in over-coded loud bands, so MP3's tight total-noise
+// guard (1.25, tuned for a unidirectional loop) rejected exactly the
+// redistribution we want — measured: it froze shaping at ~-0.5 dB NMR.
+constexpr double kNoiseGuard = 2.5;
+// Offsets are bidirectional (+ = finer, - = coarser than the anchor); the
+// +-30 bound keeps any two coded bands' scalefactors within the +-60 dpcm
+// range of the scalefactor codebook.
+constexpr int kMaxSfOffset = 30;
+
+void shape_channel(glint_aac_context* c, int chn, int budget);
+
+}  // namespace
 
 extern "C" {
 
@@ -86,6 +117,9 @@ glint_aac_t glint_aac_create(const struct glint_aac_config* cfg) {
     c->sr_index = sri;
     c->num_channels = cfg->num_channels;
     c->bitrate_bps = cfg->bitrate * 1000;
+    c->quality = (cfg->quality >= GLINT_QUALITY_BEST) ? GLINT_QUALITY_BEST
+                 : (cfg->quality == GLINT_QUALITY_NORMAL) ? GLINT_QUALITY_NORMAL
+                                                          : GLINT_QUALITY_SPEED;
     c->bits_per_frame = static_cast<double>(c->bitrate_bps) * kAacFrameLen / c->sample_rate;
 
     // max_sfb from the bandwidth cutoff: first band whose start line reaches
@@ -131,6 +165,7 @@ static const uint8_t* encode_block(glint_aac_context* c, int* out_size) {
     int spend = static_cast<int>(avail) - fixed_overhead;
     if (spend < 64) spend = 64;
 
+    const bool shape = c->quality >= GLINT_QUALITY_NORMAL;
     if (ch == 2) {
         double e0 = 0, e1 = 0;
         for (int i = 0; i < kAacFrameLen; i++) {
@@ -141,11 +176,14 @@ static const uint8_t* encode_block(glint_aac_context* c, int* out_size) {
         if (share < 0.3) share = 0.3;
         if (share > 0.7) share = 0.7;
         int budget0 = static_cast<int>(spend * share);
-        aac_fit_channel(c->spec[0], c->sr_index, c->max_sfb, budget0, &c->plan[0]);
+        aac_fit_channel(c->spec[0], c->sr_index, c->max_sfb, budget0, nullptr, -1, &c->plan[0]);
+        if (shape) shape_channel(c, 0, budget0);
         int budget1 = spend - c->plan[0].ics_bits;  // leftover flows to ch 1
-        aac_fit_channel(c->spec[1], c->sr_index, c->max_sfb, budget1, &c->plan[1]);
+        aac_fit_channel(c->spec[1], c->sr_index, c->max_sfb, budget1, nullptr, -1, &c->plan[1]);
+        if (shape) shape_channel(c, 1, budget1);
     } else {
-        aac_fit_channel(c->spec[0], c->sr_index, c->max_sfb, spend, &c->plan[0]);
+        aac_fit_channel(c->spec[0], c->sr_index, c->max_sfb, spend, nullptr, -1, &c->plan[0]);
+        if (shape) shape_channel(c, 0, spend);
     }
 
     // ---- emit raw_data_block into out+7, then prepend the ADTS header ----
@@ -241,3 +279,120 @@ void glint_aac_destroy(glint_aac_t c) {
 }
 
 }  // extern "C"
+
+namespace {
+
+void shape_channel(glint_aac_context* c, int chn, int budget) {
+    using namespace glint::aac;
+    AacChannelPlan& plan = c->plan[chn];
+    const double* spec = c->spec[chn];
+    const int nb = plan.max_sfb;
+
+    double mask[kMaxSfb], noise[kMaxSfb];
+    double emax = aac_compute_masks(spec, c->sr_index, nb, c->emax_run, mask);
+    if (emax > c->emax_run) c->emax_run = emax;
+    aac_band_noise(plan, spec, c->sr_index, noise);
+
+    double r0[kMaxSfb];
+    double j_best = 0.0, total0 = 0.0, worst = 0.0;
+    for (int b = 0; b < nb; b++) {
+        total0 += noise[b];
+        r0[b] = (mask[b] > 0.0) ? noise[b] / mask[b] : 0.0;
+        j_best += r0[b];
+        if (r0[b] > worst) worst = r0[b];
+    }
+    if (worst <= kShapeTarget) return;
+
+    int shape_bits = plan.ics_bits + (budget - plan.ics_bits) / 2;
+    if (shape_bits > budget) shape_bits = budget;
+
+    int off[kMaxSfb] = {0};
+    bool was_amped[kMaxSfb] = {false};
+    AacChannelPlan best = plan;
+    AacChannelPlan cur = plan;
+    double cur_noise[kMaxSfb];
+    std::memcpy(cur_noise, noise, sizeof(double) * nb);
+
+    const int max_iters = (c->quality >= GLINT_QUALITY_BEST) ? 40 : 16;
+    int stall = 0;
+    for (int iter = 0; iter < max_iters; iter++) {
+        double w = 0.0;
+        for (int b = 0; b < nb; b++) {
+            if (mask[b] > 0.0) {
+                double r = cur_noise[b] / mask[b];
+                if (r > w) w = r;
+            }
+        }
+        if (w <= kShapeTarget) break;
+        // Amplify only the bands close to the worst offender. MP3 uses 0.25
+        // (6 dB) here, but its 128k reservoir gives shaping slack; AAC CBR at
+        // 128k has none, so a wide amplification front forces the gain anchor
+        // up 2+ steps (+3 dB total noise) per round and the noise guard
+        // rejects everything. Narrower rounds walk the same path in smaller,
+        // acceptable steps.
+        double thresh = kShapeTarget > w * 0.5 ? kShapeTarget : w * 0.5;
+
+        bool changed = false;
+        for (int b = 0; b < nb; b++) {
+            if (mask[b] <= 0.0) continue;
+            double r = cur_noise[b] / mask[b];
+            // Tier A: any band over the MASK is audible and must be fixed
+            // every round — otherwise a gain-anchor rise leaves near-mask
+            // bands newly audible and the per-band ceiling vetoes the whole
+            // iterate (measured as a total freeze at 128k).
+            // Tier B: below the mask, only the near-worst bands move, so the
+            // amplification front stays narrow.
+            if ((r > 1.0 || r >= thresh) && off[b] < kMaxSfOffset) {
+                off[b] += 2;  // 2 sf steps = ~3 dB finer, MP3's amplification grain
+                was_amped[b] = true;
+                changed = true;
+            } else if (r < kShapeTarget * 0.25 && off[b] > -kMaxSfOffset &&
+                       !was_amped[b]) {
+                // Over-coded band (>=6 dB below the shaping target): donate
+                // bits by coarsening, so the gain anchor need not rise. MP3's
+                // loop could only amplify; AAC scalefactors go both ways.
+                // Hysteresis: never coarsen a band the loop had to rescue.
+                off[b] -= 2;
+                changed = true;
+            }
+        }
+        if (!changed) break;
+
+        AacChannelPlan cand;
+        aac_fit_channel(spec, c->sr_index, nb, shape_bits, off, cur.fit_gain, &cand);
+        double cand_noise[kMaxSfb];
+        aac_band_noise(cand, spec, c->sr_index, cand_noise);
+        double j = 0.0, total = 0.0;
+        bool band_ok = true;
+        for (int b = 0; b < nb; b++) {
+            total += cand_noise[b];
+            if (mask[b] > 0.0) {
+                double r = cand_noise[b] / mask[b];
+                j += r;
+                // No band may become audible that wasn't: below the mask
+                // (r < 1) noise placement is free — that freedom IS the
+                // shaping; a ceiling at the target instead of the mask
+                // measured as a near-total freeze at 128k.
+                double ceiling = 1.0 > r0[b] ? 1.0 : r0[b];
+                if (r > ceiling * 1.05) band_ok = false;
+            }
+        }
+        cur = cand;
+        std::memcpy(cur_noise, cand_noise, sizeof(double) * nb);
+        if (j < j_best && band_ok && total <= total0 * kNoiseGuard) {
+            j_best = j;
+            best = cand;
+            stall = 0;
+        } else if (++stall >= 5) {
+            break;
+        }
+        if (getenv("GLINT_AAC_DEBUG")) {
+            fprintf(stderr, "  it%d: j=%.3g best=%.3g total/0=%.2f g=%d bits=%d/%d w=%.2f\n",
+                    iter, j, j_best, total / total0, cand.fit_gain,
+                    cand.ics_bits, shape_bits, w);
+        }
+    }
+    plan = best;
+}
+
+}  // namespace

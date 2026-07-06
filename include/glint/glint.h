@@ -106,6 +106,8 @@ struct glint_aac_config {
     int sample_rate;
     int num_channels;
     int bitrate;        // kbps
+    enum glint_quality quality;  // SPEED = no noise shaping; NORMAL/BEST = psy
+                                 // NMR shaping loop (BEST iterates further)
 };
 
 glint_aac_t    glint_aac_create(const struct glint_aac_config* cfg);

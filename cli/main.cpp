@@ -361,11 +361,12 @@ static bool parse_raw_spec(const char* spec, int* rate, int* channels, int* bits
 
 // Encode the (already header-parsed) WAV stream to ADTS AAC-LC.
 static int encode_aac(FILE* wav_file, const char* output_path, const WavInfo& wav,
-                      int enc_channels, int bitrate) {
+                      int enc_channels, int bitrate, glint_quality quality) {
     glint_aac_config cfg;
     cfg.sample_rate = wav.sample_rate;
     cfg.num_channels = enc_channels;
     cfg.bitrate = bitrate;
+    cfg.quality = quality;
     glint_aac_t enc = glint_aac_create(&cfg);
     if (!enc) {
         fprintf(stderr, "Error: unsupported AAC config (%d Hz, %d ch, %d kbps)\n",
@@ -600,9 +601,20 @@ int main(int argc, char** argv) {
             fclose(wav_file);
             return 1;
         }
+        glint_quality aac_quality = GLINT_QUALITY_NORMAL;
+        if (quality_str) {
+            if (strcmp(quality_str, "speed") == 0) aac_quality = GLINT_QUALITY_SPEED;
+            else if (strcmp(quality_str, "normal") == 0) aac_quality = GLINT_QUALITY_NORMAL;
+            else if (strcmp(quality_str, "best") == 0) aac_quality = GLINT_QUALITY_BEST;
+            else {
+                fprintf(stderr, "Error: invalid quality '%s' (use speed, normal, or best)\n", quality_str);
+                fclose(wav_file);
+                return 1;
+            }
+        }
         int aac_channels = wav.num_channels;
         if (mode == GLINT_MONO && wav.num_channels == 2) aac_channels = 1;
-        int rc = encode_aac(wav_file, output_path, wav, aac_channels, bitrate);
+        int rc = encode_aac(wav_file, output_path, wav, aac_channels, bitrate, aac_quality);
         fclose(wav_file);
         return rc;
     }

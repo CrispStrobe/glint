@@ -36,6 +36,7 @@ set(GLINT_SOURCES
     src/encoder.cpp
     src/aac_mdct.cpp
     src/aac_coder.cpp
+    src/aac_psy.cpp
     src/aac_encoder.cpp
 )
 
