@@ -11,6 +11,8 @@
 
 #include <cstdint>
 
+#include "aac_coder_types_fwd.hpp"
+
 namespace glint {
 namespace aac {
 
@@ -28,7 +30,7 @@ struct AacBandLayout;
 // Analyze the coded-domain spectrum and, when the LPC prediction gain
 // clears the threshold, quantize the reflection coefficients and FIR-filter
 // `spec` in place over the TNS region. Long-family layouts only.
-void aac_tns_analyze(double* spec, const AacBandLayout& layout, int sr_index,
+void aac_tns_analyze(SpecT* spec, const AacBandLayout& layout, int sr_index,
                      AacTnsFilter* f);
 
 }  // namespace aac

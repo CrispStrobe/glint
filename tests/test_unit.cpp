@@ -387,13 +387,15 @@ static void test_float_vs_int16_encode() {
 static void test_aac_mdct_vs_direct() {
     std::printf("AAC MDCT (fast vs direct ISO formula)...\n");
     const int N = 2048, M = 1024;
-    static double prev[M], cur[M], spec[M], ref[M], z[N];
+    static glint::aac::PcmT prev[M], cur[M];
+    static glint::aac::SpecT spec[M];
+    static double ref[M], z[N];
     unsigned s = 12345;
     for (int i = 0; i < M; i++) {
         s = s * 1103515245u + 12345u;
-        prev[i] = static_cast<int>(s >> 16) % 65536 - 32768;
+        prev[i] = static_cast<glint::aac::PcmT>(static_cast<int>(s >> 16) % 65536 - 32768);
         s = s * 1103515245u + 12345u;
-        cur[i] = static_cast<int>(s >> 16) % 65536 - 32768;
+        cur[i] = static_cast<glint::aac::PcmT>(static_cast<int>(s >> 16) % 65536 - 32768);
     }
     glint::aac::aac_mdct_frame(glint::aac::kSeqLong, prev, cur, spec);
 
@@ -416,10 +418,11 @@ static void test_aac_mdct_vs_direct() {
         if (e > max_err) max_err = e;
         if (std::fabs(ref[k]) > max_ref) max_ref = std::fabs(ref[k]);
     }
-    CHECK(max_err / max_ref < 1e-10, "fast MDCT matches direct ISO formula");
+    const double tol = sizeof(glint::aac::SpecT) == 4 ? 2e-5 : 1e-10;
+    CHECK(max_err / max_ref < tol, "fast MDCT matches direct ISO formula");
 
     // Short windows: each 256-point window vs the direct formula.
-    static double specs[M];
+    static glint::aac::SpecT specs[M];
     glint::aac::aac_mdct_frame(glint::aac::kSeqShort, prev, cur, specs);
     double x[N];
     for (int n = 0; n < M; n++) { x[n] = prev[n]; x[M + n] = cur[n]; }
@@ -439,7 +442,7 @@ static void test_aac_mdct_vs_direct() {
             if (std::fabs(r) > sref) sref = std::fabs(r);
         }
     }
-    CHECK(serr / sref < 1e-10, "short MDCT matches direct ISO formula");
+    CHECK(serr / sref < tol, "short MDCT matches direct ISO formula");
 }
 
 static void test_aac_tables_sanity() {
@@ -463,12 +466,12 @@ static void test_aac_tables_sanity() {
 static void test_aac_coder_count_matches_emission() {
     std::printf("AAC coder (count == emission)...\n");
     const int sri = 4;  // 44.1 kHz
-    static double spec[1024];
+    static glint::aac::SpecT spec[1024];
     unsigned s = 777;
     for (int i = 0; i < 1024; i++) {
         s = s * 1103515245u + 12345u;
         double amp = (i < 600) ? 20000.0 / (1 + i) : 0.0;
-        spec[i] = amp * ((static_cast<int>(s >> 16) % 2001) - 1000) / 1000.0;
+        spec[i] = static_cast<glint::aac::SpecT>(amp * ((static_cast<int>(s >> 16) % 2001) - 1000) / 1000.0);
     }
     glint::aac::AacBandLayout layout;
     glint::aac::aac_make_layout(sri, glint::aac::kSeqLong, 40, nullptr, 1, &layout);

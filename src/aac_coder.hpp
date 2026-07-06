@@ -6,6 +6,7 @@
 
 #include <cstdint>
 
+#include "aac_coder_types_fwd.hpp"
 #include "aac_tns.hpp"
 
 namespace glint {
@@ -40,8 +41,8 @@ void aac_make_layout(int sr_index, int window_sequence, int max_sfb,
 
 // Interleave a window-major short spectrum (8 x 128) into coded order for
 // `layout` (zero-padding the tail above num_lines up to 1024).
-void aac_reorder_short(const double* natural, const AacBandLayout& layout,
-                       int sr_index, double* coded);
+void aac_reorder_short(const SpecT* natural, const AacBandLayout& layout,
+                       int sr_index, SpecT* coded);
 
 // Minimal MSB-first bit writer into a caller-owned buffer.
 // count_only mode tallies bits without touching memory (used for rate fitting).
@@ -105,7 +106,8 @@ struct AacChannelPlan {
 };
 
 // Quantize with per-band scalefactors; returns max magnitude across bands.
-int aac_quantize(const double* p34, const double* spec, const AacBandLayout& layout,
+// p34[i] = |spec[i]|^0.75, SpecT precision is plenty against quantization.
+int aac_quantize(const SpecT* p34, const SpecT* spec, const AacBandLayout& layout,
                  const uint8_t* sf, int16_t* ix);
 
 // Choose per-band books (optimal sectioning DP; sections never cross group
@@ -120,12 +122,12 @@ void aac_section_and_count(const int16_t* ix, const AacBandLayout& layout,
 // Offsets must stay in [-30, 30] so the scalefactor dpcm range (+-60) holds.
 // gain_hint < 0 runs a fresh binary search; otherwise a local walk from the
 // hint (cheap refits inside the shaping loop).
-void aac_fit_channel(const double* spec, const AacBandLayout& layout,
+void aac_fit_channel(const SpecT* spec, const AacBandLayout& layout,
                      int budget_bits, const int* sf_offsets, int gain_hint,
                      AacChannelPlan* plan);
 
 // Per-band reconstruction noise sum((spec - dequant)^2) over coded bands.
-void aac_band_noise(const AacChannelPlan& plan, const double* spec,
+void aac_band_noise(const AacChannelPlan& plan, const SpecT* spec,
                     const AacBandLayout& layout, double* noise);
 
 // Emit ics_info / individual_channel_stream. `include_ics_info` follows the

@@ -15,9 +15,14 @@ using namespace aac_tables;
 namespace {
 
 struct MaskModel {
+#ifdef GLINT_SMALL_BUFFERS
+    using T = float;   // table storage; arithmetic stays double
+#else
+    using T = double;
+#endif
     int nb;
-    double spread[kMaxSfb][kMaxSfb];  // energy-domain Schroeder spreading
-    double ath_rel[kMaxSfb];          // 10^((ath_db - ath_min - 96)/10)
+    T spread[kMaxSfb][kMaxSfb];  // energy-domain Schroeder spreading
+    T ath_rel[kMaxSfb];          // 10^((ath_db - ath_min - 96)/10)
 };
 
 // Single-slot cache keyed by sample rate (embedded-friendly; matches the
@@ -46,12 +51,13 @@ const MaskModel* get_model(int sr_index) {
         if (ath_db[b] < ath_min) ath_min = ath_db[b];
     }
     for (int b = 0; b < nb; b++) {
-        model.ath_rel[b] = std::pow(10.0, (ath_db[b] - ath_min - 96.0) / 10.0);
+        model.ath_rel[b] = static_cast<MaskModel::T>(
+            std::pow(10.0, (ath_db[b] - ath_min - 96.0) / 10.0));
         for (int j = 0; j < nb; j++) {
             double dz = z[b] - z[j];
             double s_db = 15.81 + 7.5 * (dz + 0.474) -
                           17.5 * std::sqrt(1.0 + (dz + 0.474) * (dz + 0.474));
-            model.spread[b][j] = std::pow(10.0, s_db / 10.0);
+            model.spread[b][j] = static_cast<MaskModel::T>(std::pow(10.0, s_db / 10.0));
         }
     }
     model.nb = nb;
@@ -61,7 +67,7 @@ const MaskModel* get_model(int sr_index) {
 
 }  // namespace
 
-double aac_compute_masks(const double* spec, int sr_index, int max_sfb,
+double aac_compute_masks(const SpecT* spec, int sr_index, int max_sfb,
                          double emax_ref, double* mask, bool tonal) {
     const MaskModel* m = get_model(sr_index);
     const uint16_t* swb = kSwbOffsetLong[sr_index];

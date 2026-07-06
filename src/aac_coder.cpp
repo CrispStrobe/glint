@@ -110,24 +110,24 @@ void aac_make_layout(int sr_index, int window_sequence, int max_sfb,
     }
 }
 
-void aac_reorder_short(const double* natural, const AacBandLayout& L,
-                       int sr_index, double* coded) {
+void aac_reorder_short(const SpecT* natural, const AacBandLayout& L,
+                       int sr_index, SpecT* coded) {
     const uint16_t* swb = kSwbOffsetShort[sr_index];
     int k = 0;
     int wbase = 0;
     for (int g = 0; g < L.num_groups; g++) {
         for (int b = 0; b < L.max_sfb; b++) {
             for (int w = 0; w < L.group_len[g]; w++) {
-                const double* src = natural + 128 * (wbase + w);
+                const SpecT* src = natural + 128 * (wbase + w);
                 for (int i = swb[b]; i < swb[b + 1]; i++) coded[k++] = src[i];
             }
         }
         wbase += L.group_len[g];
     }
-    while (k < 1024) coded[k++] = 0.0;
+    while (k < 1024) coded[k++] = SpecT(0);
 }
 
-int aac_quantize(const double* p34, const double* spec, const AacBandLayout& L,
+int aac_quantize(const SpecT* p34, const SpecT* spec, const AacBandLayout& L,
                  const uint8_t* sf, int16_t* ix) {
     int maxabs = 0;
     for (int b = 0; b < L.num_bands; b++) {
@@ -142,7 +142,7 @@ int aac_quantize(const double* p34, const double* spec, const AacBandLayout& L,
     return maxabs;
 }
 
-void aac_band_noise(const AacChannelPlan& plan, const double* spec,
+void aac_band_noise(const AacChannelPlan& plan, const SpecT* spec,
                     const AacBandLayout& L, double* noise) {
     for (int b = 0; b < L.num_bands; b++) {
         const double gain = std::pow(2.0, 0.25 * (plan.sf[b] - kSfOffset));
@@ -255,7 +255,7 @@ namespace {
 
 // Evaluate anchor gain G: quantize with sf[b] = clamp(G - off[b]), section,
 // exact-count. Returns true when magnitudes and the bit budget both fit.
-bool eval_gain(const double* p34, const double* spec, const AacBandLayout& L,
+bool eval_gain(const SpecT* p34, const SpecT* spec, const AacBandLayout& L,
                int budget_bits, const int* off, int gain,
                AacChannelPlan* trial) {
     for (int b = 0; b < L.num_bands; b++) {
@@ -274,14 +274,14 @@ bool eval_gain(const double* p34, const double* spec, const AacBandLayout& L,
 
 }  // namespace
 
-void aac_fit_channel(const double* spec, const AacBandLayout& L,
+void aac_fit_channel(const SpecT* spec, const AacBandLayout& L,
                      int budget_bits, const int* sf_offsets, int gain_hint,
                      AacChannelPlan* plan) {
     const int n = L.num_lines;
 
-    double p34[1024];
+    SpecT p34[1024];
     for (int i = 0; i < n; i++) {
-        p34[i] = std::pow(std::fabs(spec[i]), 0.75);
+        p34[i] = static_cast<SpecT>(std::pow(std::fabs(static_cast<double>(spec[i])), 0.75));
     }
     std::memset(plan->ix, 0, sizeof(plan->ix));
 

@@ -12,6 +12,8 @@
 #ifndef GLINT_AAC_PSY_HPP
 #define GLINT_AAC_PSY_HPP
 
+#include "aac_coder_types_fwd.hpp"
+
 namespace glint {
 namespace aac {
 
@@ -26,7 +28,7 @@ namespace aac {
 // tonal: per-masker offsets -(6 + 12*alpha_j) dB from band spectral flatness
 // (tonal maskers mask less) instead of the metric's flat -14 dB — the same
 // construction the MP3 nmr_outer_loop uses at low rates.
-double aac_compute_masks(const double* spec, int sr_index, int max_sfb,
+double aac_compute_masks(const SpecT* spec, int sr_index, int max_sfb,
                          double emax_ref, double* mask, bool tonal);
 
 }  // namespace aac

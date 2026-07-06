@@ -835,7 +835,26 @@ Full table in the 2026-07-06 run log; NMR summary at 128k:
   double MDCT lookback alone is 16 KB → int16/int32 input buffers and
   a Q31 path are mandatory, plus single-slot psy/mdct models).
 
-## A2. Phase 3 — fixed-point path + RAM diet (roadmap)
+## A2. Phase 3 — RAM diet — DONE (2026-07-06); Q31 arithmetic still open
 
-Q31 signal path, GLINT_SMALL_BUFFERS treatment, target: beat vo-aacenc's
-"several hundred KB" footprint the way MP3-glint beat Shine's 96 KB.
+Under GLINT_SMALL_BUFFERS (defined by GLINT_MODE=fixed builds):
+**47.6 KB measured** (25.0 KB context + 22.6 KB BSS) vs vo-aacenc's
+48.0 KB — and quality is METRICS-IDENTICAL to the desktop double build
+(every SNR/NMR/aud figure matches to the printed precision on speech
+128k/256k; full unit + decode suites green). Desktop double also
+dropped 117 → 106.5 KB from the shared half-window tables.
+
+What the diet is: STORAGE-only type changes — arithmetic stays double
+throughout (SpecT/PcmT in aac_coder_types_fwd.hpp):
+- spectra + masks stored as float, PCM lookback blocks as int16 (the
+  float encode path clamps to int16 under the flag),
+- MDCT twiddles/windows + psy spread/ath tables as float,
+- sine windows stored half-length (symmetric, mirrored accessor),
+- FFT bit-reversal computed inline (no rev table),
+- output buffer 4 KB (two tail frames fit).
+
+Honest caveat vs MP3's fixed path: this is a RAM diet, NOT an FPU-free
+port — the AAC path still needs floating point (double ops on float
+storage). A true Q31 path is future work if no-FPU AAC targets appear.
+Stack use (~30 KB transient in MDCT/fit) is not in the 47.6 KB figure;
+neither is vo-aacenc's stack in its 48 KB (heap-only, same basis).

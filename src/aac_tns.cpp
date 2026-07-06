@@ -41,7 +41,7 @@ double dequant_coef(int idx) {
 
 }  // namespace
 
-void aac_tns_analyze(double* spec, const AacBandLayout& L, int sr_index,
+void aac_tns_analyze(SpecT* spec, const AacBandLayout& L, int sr_index,
                      AacTnsFilter* f) {
     f->active = 0;
     if (L.window_sequence == 2) return;  // long-family only

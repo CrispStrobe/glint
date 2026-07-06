@@ -32,7 +32,11 @@ using namespace glint::aac;
 using namespace glint::aac_tables;
 
 constexpr int kAdtsHeaderBits = 56;   // protection_absent = 1
+#ifdef GLINT_SMALL_BUFFERS
+constexpr int kMaxOutBytes = 4096;    // two tail frames <= ~3.2 KB at 44.1/48k
+#else
 constexpr int kMaxOutBytes = 8192;    // flush emits two frames back-to-back
+#endif
 constexpr int kDecoderBufBits = 6144; // per-channel input buffer cap (ISO)
 
 int samplerate_index(int sr) {
@@ -65,8 +69,8 @@ struct glint_aac_context {
     int force_short;                // GLINT_AAC_FORCE_SHORT diagnostic
 
     // Block pipeline: the frame emitted on each call covers (blk0, blk1).
-    double blk0[2][kAacFrameLen];   // older block
-    double blk1[2][kAacFrameLen];   // newer block
+    PcmT blk0[2][kAacFrameLen];     // older block
+    PcmT blk1[2][kAacFrameLen];     // newer block
     int attack0, attack1;           // transient flags for blk0 / blk1
     int pos0, pos1;                 // attack sub-block (0..7) within the block
     int prev_short;
@@ -76,11 +80,11 @@ struct glint_aac_context {
     double base_e[2];               // rolling sub-block energy baseline
 
     AacBandLayout layout;           // current frame's common band layout
-    double spec[2][kAacFrameLen];   // coded-order spectra (M/S bands transformed)
+    SpecT spec[2][kAacFrameLen];    // coded-order spectra (M/S bands transformed)
     AacChannelPlan plan[2];
     uint8_t ms_used[kMaxSfb];       // per-band M/S flags (stereo)
     int ms_present;                 // 0 = none, 1 = per-band flags, 2 = all
-    double mask[2][kMaxSfb];        // per-channel shaping masks (coded domain)
+    SpecT mask[2][kMaxSfb];         // per-channel shaping masks (coded domain)
 
     double bits_per_frame;
     double target_acc;
@@ -139,12 +143,12 @@ void decide_ms(glint_aac_context* c, const double* maskL, const double* maskR) {
                 c->spec[0][i] = 0.5 * (l + r);
                 c->spec[1][i] = 0.5 * (l - r);
             }
-            c->mask[0][b] = t;
-            c->mask[1][b] = t;
+            c->mask[0][b] = static_cast<SpecT>(t);
+            c->mask[1][b] = static_cast<SpecT>(t);
         } else {
             c->ms_used[b] = 0;
-            c->mask[0][b] = maskL ? maskL[b] : 0.0;
-            c->mask[1][b] = maskR ? maskR[b] : 0.0;
+            c->mask[0][b] = static_cast<SpecT>(maskL ? maskL[b] : 0.0);
+            c->mask[1][b] = static_cast<SpecT>(maskR ? maskR[b] : 0.0);
         }
     }
     c->ms_present = (n_ms == 0) ? 0 : (n_ms == L.num_bands) ? 2 : 1;
@@ -152,7 +156,7 @@ void decide_ms(glint_aac_context* c, const double* maskL, const double* maskR) {
 
 // Transient detector: 8 sub-block energies of the first-difference signal;
 // attack when one jumps 8x over the rolling baseline (with a silence floor).
-bool detect_attack(const double* x, double* hp_last, double* base_e, int* pos) {
+bool detect_attack(const PcmT* x, double* hp_last, double* base_e, int* pos) {
     constexpr double kRatio = 8.0;
     constexpr double kFloor = 1e6;  // diff-energy floor at int16 scale
     double prev = *hp_last;
@@ -213,7 +217,7 @@ int emit_frame(glint_aac_context* c, int next_attack, uint8_t* out) {
     // ---- MDCT into coded order ----
     for (int chn = 0; chn < ch; chn++) {
         if (seq == kSeqShort) {
-            double natural[kAacFrameLen];
+            SpecT natural[kAacFrameLen];
             aac_mdct_frame(seq, c->blk0[chn], c->blk1[chn], natural);
             aac_reorder_short(natural, L, c->sr_index, c->spec[chn]);
         } else {
@@ -306,7 +310,7 @@ int emit_frame(glint_aac_context* c, int next_attack, uint8_t* out) {
         decide_ms(c, ml, mr);
         if (c->ms_present == 1) fixed_overhead += L.num_bands;  // ms_used bits
     } else {
-        std::memcpy(c->mask[0], maskL, sizeof(double) * L.num_bands);
+        for (int b = 0; b < L.num_bands; b++) c->mask[0][b] = static_cast<SpecT>(maskL[b]);
     }
 
     int spend = static_cast<int>(avail) - fixed_overhead;
@@ -373,7 +377,7 @@ int emit_frame(glint_aac_context* c, int next_attack, uint8_t* out) {
 }
 
 // Advance the block pipeline with `cur` (or silence when null).
-void push_block(glint_aac_context* c, const double cur[2][kAacFrameLen],
+void push_block(glint_aac_context* c, const PcmT cur[2][kAacFrameLen],
                 int attack_cur, int pos_cur) {
     for (int chn = 0; chn < c->num_channels; chn++) {
         std::memcpy(c->blk0[chn], c->blk1[chn], sizeof(c->blk0[chn]));
@@ -390,7 +394,7 @@ void push_block(glint_aac_context* c, const double cur[2][kAacFrameLen],
 }
 
 const uint8_t* encode_common(glint_aac_context* c,
-                             const double cur[2][kAacFrameLen], int* out_size) {
+                             const PcmT cur[2][kAacFrameLen], int* out_size) {
     int attack_cur = 0, pos_cur = 0;
     for (int chn = 0; chn < c->num_channels; chn++) {
         int p = 0;
@@ -468,10 +472,10 @@ const uint8_t* glint_aac_encode(glint_aac_t c, const int16_t** channel_data, int
         if (out_size) *out_size = 0;
         return nullptr;
     }
-    double cur[2][kAacFrameLen];
+    PcmT cur[2][kAacFrameLen];
     for (int chn = 0; chn < c->num_channels; chn++) {
         for (int i = 0; i < kAacFrameLen; i++) {
-            cur[chn][i] = static_cast<double>(channel_data[chn][i]);
+            cur[chn][i] = static_cast<PcmT>(channel_data[chn][i]);
         }
     }
     return encode_common(c, cur, out_size);
@@ -482,10 +486,15 @@ const uint8_t* glint_aac_encode_float(glint_aac_t c, const float** channel_data,
         if (out_size) *out_size = 0;
         return nullptr;
     }
-    double cur[2][kAacFrameLen];
+    PcmT cur[2][kAacFrameLen];
     for (int chn = 0; chn < c->num_channels; chn++) {
         for (int i = 0; i < kAacFrameLen; i++) {
-            cur[chn][i] = static_cast<double>(channel_data[chn][i]) * 32768.0;
+            double v = static_cast<double>(channel_data[chn][i]) * 32768.0;
+#ifdef GLINT_SMALL_BUFFERS
+            if (v > 32767.0) v = 32767.0;
+            if (v < -32768.0) v = -32768.0;
+#endif
+            cur[chn][i] = static_cast<PcmT>(v);
         }
     }
     return encode_common(c, cur, out_size);
@@ -517,10 +526,10 @@ void shape_channel(glint_aac_context* c, int chn, int budget) {
     using namespace glint::aac;
     const AacBandLayout& L = c->layout;
     AacChannelPlan& plan = c->plan[chn];
-    const double* spec = c->spec[chn];
+    const SpecT* spec = c->spec[chn];
     const int nb = L.num_bands;
 
-    const double* mask = c->mask[chn];  // coded-domain masks from emit_frame
+    const SpecT* mask = c->mask[chn];  // coded-domain masks from emit_frame
     double noise[kMaxSfb];
     aac_band_noise(plan, spec, L, noise);
 

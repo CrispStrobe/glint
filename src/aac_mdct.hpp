@@ -11,6 +11,8 @@
 #ifndef GLINT_AAC_MDCT_HPP
 #define GLINT_AAC_MDCT_HPP
 
+#include "aac_coder_types_fwd.hpp"
+
 namespace glint {
 namespace aac {
 
@@ -23,11 +25,11 @@ enum AacWindowSequence {
     kSeqStop  = 3,  // LONG_STOP_SEQUENCE
 };
 
-// prev/cur: previous and current 1024-sample blocks (unwindowed).
-// spec: 1024 coefficients out. For kSeqShort the layout is window-major
-// (natural order): spec[128*w + k] = coefficient k of short window w.
-void aac_mdct_frame(int window_sequence, const double* prev, const double* cur,
-                    double* spec);
+// prev/cur: previous and current 1024-sample blocks (unwindowed, PcmT
+// storage). spec: 1024 coefficients out. For kSeqShort the layout is
+// window-major: spec[128*w + k] = coefficient k of short window w.
+void aac_mdct_frame(int window_sequence, const PcmT* prev, const PcmT* cur,
+                    SpecT* spec);
 
 }  // namespace aac
 }  // namespace glint

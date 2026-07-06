@@ -157,11 +157,13 @@ vo-aacenc ~100×, ffmpeg-native ~34×. No perf pass has run on the AAC
 path yet (the MP3 path got −27..−45% from two passes; the same LUT
 machinery applies).
 
-**RAM** (measured; encoder context + static tables): glint-aac desktop
-double ≈ **117 KB** (61.4 KB context + 55.5 KB lazily-built tables);
-vo-aacenc ≈ **48 KB** (heap, via its own allocator hook; zero BSS).
-The AAC equivalent of the MP3 fixed-point/`GLINT_SMALL_BUFFERS` diet
-(which took MP3 from 213 KB to 64 KB) is phase 3 of the roadmap.
+**RAM** (measured; encoder context + static tables): with
+`GLINT_SMALL_BUFFERS` (the `GLINT_MODE=fixed` build) glint-aac needs
+**47.6 KB** (25.0 KB context + 22.6 KB tables) — under vo-aacenc's
+measured **48.0 KB** (heap via its own allocator hook, zero BSS) —
+with quality metrics identical to the desktop build (float/int16
+storage, double arithmetic; needs an FPU, unlike glint's MP3 Q31
+path). Desktop double ≈ 106 KB.
 
 ## Building
 
