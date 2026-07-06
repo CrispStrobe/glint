@@ -62,27 +62,47 @@ const MaskModel* get_model(int sr_index) {
 }  // namespace
 
 double aac_compute_masks(const double* spec, int sr_index, int max_sfb,
-                         double emax_ref, double* mask) {
+                         double emax_ref, double* mask, bool tonal) {
     const MaskModel* m = get_model(sr_index);
     const uint16_t* swb = kSwbOffsetLong[sr_index];
     static const double kOffset = std::pow(10.0, -14.0 / 10.0);
 
     double e[kMaxSfb];
+    double off[kMaxSfb];
     double emax = 0.0;
     const int nb = max_sfb < m->nb ? max_sfb : m->nb;
     for (int b = 0; b < nb; b++) {
-        double acc = 0.0;
-        for (int i = swb[b]; i < swb[b + 1]; i++) acc += spec[i] * spec[i];
+        double acc = 0.0, lg = 0.0;
+        for (int i = swb[b]; i < swb[b + 1]; i++) {
+            double p = spec[i] * spec[i];
+            acc += p;
+            if (tonal) lg += std::log(p + 1e-30);
+        }
         e[b] = acc;
         if (acc > emax) emax = acc;
+        if (tonal) {
+            // Spectral flatness -> tonality alpha in [0,1]; tonal maskers
+            // mask less: per-masker offset -(6 + 12*alpha) dB.
+            int n = swb[b + 1] - swb[b];
+            double gm = std::exp(lg / n);
+            double sfm_db = 10.0 * std::log10(gm / (acc / n + 1e-30) + 1e-30);
+            double a = sfm_db / -20.0;
+            if (a > 1.0) a = 1.0;
+            if (a < 0.0) a = 0.0;
+            off[b] = std::pow(10.0, -(6.0 + 12.0 * a) / 10.0);
+        }
     }
     double ref = emax_ref > emax ? emax_ref : emax;
     for (int b = 0; b < nb; b++) {
         double acc = 0.0;
-        for (int j = 0; j < nb; j++) acc += e[j] * m->spread[b][j];
+        if (tonal) {
+            for (int j = 0; j < nb; j++) acc += e[j] * off[j] * m->spread[b][j];
+        } else {
+            for (int j = 0; j < nb; j++) acc += e[j] * m->spread[b][j];
+            acc *= kOffset;
+        }
         double floor = ref * m->ath_rel[b];
-        double v = acc * kOffset;
-        mask[b] = v > floor ? v : floor;
+        mask[b] = acc > floor ? acc : floor;
     }
     return emax;
 }

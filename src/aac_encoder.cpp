@@ -244,14 +244,18 @@ int emit_frame(glint_aac_context* c, int next_attack, uint8_t* out) {
     double maskL[kMaxSfb], maskR[kMaxSfb];
     const double* ml = nullptr;
     const double* mr = nullptr;
+    // Tonality-aware mask offsets at low per-channel rates (the MP3 gate:
+    // <= 96 kbps/ch), where the flat -14 dB offset over-protects noise-like
+    // bands and under-protects tonal ones.
+    const bool tonal = (c->bitrate_bps / ch) <= 96000;
     if (seq != kSeqShort) {
         double e0 = aac_compute_masks(c->spec[0], c->sr_index, L.num_bands,
-                                      c->emax_run, maskL);
+                                      c->emax_run, maskL, tonal);
         if (e0 > c->emax_run) c->emax_run = e0;
         ml = maskL;
         if (ch == 2) {
             double e1 = aac_compute_masks(c->spec[1], c->sr_index, L.num_bands,
-                                          c->emax_run, maskR);
+                                          c->emax_run, maskR, tonal);
             if (e1 > c->emax_run) c->emax_run = e1;
             mr = maskR;
         }

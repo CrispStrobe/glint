@@ -781,7 +781,17 @@ afconvert are the yardsticks, vo-aacenc is the Shine-role baseline):
      collapses SNR to ~15 dB; correct TNS costs ~1.5 dB at the 65 dB
      level. In-process round-trip vs the decoder recursion
      (scratch test) proved the math exact before the wire hunt.
-5. **Bandwidth heuristic → psy-driven max_sfb** (current cutoffs are a
+5. **Tonality-aware masks — DONE (2026-07-06).** Per-masker offsets
+   −(6 + 12·α) dB from band spectral flatness (α∈[0,1]) instead of the
+   metric's flat −14 dB, ported from the MP3 nmr_outer_loop tonal
+   path, gated at ≤96 kbps/ch like MP3. Judged on ODG/PESQ (the
+   in-house NMR is expected to diverge slightly since the offsets no
+   longer match the metric's): speech 128k ODG −0.87→−0.85 / PESQ
+   4.51→4.54; 64k mono ODG −2.34→−2.23; **electronic 128k ODG
+   −0.78→−0.49**; quartet −0.35→−0.32; castanets ≈0.01 (transparent
+   boundary). NMR holds within 0.15 everywhere. 256k paths unchanged
+   (gate off above 96 kbps/ch).
+6. **Bandwidth heuristic → psy-driven max_sfb** (current cutoffs are a
    placeholder table roughly tracking fdk defaults).
 
 ## A1b. AAC league table — measured 2026-07-06 (post short blocks)
