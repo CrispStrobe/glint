@@ -84,7 +84,10 @@ struct glint_aac_context {
     AacChannelPlan plan[2];
     uint8_t ms_used[kMaxSfb];       // per-band M/S flags (stereo)
     int ms_present;                 // 0 = none, 1 = per-band flags, 2 = all
-    SpecT mask[2][kMaxSfb];         // per-channel shaping masks (coded domain)
+    // Masks are ENERGIES (huge in the Q-scaled integer domain) — always
+    // float storage, never SpecT (int32 storage truncated them to garbage
+    // and froze the shaping loop on the no-FPU profile).
+    float mask[2][kMaxSfb];
 
     double bits_per_frame;
     double target_acc;
@@ -114,6 +117,25 @@ constexpr int kMaxSfOffset = 30;
 
 void shape_channel(glint_aac_context* c, int chn, int budget);
 
+// Band energy in the (possibly scaled) spec domain; per-coefficient work is
+// integer on the no-FPU profile.
+double band_energy(const SpecT* spec, const AacBandLayout& L, int b) {
+#ifdef GLINT_AAC_INT
+    int64_t acc = 0;
+    for (int i = L.offset[b]; i < L.offset[b + 1]; i++) {
+        int64_t v = spec[i];
+        acc += v * v;
+    }
+    return static_cast<double>(acc);
+#else
+    double acc = 0.0;
+    for (int i = L.offset[b]; i < L.offset[b + 1]; i++) {
+        acc += spec[i] * spec[i];
+    }
+    return acc;
+#endif
+}
+
 // Per-band M/S decision + in-place transform of c->spec, and the coded-domain
 // shaping masks for both channels. maskL/maskR may be null (short frames):
 // the product rule then degenerates to the pure energy rule eM*eS < eL*eR.
@@ -124,6 +146,26 @@ void decide_ms(glint_aac_context* c, const double* maskL, const double* maskR) {
     const AacBandLayout& L = c->layout;
     int n_ms = 0;
     for (int b = 0; b < L.num_bands; b++) {
+#ifdef GLINT_AAC_INT
+        // Integer energies (spec is Q3 int32; >>4 pre-shift keeps the
+        // 96-line band sums inside int64), double only for the final
+        // 4-value product rule (per band, not per coefficient).
+        // Full-scale int64 energies (Parseval bounds the frame total at
+        // ~2^59); m/s energies via the identity eM+eS=(eL+eR)/2 pattern is
+        // not needed — direct sums stay exact.
+        int64_t iL = 0, iR = 0, iM = 0, iS = 0;
+        for (int i = L.offset[b]; i < L.offset[b + 1]; i++) {
+            int64_t l = c->spec[0][i], r = c->spec[1][i];
+            int64_t m = (l + r) / 2, s2 = (l - r) / 2;
+            iL += l * l;
+            iR += r * r;
+            iM += m * m;
+            iS += s2 * s2;
+        }
+        double eL = static_cast<double>(iL), eR = static_cast<double>(iR);
+        double eM = static_cast<double>(iM), eS = static_cast<double>(iS);
+        double mask_to_e = 1.0;  // masks and energies share the Q3^2 domain
+#else
         double eL = 0, eR = 0, eM = 0, eS = 0;
         for (int i = L.offset[b]; i < L.offset[b + 1]; i++) {
             double l = c->spec[0][i], r = c->spec[1][i];
@@ -133,30 +175,72 @@ void decide_ms(glint_aac_context* c, const double* maskL, const double* maskR) {
             eM += m * m;
             eS += s * s;
         }
-        double t = 0.0;
-        if (maskL && maskR) t = maskL[b] < maskR[b] ? maskL[b] : maskR[b];
+        double mask_to_e = 1.0;
+#endif
+        // tm stays in the mask (spec^2) domain for storage; t is rescaled
+        // into the energy domain only for the product-rule comparison.
+        double tm = 0.0;
+        if (maskL && maskR) tm = maskL[b] < maskR[b] ? maskL[b] : maskR[b];
+        double t = tm / mask_to_e;
         if ((t + eM) * (t + eS) < (t + eL) * (t + eR)) {
             c->ms_used[b] = 1;
             n_ms++;
             for (int i = L.offset[b]; i < L.offset[b + 1]; i++) {
+#ifdef GLINT_AAC_INT
+                int32_t l = c->spec[0][i], r = c->spec[1][i];
+                c->spec[0][i] = static_cast<int32_t>((static_cast<int64_t>(l) + r) / 2);
+                c->spec[1][i] = static_cast<int32_t>((static_cast<int64_t>(l) - r) / 2);
+#else
                 double l = c->spec[0][i], r = c->spec[1][i];
                 c->spec[0][i] = 0.5 * (l + r);
                 c->spec[1][i] = 0.5 * (l - r);
+#endif
             }
-            c->mask[0][b] = static_cast<SpecT>(t);
-            c->mask[1][b] = static_cast<SpecT>(t);
+            c->mask[0][b] = static_cast<float>(tm);
+            c->mask[1][b] = static_cast<float>(tm);
         } else {
             c->ms_used[b] = 0;
-            c->mask[0][b] = static_cast<SpecT>(maskL ? maskL[b] : 0.0);
-            c->mask[1][b] = static_cast<SpecT>(maskR ? maskR[b] : 0.0);
+            c->mask[0][b] = static_cast<float>(maskL ? maskL[b] : 0.0);
+            c->mask[1][b] = static_cast<float>(maskR ? maskR[b] : 0.0);
         }
     }
     c->ms_present = (n_ms == 0) ? 0 : (n_ms == L.num_bands) ? 2 : 1;
+    if (getenv("GLINT_AAC_MS_DEBUG")) {
+        static long total = 0, frames = 0;
+        total += n_ms;
+        frames++;
+        fprintf(stderr, "msdbg frames=%ld total_ms_bands=%ld\n", frames, total);
+    }
 }
 
 // Transient detector: 8 sub-block energies of the first-difference signal;
 // attack when one jumps 8x over the rolling baseline (with a silence floor).
 bool detect_attack(const PcmT* x, double* hp_last, double* base_e, int* pos) {
+#ifdef GLINT_AAC_INT
+    // Integer form: identical structure, int64 energies; base update
+    // (7*base + 3*e)/10 approximates the 0.7/0.3 EMA.
+    int64_t prev = static_cast<int64_t>(*hp_last);
+    int64_t base = static_cast<int64_t>(*base_e);
+    bool attack = false;
+    int p = 0;
+    for (int w = 0; w < 8; w++) {
+        int64_t e = 0;
+        for (int n = 0; n < 128; n++) {
+            int64_t d = static_cast<int64_t>(x[128 * w + n]) - prev;
+            prev = x[128 * w + n];
+            e += d * d;
+        }
+        if (!attack && e > 8 * base && e > 1000000) {
+            attack = true;
+            p = w;
+        }
+        base = base > e ? (7 * base + 3 * e) / 10 : e;
+    }
+    *hp_last = static_cast<double>(prev);
+    *base_e = static_cast<double>(base);
+    *pos = p;
+    return attack;
+#else
     constexpr double kRatio = 8.0;
     constexpr double kFloor = 1e6;  // diff-energy floor at int16 scale
     double prev = *hp_last;
@@ -180,6 +264,7 @@ bool detect_attack(const PcmT* x, double* hp_last, double* base_e, int* pos) {
     *base_e = base;
     *pos = p;
     return attack;
+#endif
 }
 
 // One frame: window-decide, MDCT, M/S, fit, shape, emit ADTS at out. Returns
@@ -282,22 +367,14 @@ int emit_frame(glint_aac_context* c, int next_attack, uint8_t* out) {
         if (seq != kSeqShort && !getenv("GLINT_AAC_NO_TNS")) {
             double e_unf[kMaxSfb];
             for (int b = 0; b < L.num_bands; b++) {
-                double acc = 0.0;
-                for (int i = L.offset[b]; i < L.offset[b + 1]; i++) {
-                    acc += c->spec[chn][i] * c->spec[chn][i];
-                }
-                e_unf[b] = acc;
+                e_unf[b] = band_energy(c->spec[chn], L, b);
             }
             aac_tns_analyze(c->spec[chn], L, c->sr_index, &c->plan[chn].tns);
             if (c->plan[chn].tns.active) {
                 double* mask = (chn == 0) ? maskL : maskR;
                 for (int b = 0; b < L.num_bands; b++) {
                     if (e_unf[b] <= 0.0) continue;
-                    double acc = 0.0;
-                    for (int i = L.offset[b]; i < L.offset[b + 1]; i++) {
-                        acc += c->spec[chn][i] * c->spec[chn][i];
-                    }
-                    double ratio = acc / e_unf[b];
+                    double ratio = band_energy(c->spec[chn], L, b) / e_unf[b];
                     if (ratio < 1e-4) ratio = 1e-4;
                     if (ratio > 1e4) ratio = 1e4;
                     mask[b] *= ratio;
@@ -310,7 +387,7 @@ int emit_frame(glint_aac_context* c, int next_attack, uint8_t* out) {
         decide_ms(c, ml, mr);
         if (c->ms_present == 1) fixed_overhead += L.num_bands;  // ms_used bits
     } else {
-        for (int b = 0; b < L.num_bands; b++) c->mask[0][b] = static_cast<SpecT>(maskL[b]);
+        for (int b = 0; b < L.num_bands; b++) c->mask[0][b] = static_cast<float>(maskL[b]);
     }
 
     int spend = static_cast<int>(avail) - fixed_overhead;
@@ -533,7 +610,7 @@ void shape_channel(glint_aac_context* c, int chn, int budget) {
     const SpecT* spec = c->spec[chn];
     const int nb = L.num_bands;
 
-    const SpecT* mask = c->mask[chn];  // coded-domain masks from emit_frame
+    const float* mask = c->mask[chn];  // coded-domain masks from emit_frame
     double noise[kMaxSfb];
     aac_band_noise(plan, spec, L, noise);
 

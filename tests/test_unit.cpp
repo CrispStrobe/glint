@@ -406,6 +406,7 @@ static void test_aac_mdct_vs_direct() {
         z[n] = w0 * prev[n];
         z[M + n] = w1 * cur[n];
     }
+    const double sscale = 1 << glint::aac::kSpecFracBits;
     double n0 = (N / 2 + 1) / 2.0;
     double max_err = 0, max_ref = 0;
     for (int k = 0; k < M; k++) {
@@ -414,11 +415,12 @@ static void test_aac_mdct_vs_direct() {
             acc += z[n] * std::cos(2.0 * pi / N * (n + n0) * (k + 0.5));
         }
         ref[k] = 2.0 * acc;
-        double e = std::fabs(ref[k] - spec[k]);
+        double e = std::fabs(ref[k] - spec[k] / sscale);
         if (e > max_err) max_err = e;
         if (std::fabs(ref[k]) > max_ref) max_ref = std::fabs(ref[k]);
     }
-    const double tol = sizeof(glint::aac::SpecT) == 4 ? 2e-5 : 1e-10;
+    const double tol = glint::aac::kSpecFracBits > 0 ? 1e-4
+                       : sizeof(glint::aac::SpecT) == 4 ? 2e-5 : 1e-10;
     CHECK(max_err / max_ref < tol, "fast MDCT matches direct ISO formula");
 
     // Short windows: each 256-point window vs the direct formula.
@@ -437,7 +439,7 @@ static void test_aac_mdct_vs_direct() {
                        std::cos(2.0 * pi / 256 * (n + n0s) * (k + 0.5));
             }
             double r = 2.0 * acc;
-            double e = std::fabs(r - specs[128 * w + k]);
+            double e = std::fabs(r - specs[128 * w + k] / sscale);
             if (e > serr) serr = e;
             if (std::fabs(r) > sref) sref = std::fabs(r);
         }

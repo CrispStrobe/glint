@@ -853,8 +853,45 @@ throughout (SpecT/PcmT in aac_coder_types_fwd.hpp):
 - FFT bit-reversal computed inline (no rev table),
 - output buffer 4 KB (two tail frames fit).
 
-Honest caveat vs MP3's fixed path: this is a RAM diet, NOT an FPU-free
-port — the AAC path still needs floating point (double ops on float
-storage). A true Q31 path is future work if no-FPU AAC targets appear.
+## A2b. No-FPU integer hot path — DONE (2026-07-06), GLINT_AAC_INT
+
+GLINT_MODE=fixed now also defines GLINT_AAC_INT: spectra are int32 (Q3,
+spec_int = spec_true*8) and ALL per-coefficient work is integer —
+targets RP2040/Cortex-M0+ class parts where soft-float at
+per-coefficient rates is fatal:
+- Integer MDCT: Q30 twiddles/windows, int64 butterflies with a rounded
+  >>1 per FFT stage; measured transform SNR 131 dB vs the direct ISO
+  formula. Scale note: natural output is Q(qin - log2 H) — the ISO 2x
+  is part of the fold/DCT-IV algebra, NOT an extra bit (a wrong +1
+  here read as a clean 6 dB "SNR" — scale bug, not noise).
+- Integer quantizer: p34 cache holds log2(|x|^0.75) in Q16; the sf
+  step is EXACT in Q16 (0.1875*65536 = 12288); ix = one add + one
+  128-segment exp2 LUT. Parity vs the double formula: 0.04
+  mismatched coefficients per frame.
+- Integer band energies everywhere (psy accumulation, M/S decision,
+  TNS autocorr, TNS mask compensation) — NO pre-shifts needed:
+  Parseval bounds the whole frame's Q3^2 energy at ~2^59 (early >>8
+  "safety" shifts zeroed quiet coefficients for nothing). Per-BAND
+  math (spreading matmul, Levinson, rate control) stays double: a few
+  k soft-float ops per frame is fine on M0+.
+- Masks are float storage ALWAYS (SpecT-typed mask arrays truncated
+  Q3^2 energies to int32 garbage and froze the shaping loop — subtle,
+  found via GLINT_AAC_DEBUG traces).
+- Measured (INT vs float small-buffers): speech 128k speed -1.67 vs
+  -2.54, best -2.85 vs -3.52; 256k -14.57/-15.68 vs -16.05/-16.62;
+  castanets 128k best -8.56 (BETTER than float's -8.38). Root cause
+  of the stereo tax is PROVEN by the L==R experiment (identical
+  channels -> INT == float exactly): integer M/S halving loses half
+  an LSB on odd sums and the decoder's l=m+s cannot recover it.
+  Counter-intuitively Q4 spec scale measured WORSE than Q3 overall
+  (unresolved); the real fix if ever needed is a per-frame block
+  exponent. Mono is bit-comparable to float.
+- All suites green (unit incl. MDCT-vs-ISO at INT tolerances, decode
+  gates, ffmpeg+CoreAudio). 112x realtime on M1 at -q speed. RAM
+  unchanged at 47.6 KB (int32 == float width).
+- Remaining honest gap to "runs realtime on RP2040": needs an actual
+  cross-compile + on-target measurement; per-coefficient float is
+  gone, per-frame float remains (spreading, Levinson, rate control).
+
 Stack use (~30 KB transient in MDCT/fit) is not in the 47.6 KB figure;
 neither is vo-aacenc's stack in its 48 KB (heap-only, same basis).

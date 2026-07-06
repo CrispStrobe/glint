@@ -127,7 +127,86 @@ void aac_reorder_short(const SpecT* natural, const AacBandLayout& L,
     while (k < 1024) coded[k++] = SpecT(0);
 }
 
-int aac_quantize(const SpecT* p34, const SpecT* spec, const AacBandLayout& L,
+#ifdef GLINT_AAC_INT
+
+namespace {
+
+// log2 / exp2 in Q16, 128-segment LUTs with linear interpolation.
+// Relative error ~1e-6: the quantizer's decision boundaries move by less
+// than the double path's own rounding for all realistic spectra.
+struct PowLuts {
+    int32_t log2q16[130];   // log2(1 + i/128) * 65536
+    int32_t exp2q15[130];   // 2^(i/128) * 32768
+    PowLuts() {
+        for (int i = 0; i <= 129; i++) {
+            double f = i / 128.0;
+            if (i < 130) {
+                log2q16[i] = static_cast<int32_t>(std::lround(std::log2(1.0 + f) * 65536.0));
+                exp2q15[i] = static_cast<int32_t>(std::lround(std::pow(2.0, f) * 32768.0));
+            }
+        }
+    }
+};
+const PowLuts& luts() { static const PowLuts t; return t; }
+
+// Q16 log2 of v (v >= 1)
+inline int32_t ilog2_q16(uint32_t v) {
+    const PowLuts& t = luts();
+    int b = 31 - __builtin_clz(v);
+    uint32_t u = v << (31 - b);           // MSB at bit 31
+    int idx = (u >> 24) & 0x7F;           // 7 bits below the MSB
+    int r = (u >> 16) & 0xFF;             // next 8 bits for interpolation
+    int32_t lo = t.log2q16[idx];
+    int32_t hi = t.log2q16[idx + 1];
+    return (b << 16) + lo + static_cast<int32_t>((static_cast<int64_t>(hi - lo) * r) >> 8);
+}
+
+// floor(2^(l/65536) + 0.4054), clamped to 32000. l may be negative.
+inline int quant_exp2(int64_t l) {
+    const PowLuts& t = luts();
+    int64_t I = l >> 16;                  // floor
+    int f = static_cast<int>(l & 0xFFFF);
+    if (I >= 15) return 32000;
+    int idx = (f >> 9) & 0x7F;
+    int r = (f >> 1) & 0xFF;
+    int32_t lo = t.exp2q15[idx];
+    int32_t hi = t.exp2q15[idx + 1];
+    int64_t m = lo + ((static_cast<int64_t>(hi - lo) * r) >> 8);  // Q15, [1,2)
+    // q in Q16 = m * 2^(I+1); add 0.4054 (Q16) and floor
+    int sh = static_cast<int>(I) + 1;
+    int64_t q16;
+    if (sh >= 0) {
+        q16 = m << sh;
+    } else {
+        q16 = m >> (-sh);
+    }
+    return static_cast<int>((q16 + 26573) >> 16);   // 0.4054 * 65536 = 26572.6
+}
+
+}  // namespace
+
+int aac_quantize(const P34T* p34, const SpecT* spec, const AacBandLayout& L,
+                 const uint8_t* sf, int16_t* ix) {
+    int maxabs = 0;
+    for (int b = 0; b < L.num_bands; b++) {
+        // log2(step) = -0.1875 * (sf - 100); 0.1875 * 65536 = 12288 exactly
+        const int32_t lstep = -12288 * (sf[b] - kSfOffset);
+        for (int i = L.offset[b]; i < L.offset[b + 1]; i++) {
+            int a = 0;
+            if (p34[i] != INT32_MIN) {
+                a = quant_exp2(static_cast<int64_t>(p34[i]) + lstep);
+                if (a > 32000) a = 32000;
+            }
+            if (a > maxabs) maxabs = a;
+            ix[i] = static_cast<int16_t>(spec[i] < 0 ? -a : a);
+        }
+    }
+    return maxabs;
+}
+
+#else  // !GLINT_AAC_INT
+
+int aac_quantize(const P34T* p34, const SpecT* spec, const AacBandLayout& L,
                  const uint8_t* sf, int16_t* ix) {
     int maxabs = 0;
     for (int b = 0; b < L.num_bands; b++) {
@@ -142,10 +221,15 @@ int aac_quantize(const SpecT* p34, const SpecT* spec, const AacBandLayout& L,
     return maxabs;
 }
 
+#endif  // GLINT_AAC_INT
+
 void aac_band_noise(const AacChannelPlan& plan, const SpecT* spec,
                     const AacBandLayout& L, double* noise) {
     for (int b = 0; b < L.num_bands; b++) {
-        const double gain = std::pow(2.0, 0.25 * (plan.sf[b] - kSfOffset));
+        // dequant into the STORED spec domain (Q(kSpecFracBits) on the
+        // integer profile) so noise and masks share one domain.
+        const double gain = std::pow(2.0, 0.25 * (plan.sf[b] - kSfOffset)) *
+                            (1 << kSpecFracBits);
         double acc = 0.0;
         for (int i = L.offset[b]; i < L.offset[b + 1]; i++) {
             double xhat = 0.0;
@@ -255,7 +339,7 @@ namespace {
 
 // Evaluate anchor gain G: quantize with sf[b] = clamp(G - off[b]), section,
 // exact-count. Returns true when magnitudes and the bit budget both fit.
-bool eval_gain(const SpecT* p34, const SpecT* spec, const AacBandLayout& L,
+bool eval_gain(const P34T* p34, const SpecT* spec, const AacBandLayout& L,
                int budget_bits, const int* off, int gain,
                AacChannelPlan* trial) {
     for (int b = 0; b < L.num_bands; b++) {
@@ -279,10 +363,25 @@ void aac_fit_channel(const SpecT* spec, const AacBandLayout& L,
                      AacChannelPlan* plan) {
     const int n = L.num_lines;
 
-    SpecT p34[1024];
+    P34T p34[1024];
+#ifdef GLINT_AAC_INT
+    // Log-domain cache: p34log = 0.75 * (log2|S| - kSpecFracBits) in Q16,
+    // so quantization is one add + one exp2 lookup per coefficient.
     for (int i = 0; i < n; i++) {
-        p34[i] = static_cast<SpecT>(std::pow(std::fabs(static_cast<double>(spec[i])), 0.75));
+        int32_t v = spec[i] < 0 ? -spec[i] : spec[i];
+        if (v == 0) {
+            p34[i] = INT32_MIN;
+        } else {
+            int64_t l2 = static_cast<int64_t>(ilog2_q16(static_cast<uint32_t>(v))) -
+                         (static_cast<int64_t>(kSpecFracBits) << 16);
+            p34[i] = static_cast<int32_t>((l2 * 3) >> 2);
+        }
     }
+#else
+    for (int i = 0; i < n; i++) {
+        p34[i] = static_cast<P34T>(std::pow(std::fabs(static_cast<double>(spec[i])), 0.75));
+    }
+#endif
     std::memset(plan->ix, 0, sizeof(plan->ix));
 
     AacChannelPlan trial;

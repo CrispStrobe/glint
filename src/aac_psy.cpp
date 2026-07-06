@@ -78,6 +78,49 @@ double aac_compute_masks(const SpecT* spec, int sr_index, int max_sfb,
     double emax = 0.0;
     const int nb = max_sfb < m->nb ? max_sfb : m->nb;
     for (int b = 0; b < nb; b++) {
+#ifdef GLINT_AAC_INT
+        // Integer per-coefficient work (the no-FPU hot path): energies in
+        // int64 (>>8 keeps 96-line band sums of Q3^2 products in range),
+        // geometric mean via an integer log2. Per-BAND math stays double —
+        // ~50 float ops per band per frame is per-frame-scale work.
+        // No pre-shift: Parseval bounds the whole frame's Q3^2 energy at
+        // ~2^59, safely inside int64 — a >>8 zeroed every |v|<16 coefficient
+        // and cost ~1 dB NMR at 256k (quiet-band energies vanished).
+        int64_t iacc = 0;
+        int64_t lg2q16 = 0;
+        for (int i = swb[b]; i < swb[b + 1]; i++) {
+            int64_t v = spec[i];
+            iacc += v * v;
+            if (tonal) {
+                uint32_t a2 = static_cast<uint32_t>(v < 0 ? -v : v);
+                // log2 of |S| (Q16); zero coefficients count as 2^-24
+                int32_t l;
+                if (a2 == 0) {
+                    l = -(24 << 16);
+                } else {
+                    int msb = 31 - __builtin_clz(a2);
+                    uint32_t u = a2 << (31 - msb);
+                    // 2-term linear approx of log2 mantissa: frac ~ (u-2^31)/2^31
+                    uint32_t frac = (u >> 15) & 0xFFFF;
+                    l = (msb << 16) + static_cast<int32_t>(frac);
+                }
+                lg2q16 += 2 * static_cast<int64_t>(l);  // log2(v^2)
+            }
+        }
+        double acc = static_cast<double>(iacc);
+        e[b] = acc;
+        if (acc > emax) emax = acc;
+        if (tonal) {
+            int n = swb[b + 1] - swb[b];
+            double gm_log2 = static_cast<double>(lg2q16) / (65536.0 * n);
+            double am_log2 = acc > 0 ? std::log2(acc / n) : -100.0;
+            double sfm_db = 3.0102999566 * (gm_log2 - am_log2);
+            double a = sfm_db / -20.0;
+            if (a > 1.0) a = 1.0;
+            if (a < 0.0) a = 0.0;
+            off[b] = std::pow(10.0, -(6.0 + 12.0 * a) / 10.0);
+        }
+#else
         double acc = 0.0, lg = 0.0;
         for (int i = swb[b]; i < swb[b + 1]; i++) {
             double p = spec[i] * spec[i];
@@ -97,6 +140,7 @@ double aac_compute_masks(const SpecT* spec, int sr_index, int max_sfb,
             if (a < 0.0) a = 0.0;
             off[b] = std::pow(10.0, -(6.0 + 12.0 * a) / 10.0);
         }
+#endif
     }
     double ref = emax_ref > emax ? emax_ref : emax;
     for (int b = 0; b < nb; b++) {

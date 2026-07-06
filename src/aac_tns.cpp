@@ -63,11 +63,24 @@ void aac_tns_analyze(SpecT* spec, const AacBandLayout& L, int sr_index,
 
     // Autocorrelation over the region.
     double r[kTnsMaxOrder + 1];
+#ifdef GLINT_AAC_INT
+    // Integer accumulation (>>8 pre-shift keeps ~600-term sums of Q3^2
+    // products inside int64); the 13 lag totals then go to double for the
+    // tiny Levinson recursion — per-frame scalars, not per-coefficient work.
+    for (int lag = 0; lag <= kTnsMaxOrder; lag++) {
+        int64_t acc = 0;
+        for (int i = start + lag; i < end; i++) {
+            acc += static_cast<int64_t>(spec[i]) * spec[i - lag];
+        }
+        r[lag] = static_cast<double>(acc);
+    }
+#else
     for (int lag = 0; lag <= kTnsMaxOrder; lag++) {
         double acc = 0.0;
         for (int i = start + lag; i < end; i++) acc += spec[i] * spec[i - lag];
         r[lag] = acc;
     }
+#endif
     if (r[0] <= 0.0) return;
     r[0] *= 1.0 + 1e-9;  // regularize
 
@@ -118,6 +131,28 @@ void aac_tns_analyze(SpecT* spec, const AacBandLayout& L, int sr_index,
     // Forward FIR over the region: y[i] = x[i] + sum_j aq[j] * x[i-j],
     // history zero before the region start (matches the decoder's zero
     // initial filter state).
+#ifdef GLINT_AAC_INT
+    // Q24 filter coefficients, int64 accumulation, saturate to int32.
+    int32_t aq_i[kTnsMaxOrder + 1];
+    for (int m = 1; m <= order; m++) {
+        aq_i[m] = static_cast<int32_t>(std::lround(aq[m] * 16777216.0));
+    }
+    int32_t hist[kTnsMaxOrder] = {0};
+    for (int i = start; i < end; i++) {
+        int32_t x = spec[i];
+        int64_t y = static_cast<int64_t>(x) << 24;
+        int hmax = i - start < order ? i - start : order;
+        for (int j = 1; j <= hmax; j++) {
+            y += static_cast<int64_t>(aq_i[j]) * hist[j - 1];
+        }
+        for (int j = order - 1; j > 0; j--) hist[j] = hist[j - 1];
+        hist[0] = x;
+        y >>= 24;
+        if (y > INT32_MAX) y = INT32_MAX;
+        if (y < INT32_MIN) y = INT32_MIN;
+        spec[i] = static_cast<int32_t>(y);
+    }
+#else
     double hist[kTnsMaxOrder] = {0};
     for (int i = start; i < end; i++) {
         double x = spec[i];
@@ -128,6 +163,7 @@ void aac_tns_analyze(SpecT* spec, const AacBandLayout& L, int sr_index,
         hist[0] = x;
         spec[i] = y;
     }
+#endif
 
     f->active = 1;
     // The decoder counts the filter region down from num_swb (the FULL sfb

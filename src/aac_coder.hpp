@@ -107,7 +107,7 @@ struct AacChannelPlan {
 
 // Quantize with per-band scalefactors; returns max magnitude across bands.
 // p34[i] = |spec[i]|^0.75, SpecT precision is plenty against quantization.
-int aac_quantize(const SpecT* p34, const SpecT* spec, const AacBandLayout& layout,
+int aac_quantize(const P34T* p34, const SpecT* spec, const AacBandLayout& layout,
                  const uint8_t* sf, int16_t* ix);
 
 // Choose per-band books (optimal sectioning DP; sections never cross group
