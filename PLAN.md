@@ -853,6 +853,33 @@ throughout (SpecT/PcmT in aac_coder_types_fwd.hpp):
 - FFT bit-reversal computed inline (no rev table),
 - output buffer 4 KB (two tail frames fit).
 
+## A3. Perf pass 1 — DONE (2026-07-06): −52..54% encode time, byte-identical
+
+Profile-driven (macOS `sample`, -q best): eval_gain was 66% of runtime
+(quantize + per-band cost for up to 11 books via separate code_band
+walks + DP) and the count-only aac_write_ics_body re-walk another 13%.
+Three changes, all verified BYTE-IDENTICAL across
+{speed,normal,best} x {128,256,64-mono} in BOTH build modes (double and
+fixed/INT), plus castanets-best and 22.05k:
+- band_costs(): all valid books' spectral bits in TWO passes over the
+  band (one 4-tuple pass for books 1-4, one pair pass for 5-11 incl.
+  book-11 escapes) instead of up to eleven code_band walks. Identical
+  bit arithmetic; code_band stays for emission.
+- Zero bands cost O(1): ntuples * zero-tuple bits (lazy table from
+  kSpecBits — the old code walked the whole band for every book).
+- Exact ICS count is now O(num_bands) ARITHMETIC: spectral bits summed
+  from the cost table, sections/scf-dpcm/tns counted in closed form —
+  no more count-only emission over the spectrum. A GLINT_AAC_COUNT_CHECK
+  define cross-checks it against the emitter (used to validate; the
+  count==emission unit test also gates it).
+- getenv() calls cached out of per-frame/per-iteration paths.
+Measured (300 s speech, interleaved min-of-5): speed −54%, normal −52%,
+best −52%. Absolute: double 272x/168x realtime (speed/best), fixed/INT
+241x/140x — glint-aac -q speed is now the fastest encoder in the league
+(Apple ~104x). Byte-identity gate caveat for the future: zsh does NOT
+word-split unquoted $args — a broken gate loop compared stale files and
+reported false DIFFERs; use eval or arrays.
+
 ## A2b. No-FPU integer hot path — DONE (2026-07-06), GLINT_AAC_INT
 
 GLINT_MODE=fixed now also defines GLINT_AAC_INT: spectra are int32 (Q3,

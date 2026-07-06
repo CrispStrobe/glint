@@ -163,11 +163,12 @@ improved −0.78 → **−0.49**; speech 64k mono ODG −2.35 → −2.23. All
 other cells hold or improve; re-run
 `python tests/compare_encoders.py --codec aac` for current numbers.
 
-**Speed** (M1, 60 s speech, 44.1 kHz stereo 128k): glint-aac speed
-~85×, normal ~41×, best ~37× realtime; Apple ~104×, FDK ~90×,
-vo-aacenc ~100×, ffmpeg-native ~34×. No perf pass has run on the AAC
-path yet (the MP3 path got −27..−45% from two passes; the same LUT
-machinery applies).
+**Speed** (M1, 60 s speech): after the 2026-07 perf pass (−52..54%
+encode time, byte-identical) glint-aac measures **~272× realtime at
+`-q speed` and ~168× at `-q best`** (integer/fixed build: 241×/140×) —
+faster at `-q speed` than every encoder in the league (Apple ~104×,
+FDK ~90×, vo-aacenc ~100×, ffmpeg-native ~34×; league columns above
+predate the pass).
 
 **RAM** (measured; encoder context + static tables): with
 `GLINT_SMALL_BUFFERS` (the `GLINT_MODE=fixed` build) glint-aac needs

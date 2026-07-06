@@ -205,7 +205,8 @@ void decide_ms(glint_aac_context* c, const double* maskL, const double* maskR) {
         }
     }
     c->ms_present = (n_ms == 0) ? 0 : (n_ms == L.num_bands) ? 2 : 1;
-    if (getenv("GLINT_AAC_MS_DEBUG")) {
+    static const bool msdbg = getenv("GLINT_AAC_MS_DEBUG") != nullptr;
+    if (msdbg) {
         static long total = 0, frames = 0;
         total += n_ms;
         frames++;
@@ -364,7 +365,8 @@ int emit_frame(glint_aac_context* c, int next_attack, uint8_t* out) {
     // as a regression on every metric (ODG -0.87 -> -1.09 at 128k).
     for (int chn = 0; chn < ch; chn++) {
         c->plan[chn].tns.active = 0;
-        if (seq != kSeqShort && !getenv("GLINT_AAC_NO_TNS")) {
+        static const bool no_tns = getenv("GLINT_AAC_NO_TNS") != nullptr;
+        if (seq != kSeqShort && !no_tns) {
             double e_unf[kMaxSfb];
             for (int b = 0; b < L.num_bands; b++) {
                 e_unf[b] = band_energy(c->spec[chn], L, b);
@@ -697,7 +699,8 @@ void shape_channel(glint_aac_context* c, int chn, int budget) {
         } else if (++stall >= 5) {
             break;
         }
-        if (getenv("GLINT_AAC_DEBUG")) {
+        static const bool dbg = getenv("GLINT_AAC_DEBUG") != nullptr;
+        if (dbg) {
             fprintf(stderr, "  it%d: j=%.3g best=%.3g total/0=%.2f g=%d bits=%d/%d w=%.2f\n",
                     iter, j, j_best, total / total0, cand.fit_gain,
                     cand.ics_bits, shape_bits, w);

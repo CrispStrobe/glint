@@ -6,6 +6,8 @@
 #include "aac_tables.hpp"
 
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace glint {
@@ -245,6 +247,110 @@ void aac_band_noise(const AacChannelPlan& plan, const SpecT* spec,
     }
 }
 
+namespace {
+
+// Bits for one all-zero tuple in each spectral book (lazy init from the
+// code-length tables so the counts stay identical to code_band's).
+struct ZeroTupleBits {
+    int bits[12];
+    ZeroTupleBits() {
+        bits[0] = 0;
+        bits[1] = kSpecBits1[40];   // (0,0,0,0) -> 27+9+3+1
+        bits[2] = kSpecBits2[40];
+        bits[3] = kSpecBits3[0];
+        bits[4] = kSpecBits4[0];
+        bits[5] = kSpecBits5[40];   // (0,0) -> 9*4+4
+        bits[6] = kSpecBits6[40];
+        bits[7] = kSpecBits7[0];
+        bits[8] = kSpecBits8[0];
+        bits[9] = kSpecBits9[0];
+        bits[10] = kSpecBits10[0];
+        bits[11] = kSpecBits11[0];
+    }
+};
+const ZeroTupleBits& zero_bits() { static const ZeroTupleBits z; return z; }
+
+// All valid books' spectral bit costs for one band, in two passes over the
+// coefficients (one for the 4-tuple books, one for the pairs) instead of up
+// to eleven code_band walks. Bit counts are IDENTICAL to code_band's.
+void band_costs(const int16_t* ix, int start, int end, int maxabs, int* cost) {
+    for (int cb = 1; cb <= 11; cb++) cost[cb] = kInf;
+
+    if (maxabs <= 2) {
+        int c1 = 0, c2 = 0, c3 = 0, c4 = 0, s34 = 0;
+        for (int i = start; i < end; i += 4) {
+            int v0 = ix[i], v1 = ix[i + 1], v2 = ix[i + 2], v3 = ix[i + 3];
+            int a0 = v0 < 0 ? -v0 : v0, a1 = v1 < 0 ? -v1 : v1;
+            int a2 = v2 < 0 ? -v2 : v2, a3 = v3 < 0 ? -v3 : v3;
+            int idxu = 27 * a0 + 9 * a1 + 3 * a2 + a3;
+            c3 += kSpecBits3[idxu];
+            c4 += kSpecBits4[idxu];
+            s34 += (a0 != 0) + (a1 != 0) + (a2 != 0) + (a3 != 0);
+            if (maxabs <= 1) {
+                int idxs = 27 * (v0 + 1) + 9 * (v1 + 1) + 3 * (v2 + 1) + (v3 + 1);
+                c1 += kSpecBits1[idxs];
+                c2 += kSpecBits2[idxs];
+            }
+        }
+        if (maxabs <= 1) {
+            cost[1] = c1;
+            cost[2] = c2;
+        }
+        cost[3] = c3 + s34;
+        cost[4] = c4 + s34;
+    }
+
+    int c5 = 0, c6 = 0, c7 = 0, c8 = 0, c9 = 0, c10 = 0, c11 = 0;
+    int sgn = 0, esc = 0;
+    for (int i = start; i < end; i += 2) {
+        int v0 = ix[i], v1 = ix[i + 1];
+        int a0 = v0 < 0 ? -v0 : v0, a1 = v1 < 0 ? -v1 : v1;
+        sgn += (a0 != 0) + (a1 != 0);
+        if (maxabs <= 4) {
+            int idxs = 9 * (v0 + 4) + (v1 + 4);
+            c5 += kSpecBits5[idxs];
+            c6 += kSpecBits6[idxs];
+        }
+        if (maxabs <= 7) {
+            int idxu = 8 * a0 + a1;
+            c7 += kSpecBits7[idxu];
+            c8 += kSpecBits8[idxu];
+        }
+        if (maxabs <= 12) {
+            int idxu = 13 * a0 + a1;
+            c9 += kSpecBits9[idxu];
+            c10 += kSpecBits10[idxu];
+        }
+        int e0 = a0 >= 16 ? 16 : a0, e1 = a1 >= 16 ? 16 : a1;
+        c11 += kSpecBits11[17 * e0 + e1];
+        if (a0 >= 16) {
+            int n1 = 0;
+            while (a0 >> (n1 + 5)) n1++;
+            esc += 2 * n1 + 5;
+        }
+        if (a1 >= 16) {
+            int n1 = 0;
+            while (a1 >> (n1 + 5)) n1++;
+            esc += 2 * n1 + 5;
+        }
+    }
+    if (maxabs <= 4) {
+        cost[5] = c5;
+        cost[6] = c6;
+    }
+    if (maxabs <= 7) {
+        cost[7] = c7 + sgn;
+        cost[8] = c8 + sgn;
+    }
+    if (maxabs <= 12) {
+        cost[9] = c9 + sgn;
+        cost[10] = c10 + sgn;
+    }
+    cost[11] = c11 + sgn + esc;
+}
+
+}  // namespace
+
 void aac_section_and_count(const int16_t* ix, const AacBandLayout& L,
                            AacChannelPlan* plan) {
     const int nb = L.num_bands;
@@ -260,13 +366,23 @@ void aac_section_and_count(const int16_t* ix, const AacBandLayout& L,
             int a = ix[i] < 0 ? -ix[i] : ix[i];
             if (a > maxabs) maxabs = a;
         }
-        cost[b][0] = (maxabs == 0) ? 0 : kInf;
-        for (int cb = 1; cb <= 11; cb++) {
-            int c = (maxabs == 0) ? code_band(nullptr, cb, ix, start, end)
-                    : (cb < 11 && maxabs > kBookLav[cb - 1])
-                        ? -1
-                        : code_band(nullptr, cb, ix, start, end);
-            cost[b][cb] = (c < 0) ? kInf : c + scf_zero_bits;
+        if (maxabs == 0) {
+            cost[b][0] = 0;
+            int ntup2 = (end - start) >> 1;
+            const ZeroTupleBits& z = zero_bits();
+            for (int cb = 1; cb <= 11; cb++) {
+                int ntup = kBookDim[cb - 1] == 4 ? ntup2 >> 1 : ntup2;
+                cost[b][cb] = ntup * z.bits[cb] + scf_zero_bits;
+            }
+        } else if (maxabs > kMaxQuant) {
+            cost[b][0] = kInf;
+            for (int cb = 1; cb <= 11; cb++) cost[b][cb] = kInf;
+        } else {
+            cost[b][0] = kInf;
+            band_costs(ix, start, end, maxabs, cost[b]);
+            for (int cb = 1; cb <= 11; cb++) {
+                if (cost[b][cb] < kInf) cost[b][cb] += scf_zero_bits;
+            }
         }
     }
 
@@ -329,10 +445,57 @@ void aac_section_and_count(const int16_t* ix, const AacBandLayout& L,
         }
     }
 
-    // Exact ICS bit count, excl. ics_info (includes section-length escapes).
-    AacBitWriter counter(0);
-    aac_write_ics_body(counter, *plan, L, false);
-    plan->ics_bits = counter.bits();
+    // Exact ICS bit count, excl. ics_info, WITHOUT re-walking the spectrum:
+    // spectral bits come from the per-band cost table (identical arithmetic
+    // to emission — the count==emission unit test enforces this), sections
+    // and the scalefactor dpcm chain are exact O(num_bands) walks.
+    {
+        int bits = 8;  // global_gain
+        for (int b = 0; b < nb;) {  // section_data with exact escapes
+            int cb = plan->book[b];
+            int g = L.group_of_band[b];
+            int e = b + 1;
+            while (e < nb && plan->book[e] == cb && L.group_of_band[e] == g) e++;
+            int len = e - b;
+            bits += 4 + L.sect_bits * (len / L.sect_esc + 1);
+            b = e;
+        }
+        {
+            int last = plan->global_gain;  // scale_factor_data dpcm chain
+            for (int b = 0; b < nb; b++) {
+                if (plan->book[b] == 0) continue;
+                int dpcm = plan->sf[b] - last + 60;
+                if (dpcm < 0) dpcm = 0;
+                if (dpcm > 120) dpcm = 120;
+                bits += kScfBits[dpcm];
+                last = last + (dpcm - 60);
+            }
+        }
+        bits += 3;  // pulse / tns_present / gain_control flags
+        if (plan->tns.active) {
+            bits += 2 + 1 + 6 + 5 + 1 + 1 + 4 * plan->tns.order;
+        }
+        for (int b = 0; b < nb; b++) {  // spectral bits from the cost table
+            if (plan->book[b] != 0) {
+                bits += cost[b][plan->book[b]] - kScfBits[60];
+            }
+        }
+        plan->ics_bits = bits;
+#ifdef GLINT_AAC_COUNT_CHECK
+        AacBitWriter counter(0);
+        aac_write_ics_body(counter, *plan, L, false);
+        if (counter.bits() != bits) {
+            std::fprintf(stderr, "COUNT MISMATCH arith=%d emit=%d nb=%d seq=%d\n",
+                         bits, counter.bits(), nb, L.window_sequence);
+            for (int b2 = 0; b2 < nb; b2++) {
+                std::fprintf(stderr, " b%d book=%d sf=%d cost=%d\n", b2,
+                             plan->book[b2], plan->sf[b2],
+                             plan->book[b2] ? cost[b2][plan->book[b2]] : 0);
+            }
+            std::abort();
+        }
+#endif
+    }
 }
 
 namespace {
