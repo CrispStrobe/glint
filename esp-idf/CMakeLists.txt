@@ -38,6 +38,9 @@ target_compile_definitions(${COMPONENT_LIB} PUBLIC
     GLINT_FIXED_POINT
     GLINT_SMALL_BUFFERS
     GLINT_SMALL_POW34
+    GLINT_AAC_INT
+    GLINT_MP3_INT
+    GLINT_NO_THREADS
 )
 
 target_compile_options(${COMPONENT_LIB} PRIVATE -std=gnu++17 -O2)

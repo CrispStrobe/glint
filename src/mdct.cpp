@@ -585,24 +585,24 @@ void MDCT_FP::process_and_convert(const int32_t subband[32][18], double mdct_fla
 #ifdef GLINT_MP3_INT
 // Q31 fused window*cos/288 table for the integer long-block MDCT.
 static int32_t mdct_wincos_q31[36][18];
-static bool mdct_wincos_q31_init = false;
 
-static void init_mdct_wincos_q31() {
-    if (mdct_wincos_q31_init) return;
-    constexpr double PI = 3.14159265358979323846;
-    for (int n = 0; n < 36; n++) {
-        double w = std::sin(PI / 36.0 * (n + 0.5));
-        for (int k = 0; k < 18; k++) {
-            double v = w * std::cos(PI / 72.0 * (2.0 * n + 19.0) * (2.0 * k + 1.0)) / 288.0;
-            mdct_wincos_q31[n][k] =
-                static_cast<int32_t>(std::lround(v * 2147483648.0));
+// Built by a global ctor at startup: the double trig must not end up
+// inlined into the integer hot path (see tools/check_nofpu.sh).
+static struct WincosQ31Init {
+    WincosQ31Init() {
+        constexpr double PI = 3.14159265358979323846;
+        for (int n = 0; n < 36; n++) {
+            double w = std::sin(PI / 36.0 * (n + 0.5));
+            for (int k = 0; k < 18; k++) {
+                double v = w * std::cos(PI / 72.0 * (2.0 * n + 19.0) * (2.0 * k + 1.0)) / 288.0;
+                mdct_wincos_q31[n][k] =
+                    static_cast<int32_t>(std::lround(v * 2147483648.0));
+            }
         }
     }
-    mdct_wincos_q31_init = true;
-}
+} g_wincos_q31_init;
 
 void MDCT_FP::process_int(const int32_t subband[32][18], int32_t mdct_flat[576]) {
-    init_mdct_wincos_q31();
     int32_t out[32][18];
     for (int sb = 0; sb < 32; sb++) {
         for (int k = 0; k < 18; k++) {

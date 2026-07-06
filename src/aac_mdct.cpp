@@ -102,9 +102,14 @@ struct WindowsInt {
     int32_t short_w(int n) const { return short_h[n < 128 ? n : 255 - n]; }
 };
 
-const WindowsInt& windows_int() { static const WindowsInt w; return w; }
-const FftSetInt<512, 9>& iset1024() { static const FftSetInt<512, 9> s; return s; }
-const FftSetInt<64, 6>& iset128() { static const FftSetInt<64, 6> s; return s; }
+// Startup-time globals (not function-local statics): the table builders use
+// double trig once, and must not be inlined into the integer hot paths.
+const WindowsInt g_windows_int{};
+const FftSetInt<512, 9> g_iset1024{};
+const FftSetInt<64, 6> g_iset128{};
+const WindowsInt& windows_int() { return g_windows_int; }
+const FftSetInt<512, 9>& iset1024() { return g_iset1024; }
+const FftSetInt<64, 6>& iset128() { return g_iset128; }
 
 inline int32_t win_mul(int32_t x, int32_t w_q30) {
     // x is int16-range PCM; result Q12

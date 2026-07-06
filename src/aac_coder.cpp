@@ -213,7 +213,8 @@ struct ZeroTupleBits {
         bits[11] = kSpecBits11[0];
     }
 };
-const ZeroTupleBits& zero_bits() { static const ZeroTupleBits z; return z; }
+const ZeroTupleBits g_zero_bits{};
+const ZeroTupleBits& zero_bits() { return g_zero_bits; }
 
 // All valid books' spectral bit costs for one band, in two passes over the
 // coefficients (one for the 4-tuple books, one for the pairs) instead of up

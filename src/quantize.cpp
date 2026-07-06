@@ -11,10 +11,12 @@
 #include <cstring>
 #include <cstdio>
 #include <vector>
+#ifndef GLINT_NO_THREADS
 #include <thread>
 #include <mutex>
 #include <atomic>
 #include <condition_variable>
+#endif
 #include <functional>
 
 namespace glint {
@@ -37,6 +39,7 @@ namespace glint {
 // generation counter (yielding after a spin budget), giving sub-microsecond
 // dispatch latency. This burns idle cores during the sequential per-frame work
 // between dispatches, which is the right trade for a batch encoder.
+#ifndef GLINT_NO_THREADS
 class ThreadPool {
 public:
     explicit ThreadPool(int n) {
@@ -125,6 +128,13 @@ static void quant_parallel_for(int n, const std::function<void(int)>& fn) {
         for (int i = 0; i < n; i++) fn(i);
     }
 }
+#else
+// Bare-metal builds (GLINT_NO_THREADS): no pool, always inline in order.
+static void quant_parallel_for(int n, const std::function<void(int)>& fn) {
+    for (int i = 0; i < n; i++) fn(i);
+}
+void quantize_set_threads(int) {}
+#endif  // GLINT_NO_THREADS
 
 static double gain_table[256];
 static double sf_table[2][16];

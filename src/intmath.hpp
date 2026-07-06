@@ -29,10 +29,11 @@ struct PowLuts {
     }
 };
 
-inline const PowLuts& pow_luts() {
-    static const PowLuts t;
-    return t;
-}
+// Global (startup-time) instance: keeps the trig/log constructor code in a
+// global ctor instead of inlined into the hot functions' guard branches —
+// tools/check_nofpu.sh proves the per-coefficient paths float-free that way.
+inline const PowLuts g_pow_luts{};
+inline const PowLuts& pow_luts() { return g_pow_luts; }
 
 // Q16 log2 of v (v >= 1)
 inline int32_t ilog2_q16(uint32_t v) {
