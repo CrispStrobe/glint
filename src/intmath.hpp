@@ -14,8 +14,24 @@
 #include <cmath>
 #include <cstdint>
 
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
+
 namespace glint {
 namespace intmath {
+
+// Portable count-leading-zeros for v > 0 (MSVC has no __builtin_clz, and it
+// compiles non-template inline bodies even when unused).
+inline int clz32(uint32_t v) {
+#if defined(_MSC_VER)
+    unsigned long idx;
+    _BitScanReverse(&idx, v);
+    return 31 - static_cast<int>(idx);
+#else
+    return __builtin_clz(v);
+#endif
+}
 
 struct PowLuts {
     int32_t log2q16[130];   // log2(1 + i/128) * 65536
@@ -38,7 +54,7 @@ inline const PowLuts& pow_luts() { return g_pow_luts; }
 // Q16 log2 of v (v >= 1)
 inline int32_t ilog2_q16(uint32_t v) {
     const PowLuts& t = pow_luts();
-    int b = 31 - __builtin_clz(v);
+    int b = 31 - clz32(v);
     uint32_t u = v << (31 - b);           // MSB at bit 31
     int idx = (u >> 24) & 0x7F;           // 7 bits below the MSB
     int r = (u >> 16) & 0xFF;             // next 8 bits for interpolation

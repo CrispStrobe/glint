@@ -3,8 +3,10 @@
 
 #include "aac_psy.hpp"
 #include "aac_coder.hpp"
+#include "intmath.hpp"
 #include "aac_tables.hpp"
 #include "aac_coder.hpp"
+#include "intmath.hpp"
 
 #include <cmath>
 
@@ -99,7 +101,7 @@ double aac_compute_masks(const SpecT* spec, int sr_index, int max_sfb,
                 if (a2 == 0) {
                     l = -(24 << 16);
                 } else {
-                    int msb = 31 - __builtin_clz(a2);
+                    int msb = 31 - intmath::clz32(a2);
                     uint32_t u = a2 << (31 - msb);
                     // 2-term linear approx of log2 mantissa: frac ~ (u-2^31)/2^31
                     uint32_t frac = (u >> 15) & 0xFFFF;
