@@ -10,8 +10,10 @@ ISO 11172-3 and ISO 13818-3 standards, plus an AAC-LC encoder (ISO
 referenced (the normative AAC Huffman/scalefactor-band tables are ISO
 spec data, extracted from two independent implementations and
 cross-checked bit-for-bit — see `tools/gen_aac_tables.py`). Designed
-for embedded and real-time use: the MP3 fixed-point path needs only
-~64 KB RAM and no FPU.
+for embedded and real-time use: the MP3 fixed-point build needs ~64 KB
+RAM (Q31 filterbank; the rate loop's scalars run fine via soft-float),
+and the AAC build needs 47.6 KB with a fully integer per-coefficient
+hot path for FPU-less parts (RP2040-class).
 
 ## Features
 
@@ -32,7 +34,8 @@ for embedded and real-time use: the MP3 fixed-point path needs only
   mu-law, WAVE_FORMAT_EXTENSIBLE, raw PCM (`-r`)
 - **Streaming API**: callback-based output for real-time use
 - **Bindings**: Python (ctypes), Rust (FFI + safe), Dart (Flutter FFI)
-- **Embedded**: ~64 KB RAM (fixed-point), fits ESP32/RP2040/STM32F4
+- **Embedded**: MP3 ~64 KB / AAC 47.6 KB RAM (`GLINT_MODE=fixed`),
+  integer AAC hot path for no-FPU parts; fits ESP32/RP2040/STM32F4
 - **AAC-LC encoder**: all four window sequences (short blocks with
   attack-split grouping), per-band M/S stereo, psychoacoustic noise
   shaping (`-q normal/best`), optimal-sectioning Huffman coding
@@ -151,6 +154,14 @@ Apple, FDK, glint and LAME on all clips; glint has the highest SNR of
 any AAC encoder on 4/6 clips (e.g. quartet 50.6 dB and **NMR −15.0,
 1st**; speech 42.2 dB, NMR −16.6 vs Apple −18.1) while vo-aacenc never
 reaches a negative castanets NMR at any rate.
+
+*Post-league improvements* (the table above is the dated 2026-07-06
+snapshot; TNS and tonality-aware masks landed after that run):
+castanets 128k mean NMR is now **−8.4** (integer build −8.6) — ahead
+of Apple's −7.4, closing on FDK's −9.0 — and electronic 128k PEAQ ODG
+improved −0.78 → **−0.49**; speech 64k mono ODG −2.35 → −2.23. All
+other cells hold or improve; re-run
+`python tests/compare_encoders.py --codec aac` for current numbers.
 
 **Speed** (M1, 60 s speech, 44.1 kHz stereo 128k): glint-aac speed
 ~85×, normal ~41×, best ~37× realtime; Apple ~104×, FDK ~90×,
