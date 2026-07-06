@@ -2,6 +2,7 @@
 // MIT License - Clean-room implementation
 
 #include "quantize.hpp"
+#include "intmath.hpp"
 #include "psycho.hpp"
 #include "tables.hpp"
 #include <cstdlib>
@@ -1112,6 +1113,134 @@ static void polish_regions(GranuleInfo& info, int sr_index) {
     int saved = huffman_optimize_regions(info.ix, sr_index, &info.regions);
     info.part2_3_length -= saved;
 }
+
+#ifdef GLINT_MP3_INT
+
+namespace {
+
+// Integer quantize + Huffman count for the -q speed no-FPU path. p34log[i]
+// holds log2(|x|^0.75) in Q16 (INT32_MIN for zero lines); the gain step is
+// exact in Q16: log2(2^((210-g)*3/16)) = 12288*(210-g). Same 0.4054 dead
+// zone and 8191 cap as the double quantizer.
+int quantize_and_count_int(const int32_t* p34log, const int8_t* sign,
+                           int16_t* ix, int global_gain, int sr_index,
+                           HuffRegions* out_regions, int bit_limit) {
+    const int32_t lstep = 12288 * (210 - global_gain);
+    for (int i = 0; i < 576; i++) {
+        int q = 0;
+        if (p34log[i] != INT32_MIN) {
+            q = intmath::exp2_quant(static_cast<int64_t>(p34log[i]) + lstep,
+                                    26573, 8191);  // 0.4054 * 65536
+        }
+        ix[i] = static_cast<int16_t>(sign[i] < 0 ? -q : q);
+    }
+    int rzero = 576;
+    while (rzero > 0 && ix[rzero - 1] == 0) rzero--;
+    int count1_start = find_count1_start(ix, rzero);
+    return huffman_select_and_count(ix, sr_index, rzero, count1_start,
+                                    bit_limit, out_regions);
+}
+
+}  // namespace
+
+GranuleInfo quantize_granule_int_speed(const int32_t* mdct_q24,
+                                       int available_bits, int sr_index,
+                                       int gain_floor) {
+    init_quant_tables();
+    GranuleInfo info{};
+    std::memset(&info, 0, sizeof(info));
+    info.block_type = 0;
+    info.scalefac_compress = 0;
+    info.part2_length = 0;
+
+    int32_t p34log[576];
+    int8_t sign[576];
+    int32_t peaklog = INT32_MIN;
+    for (int i = 0; i < 576; i++) {
+        int32_t v = mdct_q24[i];
+        sign[i] = v < 0 ? -1 : 1;
+        uint32_t a = static_cast<uint32_t>(v < 0 ? -v : v);
+        if (a == 0) {
+            p34log[i] = INT32_MIN;
+        } else {
+            // log2(|x_true|) = log2(a) - 24;  p34log = 0.75 * that (Q16)
+            int64_t l = static_cast<int64_t>(intmath::ilog2_q16(a)) - (24 << 16);
+            int32_t p = static_cast<int32_t>((l * 3) >> 2);
+            p34log[i] = p;
+            if (p > peaklog) peaklog = p;
+        }
+    }
+
+    // Gain bounds, mirroring gain_search_with_scalefacs: min gain keeps the
+    // peak below the 8191 clamp, max gain is where the peak quantizes to ~1.
+    // Integer arithmetic on the Q16 logs; 12288 = the exact Q16 gain step.
+    int min_gain = 0, max_gain = 255;
+    if (peaklog != INT32_MIN) {
+        const int32_t l8190 = intmath::ilog2_q16(8190);
+        // peaklog + 12288*(210-g) < l8190  ->  g > 210 - (l8190-peaklog)/12288
+        int gmin = 210 - static_cast<int>((static_cast<int64_t>(l8190) - peaklog) / 12288);
+        if (gmin > min_gain) min_gain = gmin;
+        if (min_gain < 0) min_gain = 0;
+        if (min_gain > 255) min_gain = 255;
+        // peak ~1:  peaklog + 12288*(210-g) < log2(0.6) (~ -47720 in Q16)
+        int gmax = 210 - static_cast<int>((-47720LL - peaklog) / 12288) + 2;
+        if (gmax < max_gain && gmax > min_gain) max_gain = gmax;
+    }
+    if (gain_floor > min_gain) min_gain = gain_floor;
+    if (max_gain < min_gain) max_gain = min_gain;
+
+    int target_bits = available_bits;
+    if (target_bits < 0) target_bits = 0;
+
+    int lo = min_gain, hi = max_gain, best_gain = max_gain;
+    int best_bits = -1;
+    HuffRegions best_regions{};
+    int16_t best_ix[576];
+    for (int iter = 0; iter < 8 && lo <= hi; iter++) {
+        int gain = (lo + hi) / 2;
+        HuffRegions regs;
+        int bits = quantize_and_count_int(p34log, sign, info.ix, gain,
+                                          sr_index, &regs, target_bits);
+        if (bits <= target_bits) {
+            hi = gain - 1;
+            best_gain = gain;
+            best_bits = bits;
+            best_regions = regs;
+            std::memcpy(best_ix, info.ix, sizeof(best_ix));
+        } else {
+            lo = gain + 1;
+        }
+    }
+    info.global_gain = best_gain;
+
+    int huff_bits;
+    if (best_bits >= 0) {
+        std::memcpy(info.ix, best_ix, sizeof(best_ix));
+        info.regions = best_regions;
+        huff_bits = best_bits;
+    } else {
+        huff_bits = quantize_and_count_int(p34log, sign, info.ix, best_gain,
+                                           sr_index, &info.regions, -1);
+    }
+    info.part2_3_length = info.part2_length + huff_bits;
+
+    // Budget guarantee (12-bit part2_3_length field), same as the double path.
+    {
+        int limit = available_bits;
+        if (limit > 4095) limit = 4095;
+        while (info.part2_3_length > limit && info.global_gain < 255) {
+            info.global_gain++;
+            huff_bits = quantize_and_count_int(p34log, sign, info.ix,
+                                               info.global_gain, sr_index,
+                                               &info.regions, -1);
+            info.part2_3_length = info.part2_length + huff_bits;
+        }
+    }
+    info.rc_gain = info.global_gain;
+    return info;
+}
+
+#endif  // GLINT_MP3_INT
 
 GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
                               int sr_index, int quality_mode, int block_type,

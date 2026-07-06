@@ -632,6 +632,32 @@ sufficient there (it shares the encoder's mask model).
     priorities ran out before them; intensity stereo only matters below
     the rates glint targets, ABR is a rate-control mode without a user).
 
+## 13. MP3 no-FPU integer -q speed path — DONE (2026-07-06), GLINT_MP3_INT
+
+Honest finding that triggered this: the MP3 "fixed" path was Q31 only
+through the SUBBAND analysis — the 36-pt MDCT converts Q24->double and
+the whole rate loop is double, so the old "no FPU" README claim really
+meant "runs via soft-float". GLINT_MODE=fixed now also defines
+GLINT_MP3_INT, making the -q speed CBR chain integer per-coefficient
+end-to-end (subband Q31 -> int freq-inversion -> NEW integer 36-pt MDCT
+(Q31 fused win*cos/288 table, int64 accumulation) -> existing integer
+alias reduction -> int sfb21 lowpass (same adaptive content-keep rule,
+int64 energies) -> log-domain integer quantizer (shared intmath.hpp Q16
+log2/exp2 LUTs; MP3's gain step is exactly 12288 in Q16, the same
+constant as AAC's sf step) -> the already-integer Huffman/bitstream).
+Per-frame scalars (rate control, gain bounds) remain double = fine on
+soft-float. The transient scheduler is quality>=1 only, so no
+per-sample double sneaks in at speed.
+
+Gates: -q speed metrics IDENTICAL to the old fixed build within
+0.01-0.02 dB on every measure (128k/256k MPEG-1 and 64k MPEG-2), 0
+backstep; normal/best/VBR and the double path BYTE-IDENTICAL
+(untouched); all ctest suites green. M1 wall time unchanged (its FPU
+made doubles free — the win is RP2040-class soft-float targets).
+Scope note: -q speed + CBR only; normal/best (psy loops) and VBR keep
+double math by design. intmath.hpp refactor left AAC INT output
+byte-identical.
+
 # AAC-LC track (started 2026-07-06)
 
 One repo, two codecs: the AAC encoder lives in `src/aac_*.{hpp,cpp}` with

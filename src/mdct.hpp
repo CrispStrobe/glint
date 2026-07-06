@@ -48,6 +48,11 @@ public:
     // (ISO). prev_ overlap handled like the long transform.
     void process_short_and_convert(const int32_t subband[32][18],
                                    double mdct_out[32][3][6]);
+#ifdef GLINT_MP3_INT
+    // No-FPU long-block path (block_type 0 only): fused window+cos via a
+    // Q31 wincos table, integer alias reduction, flat Q24 int32 output.
+    void process_int(const int32_t subband[32][18], int32_t mdct_flat[576]);
+#endif
     void reset();
 private:
     int32_t prev_[32][18];

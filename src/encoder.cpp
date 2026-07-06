@@ -184,6 +184,29 @@ static void apply_lowpass(double* mdct_flat, const glint_context* enc,
     for (int i = start; i < 576; i++) mdct_flat[i] = 0.0;
 }
 
+#ifdef GLINT_MP3_INT
+// Integer twin of apply_lowpass (long blocks only — the INT path never
+// carries short/transition granules). Same adaptive content-keep rule,
+// int64 energies.
+static void apply_lowpass_int(int32_t* mdct_flat, const glint_context* enc) {
+    int start = enc->lp_long_start;
+    if (enc->lp_adaptive && enc->rc_frames_since_short >= 26) {
+        int64_t e_hf = 0, e_tot = 0;
+        for (int i = 0; i < start; i++) {
+            int64_t v = mdct_flat[i];
+            e_tot += v * v;
+        }
+        for (int i = start; i < 576; i++) {
+            int64_t v = mdct_flat[i];
+            e_hf += v * v;
+        }
+        e_tot += e_hf;
+        if (e_tot > 0 && e_hf > e_tot / 1000) return;  // real content: keep
+    }
+    for (int i = start; i < 576; i++) mdct_flat[i] = 0;
+}
+#endif
+
 // Cutoff frequency by per-channel bitrate (linear interpolation between
 // anchors; >= 64 kbps/ch keeps the full sfb21-bounded band — a 12-13.5k
 // cut at 64/ch measured mildly better for speech PESQ but mildly WORSE
@@ -1205,6 +1228,22 @@ const uint8_t* glint_encode(glint_t enc, const int16_t** channel_data,
                         sub_gr[sb][ts] = ((sb & 1) && (ts & 1)) ? -v : v;
                     }
 
+#ifdef GLINT_MP3_INT
+                // No-FPU hot path: at -q speed / CBR every granule is a
+                // long block (the short-block scheduler only runs at
+                // normal/best), so the whole per-coefficient chain stays
+                // integer: Q24 MDCT -> int lowpass -> log-domain quantizer.
+                if (enc->quality_mode <= 0 && !enc->vbr_mode && bt == 0) {
+                    int32_t mdct_q24[576];
+                    enc->mdct_fp[ch].process_int(sub_gr, mdct_q24);
+                    apply_lowpass_int(mdct_q24, enc);
+                    granule_info[gr][ch] = quantize_granule_int_speed(
+                        mdct_q24, bits_ch[ch], enc->sr_index, gain_floor);
+                    granule_info[gr][ch].block_type = bt;
+                    total_main_bits += granule_info[gr][ch].part2_3_length;
+                    continue;
+                }
+#endif
                 double mdct_flat[576];
                 if (bt == 2) {
                     double mdct_out_short[32][3][6];

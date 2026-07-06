@@ -10,10 +10,11 @@ ISO 11172-3 and ISO 13818-3 standards, plus an AAC-LC encoder (ISO
 referenced (the normative AAC Huffman/scalefactor-band tables are ISO
 spec data, extracted from two independent implementations and
 cross-checked bit-for-bit — see `tools/gen_aac_tables.py`). Designed
-for embedded and real-time use: the MP3 fixed-point build needs ~64 KB
-RAM (Q31 filterbank; the rate loop's scalars run fine via soft-float),
-and the AAC build needs 47.6 KB with a fully integer per-coefficient
-hot path for FPU-less parts (RP2040-class).
+for embedded and real-time use: the `GLINT_MODE=fixed` build needs
+~64 KB RAM for MP3 and 47.6 KB for AAC, and at `-q speed` BOTH codecs
+encode with fully integer per-coefficient hot paths for FPU-less parts
+(RP2040-class); the higher quality tiers use double math (soft-float
+on such parts).
 
 ## Features
 

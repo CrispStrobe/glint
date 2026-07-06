@@ -56,6 +56,17 @@ void quantize_set_threads(int n);
 // on strongly tonal content at low rates (piano-128 ODG -0.79 -> -0.63,
 // drums-128 -1.31 -> -1.18); costs in-house NMR at 256k where everything
 // is transparent — the encoder enables it at <= 96 kbps/channel only.
+#ifdef GLINT_MP3_INT
+// No-FPU -q speed path: long blocks, CBR, zero scalefactors (the speed
+// tier's energy seed is disabled anyway). Input is the integer MDCT's Q24
+// spectrum; quantization runs in Q16 log domain (see intmath.hpp), Huffman
+// counting/selection is the shared integer machinery. Per-granule scalars
+// (gain bounds) still use a few double ops — per-frame-scale soft-float.
+GranuleInfo quantize_granule_int_speed(const int32_t* mdct_q24,
+                                       int available_bits, int sr_index,
+                                       int gain_floor);
+#endif
+
 GranuleInfo quantize_granule(const double* mdct_in, int available_bits,
                               int sr_index, int quality_mode = 0,
                               int block_type = 0, int gain_floor = 0,
