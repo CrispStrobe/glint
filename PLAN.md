@@ -712,8 +712,19 @@ afconvert are the yardsticks, vo-aacenc is the Shine-role baseline):
      glint −0.58 / ffmpeg-native AAC −0.68 / LAME MP3 −2.65 / **Apple
      AAC −6.52, audible 5%** — the remaining gap to Apple is mostly
      M/S + TNS + short blocks, not loop tuning.
-2. **Per-band M/S** (ms_mask_present=1) — finer than MP3's all-or-nothing
-   joint stereo; mind the MP3 lesson: never shape the side channel.
+2. **Per-band M/S — DONE (2026-07-06).** ms_mask_present per-sfb flags
+   (0/1/2 encoded), decision per band by the mask-relative product rule
+   (t+eM)(t+eS) < (t+eL)(t+eR) with t = min(maskL, maskR); chosen bands
+   transformed in place before fit/shaping, and BOTH M and S shape
+   against t (the AAC form of "never shape the side channel unmasked" —
+   noise in either lands in decoded L and R). Active at all qualities.
+   The single biggest quality step so far — every metric improved on
+   every clip at every rate: speech 128k best NMR −0.58→−3.05 (audible
+   12.4%) with SNR UP 24.2→26.1; speech 256k −11.5→−16.0, SNR
+   35.2→41.9; electronic 128k 1.93→−0.95; quartet 128k −1.31→−5.52,
+   256k −15.0 / 0.0% audible, SNR 50.6. The AAC path now beats glint's
+   MP3 path outright (speech 256k: 41.9/−16.0 vs MP3 joint 38.0/−13.8).
+   Remaining Apple gap at 128k: −3.05 vs −6.52.
 3. **Window switching + short blocks** (8×128 MDCT, start/stop windows,
    scale_factor_grouping) — scheduler + lookahead ports from MP3.
 4. **TNS** — biggest LC feature vo-aacenc barely uses; speech/transients.

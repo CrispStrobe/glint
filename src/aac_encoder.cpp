@@ -61,8 +61,11 @@ struct glint_aac_context {
     int quality;                    // glint_quality
 
     double prev[2][kAacFrameLen];   // MDCT lookback (last input block)
-    double spec[2][kAacFrameLen];
+    double spec[2][kAacFrameLen];   // coded-domain spectra (M/S bands transformed)
     AacChannelPlan plan[2];
+    uint8_t ms_used[kMaxSfb];       // per-sfb M/S flags (stereo)
+    int ms_present;                 // 0 = none, 1 = per-band flags, 2 = all
+    double mask[2][kMaxSfb];        // per-channel shaping masks (coded domain)
 
     double bits_per_frame;
     double target_acc;
@@ -98,6 +101,55 @@ constexpr double kNoiseGuard = 2.5;
 constexpr int kMaxSfOffset = 30;
 
 void shape_channel(glint_aac_context* c, int chn, int budget);
+
+// Per-band M/S decision + in-place transform of c->spec, and the coded-domain
+// shaping masks for both channels. The decision compares mask-relative coding
+// cost: code the band as M/S iff (t+eM)(t+eS) < (t+eL)(t+eR), t = min of the
+// two channels' masks (a perceptual-entropy product rule; energy-only rules
+// misfire on out-of-phase content). In M/S bands BOTH channels shape against
+// t: noise in M or S lands in decoded L and R (l = m+s, r = m-s), so the
+// side channel must never be shaped against a mask the quieter original
+// channel does not have — the AAC form of the MP3 side-channel lesson.
+void decide_ms(glint_aac_context* c) {
+    const uint16_t* swb = kSwbOffsetLong[c->sr_index];
+    const int nb = c->max_sfb;
+
+    double maskL[kMaxSfb], maskR[kMaxSfb];
+    double e0 = aac_compute_masks(c->spec[0], c->sr_index, nb, c->emax_run, maskL);
+    double e1 = aac_compute_masks(c->spec[1], c->sr_index, nb, c->emax_run, maskR);
+    if (e0 > c->emax_run) c->emax_run = e0;
+    if (e1 > c->emax_run) c->emax_run = e1;
+
+    int n_ms = 0;
+    for (int b = 0; b < nb; b++) {
+        double eL = 0, eR = 0, eM = 0, eS = 0;
+        for (int i = swb[b]; i < swb[b + 1]; i++) {
+            double l = c->spec[0][i], r = c->spec[1][i];
+            double m = 0.5 * (l + r), s = 0.5 * (l - r);
+            eL += l * l;
+            eR += r * r;
+            eM += m * m;
+            eS += s * s;
+        }
+        double t = maskL[b] < maskR[b] ? maskL[b] : maskR[b];
+        if ((t + eM) * (t + eS) < (t + eL) * (t + eR)) {
+            c->ms_used[b] = 1;
+            n_ms++;
+            for (int i = swb[b]; i < swb[b + 1]; i++) {
+                double l = c->spec[0][i], r = c->spec[1][i];
+                c->spec[0][i] = 0.5 * (l + r);
+                c->spec[1][i] = 0.5 * (l - r);
+            }
+            c->mask[0][b] = t;
+            c->mask[1][b] = t;
+        } else {
+            c->ms_used[b] = 0;
+            c->mask[0][b] = maskL[b];
+            c->mask[1][b] = maskR[b];
+        }
+    }
+    c->ms_present = (n_ms == 0) ? 0 : (n_ms == nb) ? 2 : 1;
+}
 
 }  // namespace
 
@@ -167,6 +219,11 @@ static const uint8_t* encode_block(glint_aac_context* c, int* out_size) {
 
     const bool shape = c->quality >= GLINT_QUALITY_NORMAL;
     if (ch == 2) {
+        decide_ms(c);
+        if (c->ms_present == 1) fixed_overhead += c->max_sfb;  // ms_used bits
+        spend = static_cast<int>(avail) - fixed_overhead;
+        if (spend < 64) spend = 64;
+
         double e0 = 0, e1 = 0;
         for (int i = 0; i < kAacFrameLen; i++) {
             e0 += c->spec[0][i] * c->spec[0][i];
@@ -182,6 +239,11 @@ static const uint8_t* encode_block(glint_aac_context* c, int* out_size) {
         aac_fit_channel(c->spec[1], c->sr_index, c->max_sfb, budget1, nullptr, -1, &c->plan[1]);
         if (shape) shape_channel(c, 1, budget1);
     } else {
+        if (shape) {
+            double e = aac_compute_masks(c->spec[0], c->sr_index, c->max_sfb,
+                                         c->emax_run, c->mask[0]);
+            if (e > c->emax_run) c->emax_run = e;
+        }
         aac_fit_channel(c->spec[0], c->sr_index, c->max_sfb, spend, nullptr, -1, &c->plan[0]);
         if (shape) shape_channel(c, 0, spend);
     }
@@ -193,7 +255,10 @@ static const uint8_t* encode_block(glint_aac_context* c, int* out_size) {
         bw.put(0, 4);                       // element_instance_tag
         bw.put(1, 1);                       // common_window
         aac_write_ics_info(bw, c->max_sfb);
-        bw.put(0, 2);                       // ms_mask_present = 0
+        bw.put(c->ms_present, 2);           // ms_mask_present
+        if (c->ms_present == 1) {
+            for (int b = 0; b < c->max_sfb; b++) bw.put(c->ms_used[b], 1);
+        }
         aac_write_ics_body(bw, c->plan[0], c->sr_index, false);
         aac_write_ics_body(bw, c->plan[1], c->sr_index, false);
     } else {
@@ -288,9 +353,8 @@ void shape_channel(glint_aac_context* c, int chn, int budget) {
     const double* spec = c->spec[chn];
     const int nb = plan.max_sfb;
 
-    double mask[kMaxSfb], noise[kMaxSfb];
-    double emax = aac_compute_masks(spec, c->sr_index, nb, c->emax_run, mask);
-    if (emax > c->emax_run) c->emax_run = emax;
+    const double* mask = c->mask[chn];  // coded-domain masks from encode_block
+    double noise[kMaxSfb];
     aac_band_noise(plan, spec, c->sr_index, noise);
 
     double r0[kMaxSfb];
