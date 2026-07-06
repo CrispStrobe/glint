@@ -879,6 +879,20 @@ throughout (SpecT/PcmT in aac_coder_types_fwd.hpp):
 - FFT bit-reversal computed inline (no rev table),
 - output buffer 4 KB (two tail frames fit).
 
+## A2c. Embedded validation harness — DONE (2026-07-06)
+
+embedded/: shared FPU-free bench core; QEMU mps2-an385 semihosted run
+(both codecs encode under soft-float Cortex-M3, streams written back to
+the host via semihosting, decode CLEAN in ffmpeg+CoreAudio, MP3 stream
+BIT-EXACT vs a host run — integer determinism across architectures);
+pico-sdk and ESP-IDF benchmark projects for real-silicon throughput.
+tools/check_nofpu.sh = static proof: M0+ disassembly of every
+per-coefficient function contains zero __aeabi_* soft-float calls
+(lazy table builders moved to startup global ctors to make this
+provable; byte-stable). QEMU is NOT cycle-accurate — throughput still
+needs hardware. Toolchain: xPack arm-none-eabi (Homebrew's formula has
+no libc); GLINT_NO_THREADS skips the std::thread pool on bare metal.
+
 ## A3. Perf pass 1 — DONE (2026-07-06): −52..54% encode time, byte-identical
 
 Profile-driven (macOS `sample`, -q best): eval_gain was 66% of runtime
