@@ -161,9 +161,11 @@ machinery applies).
 `GLINT_SMALL_BUFFERS` (the `GLINT_MODE=fixed` build) glint-aac needs
 **47.6 KB** (25.0 KB context + 22.6 KB tables) — under vo-aacenc's
 measured **48.0 KB** (heap via its own allocator hook, zero BSS) —
-with quality metrics identical to the desktop build (float/int16
-storage, double arithmetic; needs an FPU, unlike glint's MP3 Q31
-path). Desktop double ≈ 106 KB.
+and all per-coefficient arithmetic is INTEGER (`GLINT_AAC_INT`:
+int32 MDCT/quantizer/energies — no-FPU parts like RP2040 pay
+soft-float only for per-frame scalars). Quality: mono identical to
+the float builds; stereo pays ~1 dB NMR (the integer M/S half-LSB,
+documented in PLAN.md § A2b). Desktop double ≈ 106 KB.
 
 ## Building
 
