@@ -38,11 +38,12 @@ for embedded and real-time use: the MP3 fixed-point path needs only
   shaping (`-q normal/best`), optimal-sectioning Huffman coding
   (per-band codebook DP), CBR-average rate control, ADTS output, all
   12 standard sample rates (8-96 kHz), mono/stereo. Validated against
-  ffmpeg and CoreAudio decoders. In the 6-clip league it places 3rd
-  behind Apple and Fraunhofer FDK at 128 kbps (1st on two clips) and
-  beats ffmpeg's native AAC, LAME-MP3 and vo-aacenc on every clip at
-  every rate — see the AAC benchmarks below. TNS and a fixed-point
-  path are roadmap (PLAN.md § A1/A2).
+  ffmpeg and CoreAudio decoders. TNS (selective, prediction-gain
+  gated), tonality-aware masks at low rates, and a no-FPU integer
+  hot path (`GLINT_MODE=fixed`) are all live. In the 6-clip league it
+  places 3rd behind Apple and Fraunhofer FDK at 128 kbps (1st on two
+  clips) and beats ffmpeg's native AAC, LAME-MP3 and vo-aacenc on
+  every clip at every rate — see the AAC benchmarks below.
 
 ## Benchmarks
 
