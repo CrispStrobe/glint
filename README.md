@@ -33,12 +33,15 @@ for embedded and real-time use: the MP3 fixed-point path needs only
 - **Streaming API**: callback-based output for real-time use
 - **Bindings**: Python (ctypes), Rust (FFI + safe), Dart (Flutter FFI)
 - **Embedded**: ~64 KB RAM (fixed-point), fits ESP32/RP2040/STM32F4
-- **AAC-LC encoder** (phase 1): long blocks, CBR-average rate control,
-  ADTS output, all 12 standard sample rates (8-96 kHz), mono/stereo.
-  Optimal-sectioning Huffman coding (per-band codebook DP). Validated
-  against ffmpeg and CoreAudio decoders; at 256 kbps stereo it already
-  measures ahead of glint's own MP3 path (37.2 dB SNR speech). Psy
-  model, M/S, short blocks and a fixed-point path are roadmap.
+- **AAC-LC encoder**: long blocks, CBR-average rate control, ADTS
+  output, all 12 standard sample rates (8-96 kHz), mono/stereo.
+  Optimal-sectioning Huffman coding (per-band codebook DP), per-band
+  M/S stereo, psychoacoustic noise shaping (`-q normal/best`: Bark
+  masks + per-band scalefactor outer loop). Validated against ffmpeg
+  and CoreAudio decoders. At 256 kbps stereo it beats glint's own MP3
+  path (speech 41.9 dB SNR / NMR −16.0 vs 38.0 / −13.8 joint); at
+  128 kbps it measures past LAME-MP3 and ffmpeg's native AAC on NMR.
+  TNS, short blocks and a fixed-point path are roadmap (PLAN.md § A1).
 
 ## Benchmarks
 
