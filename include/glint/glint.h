@@ -90,6 +90,31 @@ int            glint_vbr_header(glint_t enc, uint8_t* buf, int buf_capacity);
 
 void           glint_destroy(glint_t enc);
 
+// ---------------------------------------------------------------------------
+// AAC-LC encoder (phase 1: long blocks, CBR-average, ADTS output).
+// Independent of the MP3 encoder above. One encode call consumes exactly
+// glint_aac_samples_per_frame() samples per channel (1024) and returns one
+// ADTS frame. Call glint_aac_flush once at end of stream — the MDCT looks
+// back one block, so the final 1024 samples are emitted by the flush frame.
+// Sample rates: 8000..96000 (the 12 standard AAC rates); 1-2 channels;
+// bitrate in kbps.
+// ---------------------------------------------------------------------------
+
+typedef struct glint_aac_context* glint_aac_t;
+
+struct glint_aac_config {
+    int sample_rate;
+    int num_channels;
+    int bitrate;        // kbps
+};
+
+glint_aac_t    glint_aac_create(const struct glint_aac_config* cfg);
+int            glint_aac_samples_per_frame(glint_aac_t enc);
+const uint8_t* glint_aac_encode(glint_aac_t enc, const int16_t** channel_data, int* out_size);
+const uint8_t* glint_aac_encode_float(glint_aac_t enc, const float** channel_data, int* out_size);
+const uint8_t* glint_aac_flush(glint_aac_t enc, int* out_size);
+void           glint_aac_destroy(glint_aac_t enc);
+
 #ifdef __cplusplus
 }
 #endif

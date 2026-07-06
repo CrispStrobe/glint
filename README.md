@@ -1,13 +1,17 @@
 # glint
 
-A clean-room MP3 encoder in C++17. MIT licensed. The name nods to
-integers (*g-lint*) and the [Shine](https://github.com/toots/shine)
+A clean-room MP3 and AAC-LC encoder in C++17. MIT licensed. The name
+nods to integers (*g-lint*) and the [Shine](https://github.com/toots/shine)
 encoder lineage.
 
 Implements the full MPEG-1/2/2.5 Layer III encoding pipeline from the
-ISO 11172-3 and ISO 13818-3 standards. No third-party encoder code
-referenced. Designed for embedded and real-time use: the fixed-point
-path needs only ~64 KB RAM and no FPU.
+ISO 11172-3 and ISO 13818-3 standards, plus an AAC-LC encoder (ISO
+13818-7 / 14496-3, ADTS output). No third-party encoder code
+referenced (the normative AAC Huffman/scalefactor-band tables are ISO
+spec data, extracted from two independent implementations and
+cross-checked bit-for-bit — see `tools/gen_aac_tables.py`). Designed
+for embedded and real-time use: the MP3 fixed-point path needs only
+~64 KB RAM and no FPU.
 
 ## Features
 
@@ -29,6 +33,12 @@ path needs only ~64 KB RAM and no FPU.
 - **Streaming API**: callback-based output for real-time use
 - **Bindings**: Python (ctypes), Rust (FFI + safe), Dart (Flutter FFI)
 - **Embedded**: ~64 KB RAM (fixed-point), fits ESP32/RP2040/STM32F4
+- **AAC-LC encoder** (phase 1): long blocks, CBR-average rate control,
+  ADTS output, all 12 standard sample rates (8-96 kHz), mono/stereo.
+  Optimal-sectioning Huffman coding (per-band codebook DP). Validated
+  against ffmpeg and CoreAudio decoders; at 256 kbps stereo it already
+  measures ahead of glint's own MP3 path (37.2 dB SNR speech). Psy
+  model, M/S, short blocks and a fixed-point path are roadmap.
 
 ## Benchmarks
 
@@ -142,7 +152,8 @@ cmake -B build -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
 ### CLI
 
 ```
-glint_cli [options] input output.mp3
+glint_cli [options] input output.{mp3,aac}
+  -F FORMAT         mp3|aac (default: by output extension)
   -b BITRATE        CBR bitrate in kbps (default: 128)
   -V QUALITY        VBR quality 0-9 (0=best, 9=smallest)
   -m MODE           mono|stereo|joint (default: auto)
@@ -237,9 +248,11 @@ PCM input → Subband Analysis → MDCT → Alias Reduction → Quantization
 
 ```
 glint/
-├── include/glint/glint.h      C API
-├── src/                       Encoder core (7 modules + tables)
-├── cli/main.cpp               WAV-to-MP3 CLI
+├── include/glint/glint.h      C API (MP3 + AAC)
+├── src/                       MP3 encoder core (7 modules + tables)
+│   └── aac_*.{hpp,cpp}        AAC-LC encoder (MDCT, coder, framing, tables)
+├── tools/gen_aac_tables.py    ISO AAC table extractor/cross-checker
+├── cli/main.cpp               WAV-to-MP3/AAC CLI
 ├── tests/                     Unit tests + quality tests + ASR
 ├── bindings/
 │   ├── python/                ctypes wrapper + pip packaging

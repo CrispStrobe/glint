@@ -375,6 +375,136 @@ static void test_float_vs_int16_encode() {
 }
 #endif // double-precision path
 
+// ---------------------------------------------------------------------------
+// AAC
+// ---------------------------------------------------------------------------
+#include "aac_mdct.hpp"
+#include "aac_coder.hpp"
+#include "aac_tables.hpp"
+
+// Fast MDCT must match the direct ISO 13818-7 formula:
+// X[k] = 2 * sum z[n] cos(2pi/N (n+n0)(k+1/2)), n0 = (N/2+1)/2, sine-windowed.
+static void test_aac_mdct_vs_direct() {
+    std::printf("AAC MDCT (fast vs direct ISO formula)...\n");
+    const int N = 2048, M = 1024;
+    static double prev[M], cur[M], spec[M], ref[M], z[N];
+    unsigned s = 12345;
+    for (int i = 0; i < M; i++) {
+        s = s * 1103515245u + 12345u;
+        prev[i] = static_cast<int>(s >> 16) % 65536 - 32768;
+        s = s * 1103515245u + 12345u;
+        cur[i] = static_cast<int>(s >> 16) % 65536 - 32768;
+    }
+    glint::aac::aac_mdct_long(prev, cur, spec);
+
+    const double pi = 3.14159265358979323846;
+    for (int n = 0; n < M; n++) {
+        double w0 = std::sin(pi / N * (n + 0.5));
+        double w1 = std::sin(pi / N * (M + n + 0.5));
+        z[n] = w0 * prev[n];
+        z[M + n] = w1 * cur[n];
+    }
+    double n0 = (N / 2 + 1) / 2.0;
+    double max_err = 0, max_ref = 0;
+    for (int k = 0; k < M; k++) {
+        double acc = 0;
+        for (int n = 0; n < N; n++) {
+            acc += z[n] * std::cos(2.0 * pi / N * (n + n0) * (k + 0.5));
+        }
+        ref[k] = 2.0 * acc;
+        double e = std::fabs(ref[k] - spec[k]);
+        if (e > max_err) max_err = e;
+        if (std::fabs(ref[k]) > max_ref) max_ref = std::fabs(ref[k]);
+    }
+    CHECK(max_err / max_ref < 1e-10, "fast MDCT matches direct ISO formula");
+}
+
+static void test_aac_tables_sanity() {
+    std::printf("AAC tables sanity...\n");
+    using namespace glint::aac_tables;
+    CHECK(kScfBits[60] == 1, "scalefactor dpcm=0 codeword is 1 bit");
+    // all long-window sfb widths are multiples of the largest book dimension
+    for (int r = 0; r < kNumSampleRates; r++) {
+        bool ok = true;
+        for (int b = 0; b < kNumSwbLong[r]; b++) {
+            int w = kSwbOffsetLong[r][b + 1] - kSwbOffsetLong[r][b];
+            if (w <= 0 || w % 4 != 0) ok = false;
+        }
+        CHECK(ok, "long sfb widths positive and 4-aligned");
+        CHECK(kSwbOffsetLong[r][kNumSwbLong[r]] == 1024, "long sfb table terminates at 1024");
+    }
+}
+
+// Quantize a synthetic spectrum, section it, emit the ICS, and verify the
+// emitted size matches the exact bit count used by the rate loop.
+static void test_aac_coder_count_matches_emission() {
+    std::printf("AAC coder (count == emission)...\n");
+    const int sri = 4;  // 44.1 kHz
+    static double spec[1024];
+    unsigned s = 777;
+    for (int i = 0; i < 1024; i++) {
+        s = s * 1103515245u + 12345u;
+        double amp = (i < 600) ? 20000.0 / (1 + i) : 0.0;
+        spec[i] = amp * ((static_cast<int>(s >> 16) % 2001) - 1000) / 1000.0;
+    }
+    glint::aac::AacChannelPlan plan;
+    glint::aac::aac_fit_channel(spec, sri, 40, 3000, &plan);
+    CHECK(plan.ics_bits <= 3000, "fitted plan respects the bit budget");
+    CHECK(plan.global_gain >= 0 && plan.global_gain <= 255, "global_gain in range");
+
+    glint::aac::AacBitWriter counter(0);
+    glint::aac::aac_write_ics_body(counter, plan, sri, false);
+    CHECK(counter.bits() == plan.ics_bits, "count-only pass matches plan bits");
+
+    uint8_t buf[4096];
+    glint::aac::AacBitWriter writer(buf, sizeof(buf));
+    glint::aac::aac_write_ics_body(writer, plan, sri, false);
+    CHECK(writer.bits() == plan.ics_bits, "emission bit count matches plan bits");
+    CHECK(!writer.overflowed(), "no writer overflow");
+}
+
+static void test_aac_api_smoke() {
+    std::printf("AAC API smoke (ADTS framing)...\n");
+    glint_aac_config cfg;
+    cfg.sample_rate = 44100;
+    cfg.num_channels = 2;
+    cfg.bitrate = 128;
+    glint_aac_t enc = glint_aac_create(&cfg);
+    CHECK(enc != nullptr, "encoder created");
+    CHECK(glint_aac_samples_per_frame(enc) == 1024, "1024 samples per frame");
+
+    static int16_t pcm[2][1024];
+    for (int i = 0; i < 1024; i++) {
+        pcm[0][i] = static_cast<int16_t>(12000 * std::sin(2 * 3.14159265 * 440.0 * i / 44100.0));
+        pcm[1][i] = static_cast<int16_t>(12000 * std::sin(2 * 3.14159265 * 554.0 * i / 44100.0));
+    }
+    const int16_t* ch[2] = { pcm[0], pcm[1] };
+    long total = 0;
+    int nframes = 0;
+    for (int f = 0; f < 50; f++) {
+        int sz = 0;
+        const uint8_t* d = glint_aac_encode(enc, ch, &sz);
+        CHECK(d != nullptr && sz > 7, "frame emitted");
+        if (d && sz > 7) {
+            CHECK(d[0] == 0xFF && (d[1] & 0xF6) == 0xF0, "ADTS syncword");
+            int flen = ((d[3] & 3) << 11) | (d[4] << 3) | (d[5] >> 5);
+            CHECK(flen == sz, "ADTS frame_length matches emitted size");
+            total += sz;
+            nframes++;
+        }
+    }
+    int sz = 0;
+    const uint8_t* d = glint_aac_flush(enc, &sz);
+    CHECK(d != nullptr && sz > 7, "flush frame emitted");
+    total += sz;
+
+    // 50 frames at 128 kbps / 44.1 kHz: nominal ~2972 bytes/10 frames;
+    // allow generous slack, but the debt controller must keep the average near target.
+    double nominal = 128000.0 * 1024 / 44100 / 8 * (nframes + 1);
+    CHECK(total > 0.8 * nominal && total < 1.25 * nominal, "CBR average near target");
+    glint_aac_destroy(enc);
+}
+
 int main() {
     std::printf("=== glint unit tests ===\n\n");
 
@@ -395,6 +525,11 @@ int main() {
 #if defined(GLINT_FIXED_POINT) && defined(GLINT_BOTH_PATHS)
     test_fixed_vs_double();
 #endif
+
+    test_aac_mdct_vs_direct();
+    test_aac_tables_sanity();
+    test_aac_coder_count_matches_emission();
+    test_aac_api_smoke();
 
     std::printf("\n%d/%d tests passed\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

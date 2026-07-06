@@ -34,6 +34,9 @@ set(GLINT_SOURCES
     src/bitstream.cpp
     src/psycho.cpp
     src/encoder.cpp
+    src/aac_mdct.cpp
+    src/aac_coder.cpp
+    src/aac_encoder.cpp
 )
 
 # Static library
@@ -83,6 +86,12 @@ if(Python3_FOUND)
                  COMMAND ${Python3_EXECUTABLE}
                          ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_quality.py
                          $<TARGET_FILE:glint_cli> --m2-only)
+        # AAC wire-correctness gate: encode synthetic signal, decode with
+        # ffmpeg, assert zero decoder errors + SNR floors.
+        add_test(NAME aac_decode_quality
+                 COMMAND ${Python3_EXECUTABLE}
+                         ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_aac.py
+                         $<TARGET_FILE:glint_cli>)
     else()
         message(STATUS "m2_decode_quality test skipped (needs python3+numpy and ffmpeg)")
     endif()

@@ -322,8 +322,9 @@ static const char* format_name(uint16_t fmt, int bps) {
 }
 
 static void print_usage(const char* prog) {
-    fprintf(stderr, "Usage: %s [options] input.wav output.mp3\n", prog);
+    fprintf(stderr, "Usage: %s [options] input.wav output.{mp3,aac}\n", prog);
     fprintf(stderr, "Options:\n");
+    fprintf(stderr, "  -F FORMAT        mp3|aac (default: by output extension, mp3 if unclear)\n");
     fprintf(stderr, "  -b BITRATE       Bitrate in kbps (default: 128)\n");
     fprintf(stderr, "  -V QUALITY       VBR quality 0-9 (0=best/largest, 9=worst/smallest)\n");
     fprintf(stderr, "  -m MODE          mono|stereo|joint (default: auto)\n");
@@ -358,9 +359,111 @@ static bool parse_raw_spec(const char* spec, int* rate, int* channels, int* bits
     return true;
 }
 
+// Encode the (already header-parsed) WAV stream to ADTS AAC-LC.
+static int encode_aac(FILE* wav_file, const char* output_path, const WavInfo& wav,
+                      int enc_channels, int bitrate) {
+    glint_aac_config cfg;
+    cfg.sample_rate = wav.sample_rate;
+    cfg.num_channels = enc_channels;
+    cfg.bitrate = bitrate;
+    glint_aac_t enc = glint_aac_create(&cfg);
+    if (!enc) {
+        fprintf(stderr, "Error: unsupported AAC config (%d Hz, %d ch, %d kbps)\n",
+                wav.sample_rate, enc_channels, bitrate);
+        return 1;
+    }
+
+    FILE* out = fopen(output_path, "wb");
+    if (!out) {
+        fprintf(stderr, "Error: cannot open output file '%s'\n", output_path);
+        glint_aac_destroy(enc);
+        return 1;
+    }
+    fprintf(stderr, "Encoding: AAC-LC %d kbps, %s\n", bitrate,
+            enc_channels == 1 ? "mono" : "stereo");
+
+    int samples_per_frame = glint_aac_samples_per_frame(enc);
+    int nch = wav.num_channels;
+    int bytes_per_sample = wav.bits_per_sample / 8;
+    int sample_stride = bytes_per_sample * nch;
+
+    uint8_t* raw_buf = new uint8_t[samples_per_frame * sample_stride];
+    int16_t* channel_buf[2];
+    channel_buf[0] = new int16_t[samples_per_frame];
+    channel_buf[1] = new int16_t[samples_per_frame];
+
+    uint32_t total_samples = wav.data_size / sample_stride;
+    uint32_t samples_encoded = 0;
+    uint64_t bytes_written = 0;
+
+    fseek(wav_file, wav.data_offset, SEEK_SET);
+    auto start_time = std::chrono::steady_clock::now();
+
+    while (samples_encoded < total_samples) {
+        int samples_to_read = samples_per_frame;
+        if (samples_encoded + static_cast<uint32_t>(samples_to_read) > total_samples) {
+            samples_to_read = static_cast<int>(total_samples - samples_encoded);
+        }
+        size_t read_count = fread(raw_buf, sample_stride, samples_to_read, wav_file);
+        if (read_count == 0) break;
+        int got = static_cast<int>(read_count);
+
+        bool downmix = (enc_channels == 1 && nch == 2);
+        for (int i = 0; i < got; i++) {
+            if (downmix) {
+                int16_t l = convert_sample(raw_buf + i * sample_stride, wav.audio_format, wav.bits_per_sample);
+                int16_t r = convert_sample(raw_buf + i * sample_stride + bytes_per_sample, wav.audio_format, wav.bits_per_sample);
+                channel_buf[0][i] = static_cast<int16_t>((l + r) / 2);
+            } else {
+                channel_buf[0][i] = convert_sample(raw_buf + i * sample_stride, wav.audio_format, wav.bits_per_sample);
+                if (nch > 1) {
+                    channel_buf[1][i] = convert_sample(raw_buf + i * sample_stride + bytes_per_sample, wav.audio_format, wav.bits_per_sample);
+                }
+            }
+        }
+        for (int i = got; i < samples_per_frame; i++) {
+            channel_buf[0][i] = 0;
+            if (enc_channels > 1) channel_buf[1][i] = 0;
+        }
+
+        int out_size = 0;
+        const int16_t* ch_ptrs[2] = { channel_buf[0], channel_buf[1] };
+        const uint8_t* frame_data = glint_aac_encode(enc, ch_ptrs, &out_size);
+        if (frame_data && out_size > 0) {
+            fwrite(frame_data, 1, out_size, out);
+            bytes_written += out_size;
+        }
+        samples_encoded += got;
+    }
+
+    int flush_size = 0;
+    const uint8_t* flush_data = glint_aac_flush(enc, &flush_size);
+    if (flush_data && flush_size > 0) {
+        fwrite(flush_data, 1, flush_size, out);
+        bytes_written += flush_size;
+    }
+
+    auto end_time = std::chrono::steady_clock::now();
+    double elapsed = std::chrono::duration<double>(end_time - start_time).count();
+    double audio_duration = static_cast<double>(samples_encoded) / wav.sample_rate;
+    double speed = (elapsed > 0) ? audio_duration / elapsed : 0;
+    fprintf(stderr, "Done: %u samples, %lu bytes written\n",
+            samples_encoded, static_cast<unsigned long>(bytes_written));
+    fprintf(stderr, "Speed: %.1fx realtime (%.2f sec audio in %.2f sec)\n",
+            speed, audio_duration, elapsed);
+
+    delete[] raw_buf;
+    delete[] channel_buf[0];
+    delete[] channel_buf[1];
+    glint_aac_destroy(enc);
+    fclose(out);
+    return 0;
+}
+
 int main(int argc, char** argv) {
     int bitrate = 128;
     int vbr_quality = -1;  // -1 = not set (CBR mode)
+    const char* format_str = nullptr;
     const char* mode_str = nullptr;
     const char* path_str = nullptr;
     const char* simd_str = nullptr;
@@ -374,6 +477,8 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-b") == 0 && i + 1 < argc) {
             bitrate = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "-F") == 0 && i + 1 < argc) {
+            format_str = argv[++i];
         } else if (strcmp(argv[i], "-V") == 0 && i + 1 < argc) {
             vbr_quality = atoi(argv[++i]);
             if (vbr_quality < 0 || vbr_quality > 9) {
@@ -470,6 +575,36 @@ int main(int argc, char** argv) {
         }
     } else {
         mode = (wav.num_channels == 1) ? GLINT_MONO : GLINT_JOINT;
+    }
+
+    // Output format: explicit -F wins, else sniff the output extension.
+    bool use_aac = false;
+    if (format_str) {
+        if (strcmp(format_str, "aac") == 0) {
+            use_aac = true;
+        } else if (strcmp(format_str, "mp3") != 0) {
+            fprintf(stderr, "Error: invalid format '%s' (use mp3 or aac)\n", format_str);
+            fclose(wav_file);
+            return 1;
+        }
+    } else {
+        size_t olen = strlen(output_path);
+        if (olen > 4 && strcmp(output_path + olen - 4, ".aac") == 0) {
+            use_aac = true;
+        }
+    }
+
+    if (use_aac) {
+        if (vbr_quality >= 0) {
+            fprintf(stderr, "Error: VBR is not supported for AAC yet\n");
+            fclose(wav_file);
+            return 1;
+        }
+        int aac_channels = wav.num_channels;
+        if (mode == GLINT_MONO && wav.num_channels == 2) aac_channels = 1;
+        int rc = encode_aac(wav_file, output_path, wav, aac_channels, bitrate);
+        fclose(wav_file);
+        return rc;
     }
 
     // Validate config (VBR uses the version's max bitrate internally:
