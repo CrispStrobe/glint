@@ -82,6 +82,8 @@ def have(binary):
 
 
 def contenders(args):
+    if args.codec == "aac":
+        return aac_contenders(args)
     out = []
     g = args.glint
     ch = args.mode  # "joint" or "mono"
@@ -101,6 +103,44 @@ def contenders(args):
     if have(sh):
         sm = ["-m"] if ch == "mono" else []
         out.append(("shine", lambda i, o, k: [sh, "-b", str(k)] + sm + [i, o]))
+    return out
+
+
+def aac_contenders(args):
+    """AAC league (all ADTS output): glint-aac tiers, Apple (afconvert,
+    CBR strategy), fdkaac (libfdk CBR), ffmpeg's native aac encoder, and
+    vo-aacenc (the fixed-point Shine-role floor). lame-q2 rides along as a
+    cross-format MP3 anchor."""
+    out = []
+    g = args.glint
+    mono = args.mode == "mono"
+    gm = ["-m", "mono"] if mono else []
+    if have(g):
+        for mode in ("speed", "normal", "best"):
+            out.append((f"glint-{mode}",
+                        lambda i, o, k, m=mode: [g, "-F", "aac", "-b", str(k),
+                                                 "-q", m] + gm + [i, o]))
+    afc = shutil.which("afconvert")
+    if afc:
+        out.append(("apple", lambda i, o, k: [afc, "-f", "adts", "-d", "aac",
+                                              "-b", str(k * 1000), "-s", "0", i, o]))
+    fdk = shutil.which("fdkaac")
+    if fdk:
+        out.append(("fdk", lambda i, o, k: [fdk, "-b", str(k * 1000), "-f", "2",
+                                            "-o", o, i]))
+    ff = shutil.which("ffmpeg")
+    if ff:
+        fm = ["-ac", "1"] if mono else []
+        out.append(("ffmpeg-aac", lambda i, o, k: [ff, "-y", "-v", "error", "-i", i]
+                    + fm + ["-c:a", "aac", "-b:a", f"{k}k", "-f", "adts", o]))
+    vo = os.path.expanduser("~/code/glint-tools/vo-aacenc/aac-enc")
+    if have(vo):
+        out.append(("vo-aacenc", lambda i, o, k: [vo, "-r", str(k * 1000), i, o]))
+    lame = shutil.which("lame")
+    if lame:
+        lm = ["-m", "m"] if mono else []
+        out.append(("lame-q2*mp3", lambda i, o, k: [lame, "--quiet", "-b", str(k),
+                                                    "-q", "2"] + lm + [i, o]))
     return out
 
 
@@ -248,6 +288,8 @@ def main():
     ap.add_argument("--shine",
                     default=os.path.expanduser("~/code/glint-tools/shine/shineenc"))
     ap.add_argument("--bitrates", type=int, nargs="+", default=[128, 256])
+    ap.add_argument("--codec", choices=["mp3", "aac"], default="mp3",
+                    help="aac: glint-aac vs apple/fdk/ffmpeg/vo-aacenc (ADTS)")
     ap.add_argument("--mode", choices=["joint", "mono"], default="joint")
     ap.add_argument("--clips", nargs="*", default=None,
                     help="name=path[:speech] entries; default = canonical set")
@@ -304,8 +346,9 @@ def main():
         dur = wav_duration(cpath)
         for kbps in args.bitrates:
             rows = []
+            ext = ".aac" if args.codec == "aac" else ".mp3"
             for ename, argv_fn in encs:
-                mp3 = os.path.join(tmpdir, f"{cname}_{kbps}_{ename}.mp3")
+                mp3 = os.path.join(tmpdir, f"{cname}_{kbps}_{ename}{ext}")
                 t0 = time.time()
                 r = subprocess.run(argv_fn(cpath, mp3, kbps),
                                    capture_output=True, timeout=600)

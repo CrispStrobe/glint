@@ -1,0 +1,135 @@
+contenders: glint-speed, glint-normal, glint-best, apple, fdk, ffmpeg-aac, vo-aacenc, lame-q2*mp3
+channel mode: joint
+(visqol not found — MOS column skipped)
+
+=== speech @ 128 kbps CBR ===
+encoder           SNR  segSNR     NMR    p95  aud%   enc x    ODG   PESQ   STOI
+apple           25.96   28.73   -6.94  -0.63   3.9    104x  -0.30   4.60  0.999
+fdk             28.11   29.54   -5.40   0.81   7.1     90x  -0.57   4.60  0.998
+glint-normal    26.49   28.77   -3.56   2.43  12.3     39x  -0.87   4.51  0.998
+glint-best      26.49   28.77   -3.56   2.43  12.3     39x  -0.87   4.51  0.998
+glint-speed     28.35   30.60   -2.47   3.94  17.6     79x  -1.06   4.50  0.998
+lame-q2*mp3     19.69   21.19   -2.17   4.27  19.5     29x  -1.29   4.57  0.997
+ffmpeg-aac      24.36   25.77   -0.68   5.03  27.5     34x  -1.32   4.49  0.995
+vo-aacenc       24.86   26.69    1.41   8.98  26.3    104x  -3.71   4.26  0.995
+
+=== speech @ 256 kbps CBR ===
+encoder           SNR  segSNR     NMR    p95  aud%   enc x    ODG   PESQ   STOI
+apple           37.43   40.06  -18.05 -11.61   0.0     91x   0.12   4.64  1.000
+fdk             37.06   36.62  -16.86 -11.89   0.0     74x   0.13   4.63  1.000
+glint-normal    42.21   43.18  -16.57 -10.29   0.1     67x   0.07   4.64  1.000
+glint-best      42.21   43.18  -16.57 -10.29   0.1     68x   0.07   4.64  1.000
+glint-speed     42.54   43.24  -16.01 -10.00   0.1     74x   0.07   4.63  1.000
+lame-q2*mp3     35.88   39.65  -15.51  -8.81   0.0     29x   0.06   4.63  1.000
+ffmpeg-aac      34.25   37.02   -8.55  -1.97   2.5     23x  -0.20   4.57  0.999
+vo-aacenc       29.39   31.59   -0.04   8.59  15.0     71x  -3.66   4.27  0.996
+
+=== electronic @ 128 kbps CBR ===
+encoder           SNR  segSNR     NMR    p95  aud%   enc x    ODG
+fdk             36.37   34.92  -11.44  -6.07   0.1    109x  -0.09
+apple           33.35   31.80   -9.87  -4.12   0.4    113x   0.07
+glint-normal    33.89   35.01   -3.64   2.26   9.2     55x  -0.78
+glint-best      33.89   35.01   -3.64   2.26   9.2     55x  -0.78
+lame-q2*mp3     24.51   23.79   -3.05   3.19  16.0     24x  -0.22
+glint-speed     34.84   36.14   -3.00   3.02  10.4     82x  -0.92
+ffmpeg-aac      31.45   32.79   -1.93   3.86  16.3     28x  -0.37
+vo-aacenc       30.91   31.31    2.26  10.16  28.3    116x  -3.49
+
+=== electronic @ 256 kbps CBR ===
+encoder           SNR  segSNR     NMR    p95  aud%   enc x    ODG
+apple           47.94   45.79  -21.58 -15.67   0.0     62x   0.11
+fdk             42.56   40.27  -19.94 -15.45   0.0     54x   0.13
+lame-q2*mp3     43.12   43.55  -16.11  -9.38   0.0     20x   0.01
+glint-normal    46.11   44.98  -14.61  -8.67   0.2     72x  -0.26
+glint-best      46.11   44.98  -14.61  -8.67   0.2     72x  -0.26
+glint-speed     46.12   44.99  -14.56  -8.57   0.2     74x  -0.28
+ffmpeg-aac      39.61   44.71  -12.62  -6.25   1.0      9x  -0.10
+vo-aacenc       36.61   35.61    0.44  10.00  14.5    118x  -3.33
+
+=== quartet @ 128 kbps CBR ===
+encoder           SNR  segSNR     NMR    p95  aud%   enc x    ODG
+glint-normal    36.85   33.84   -5.51   1.25   8.5     30x  -0.35
+glint-best      36.85   33.84   -5.51   1.25   8.5     17x  -0.35
+glint-speed     39.52   36.35   -3.87   3.65  13.3     86x  -0.42
+apple           30.58   28.88   -2.87   4.29  17.2    101x  -0.39
+fdk             33.54   30.88   -2.63   4.70  17.5     78x  -0.70
+lame-q2*mp3     23.88   23.45   -2.04   5.06  17.6     28x  -0.88
+ffmpeg-aac      28.24   26.24    0.15   6.40  26.9     56x  -1.02
+vo-aacenc       32.28   32.02    1.24   9.38  24.5    113x  -2.82
+
+=== quartet @ 256 kbps CBR ===
+encoder           SNR  segSNR     NMR    p95  aud%   enc x    ODG
+glint-normal    50.57   46.29  -14.97  -7.35   0.0     42x   0.02
+glint-best      50.57   46.29  -14.97  -7.35   0.0     42x   0.02
+glint-speed     50.71   46.35  -14.71  -7.20   0.1     75x   0.02
+fdk             38.12   36.30  -13.28  -6.50   0.0     77x   0.04
+lame-q2*mp3     42.06   39.15  -11.24  -3.68   0.2     29x  -0.06
+apple           38.32   36.89  -10.64  -3.42   0.0    104x  -0.02
+ffmpeg-aac      44.53   41.27   -8.59  -0.71   3.5     51x  -0.18
+vo-aacenc       37.18   35.29    0.07   9.35  14.3    114x  -2.43
+
+=== industrial @ 128 kbps CBR ===
+encoder           SNR  segSNR     NMR    p95  aud%   enc x    ODG
+glint-normal    20.41   21.32   -1.58   5.09  17.2     31x  -0.97
+glint-best      20.41   21.32   -1.58   5.09  17.2     31x  -0.97
+glint-speed     21.60   22.74   -1.11   6.20  18.0     86x  -0.94
+apple           18.64   19.19   -1.11   4.64  27.5    110x  -0.40
+fdk             20.04   21.26   -0.83   6.22  22.6     53x  -0.77
+lame-q2*mp3     17.54   17.90   -0.01   6.14  30.9     34x  -1.00
+vo-aacenc       18.29   19.34    1.27   8.17  29.5     94x  -1.06
+ffmpeg-aac      15.32   16.17    1.57   6.48  44.3     53x  -0.91
+
+=== industrial @ 256 kbps CBR ===
+encoder           SNR  segSNR     NMR    p95  aud%   enc x    ODG
+fdk             26.92   27.89  -11.62  -5.28   0.0     82x   0.01
+glint-normal    30.08   31.91  -10.39  -4.22   1.1     42x  -0.07
+glint-best      30.08   31.91  -10.39  -4.22   1.1     42x  -0.07
+glint-speed     31.21   32.66   -9.29  -2.96   2.3     75x  -0.06
+lame-q2*mp3     26.06   27.32   -9.18  -2.90   0.8     29x  -0.03
+apple           26.39   26.88   -8.49  -2.73   0.3    100x   0.04
+ffmpeg-aac      22.47   24.40   -4.96   1.12   8.6     41x  -0.19
+vo-aacenc       25.50   26.27   -4.77   2.45  10.7     85x  -0.46
+
+=== piano @ 128 kbps CBR ===
+encoder           SNR  segSNR     NMR    p95  aud%   enc x    ODG
+apple           30.58   30.69   -9.43  -3.84   0.4    111x  -0.31
+glint-normal    39.46   42.85   -8.67  -1.57   3.2     37x  -0.74
+glint-best      39.46   42.85   -8.67  -1.57   3.2     37x  -0.74
+fdk             35.56   35.71   -8.46  -1.03   3.5     73x  -0.68
+lame-q2*mp3     24.73   24.55   -7.48  -1.83   1.4     35x  -0.70
+glint-speed     42.02   44.96   -6.97   0.86   6.2     86x  -1.02
+ffmpeg-aac      29.98   30.43   -4.07   2.90  11.0     36x  -1.25
+vo-aacenc       37.41   37.10   -1.80   6.37  15.5    125x  -2.03
+
+=== piano @ 256 kbps CBR ===
+encoder           SNR  segSNR     NMR    p95  aud%   enc x    ODG
+apple           43.56   44.90  -22.34 -15.92   0.0     93x   0.09
+fdk             39.63   39.55  -19.92 -14.48   0.0     64x   0.07
+lame-q2*mp3     51.56   49.51  -18.32 -10.77   0.0     28x   0.02
+glint-normal    53.88   49.45  -17.34  -9.58   0.1     58x  -0.03
+glint-best      53.88   49.45  -17.34  -9.58   0.1     60x  -0.03
+glint-speed     55.97   49.72  -15.94  -9.23   0.3     63x  -0.09
+ffmpeg-aac      48.85   47.72  -12.64  -4.83   0.4     49x  -0.46
+vo-aacenc       37.39   37.08   -1.80   6.37  15.4     77x  -2.02
+
+=== castanets @ 128 kbps CBR ===
+encoder           SNR  segSNR     NMR    p95  aud%   enc x    ODG
+fdk              6.96   44.59   -9.02  -2.84   0.7     92x  -0.08
+apple            8.57   44.38   -7.41  -2.28   1.3     72x  -0.08
+glint-speed      7.78   44.79   -5.10  -1.16   3.0    105x   0.01
+glint-normal     7.77   44.67   -3.46  -1.56   3.1     80x  -0.04
+glint-best       7.77   44.67   -3.46  -1.56   3.1     39x  -0.04
+lame-q2*mp3      7.20   23.72    2.56   2.96   6.2     23x  -0.29
+ffmpeg-aac       5.99   38.23    7.14   9.99   8.3      6x  -1.01
+vo-aacenc       11.55   41.80   18.64   8.23  12.6    141x  -0.56
+
+=== castanets @ 256 kbps CBR ===
+encoder           SNR  segSNR     NMR    p95  aud%   enc x    ODG
+apple           33.99   48.31  -13.64  -7.50   0.1     47x   0.12
+glint-normal    45.64   49.26   -9.77  -3.27   0.3     70x   0.10
+glint-best      45.64   49.26   -9.77  -3.27   0.3     70x   0.10
+fdk              8.06   44.76   -9.08  -2.80   0.7    109x   0.05
+glint-speed     45.64   49.26   -8.66  -1.85   0.9     39x   0.09
+lame-q2*mp3     10.61   45.22   -8.61  -2.29   1.0     58x   0.02
+ffmpeg-aac      15.96   46.03    0.21   2.36   8.6     17x  -1.10
+vo-aacenc       11.66   42.25   12.67   5.18  10.3    168x  -0.61

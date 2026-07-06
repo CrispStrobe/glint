@@ -33,15 +33,16 @@ for embedded and real-time use: the MP3 fixed-point path needs only
 - **Streaming API**: callback-based output for real-time use
 - **Bindings**: Python (ctypes), Rust (FFI + safe), Dart (Flutter FFI)
 - **Embedded**: ~64 KB RAM (fixed-point), fits ESP32/RP2040/STM32F4
-- **AAC-LC encoder**: long blocks, CBR-average rate control, ADTS
-  output, all 12 standard sample rates (8-96 kHz), mono/stereo.
-  Optimal-sectioning Huffman coding (per-band codebook DP), per-band
-  M/S stereo, psychoacoustic noise shaping (`-q normal/best`: Bark
-  masks + per-band scalefactor outer loop). Validated against ffmpeg
-  and CoreAudio decoders. At 256 kbps stereo it beats glint's own MP3
-  path (speech 41.9 dB SNR / NMR −16.0 vs 38.0 / −13.8 joint); at
-  128 kbps it measures past LAME-MP3 and ffmpeg's native AAC on NMR.
-  TNS, short blocks and a fixed-point path are roadmap (PLAN.md § A1).
+- **AAC-LC encoder**: all four window sequences (short blocks with
+  attack-split grouping), per-band M/S stereo, psychoacoustic noise
+  shaping (`-q normal/best`), optimal-sectioning Huffman coding
+  (per-band codebook DP), CBR-average rate control, ADTS output, all
+  12 standard sample rates (8-96 kHz), mono/stereo. Validated against
+  ffmpeg and CoreAudio decoders. In the 6-clip league it places 3rd
+  behind Apple and Fraunhofer FDK at 128 kbps (1st on two clips) and
+  beats ffmpeg's native AAC, LAME-MP3 and vo-aacenc on every clip at
+  every rate — see the AAC benchmarks below. TNS and a fixed-point
+  path are roadmap (PLAN.md § A1/A2).
 
 ## Benchmarks
 
@@ -120,6 +121,47 @@ caches, and a table-free cbrt — measured metrics-identical to the
 both-build's fixed path, full quality suite green. `-q speed` avoids
 heap allocations entirely; the higher tiers use small transient vectors
 in the scale search. Whisper ASR round-trip: 91% word similarity.
+
+### AAC-LC benchmarks (2026-07-06)
+
+6-clip league (speech, electronic, quartet, industrial, piano,
+castanets; `python tests/compare_encoders.py --codec aac`), mean NMR in
+dB (lower = better; ≤0 ≈ masked) and PEAQ ODG (0 = transparent).
+Contenders: Apple (`afconvert`, CBR), Fraunhofer FDK (`fdkaac`),
+ffmpeg's native AAC encoder, vo-aacenc (fixed-point, ex-Android), and
+LAME-MP3 -q2 as a cross-format anchor. glint = `-q normal`.
+
+**128 kbps stereo, mean NMR (rank of 6 encoders):**
+
+| clip | Apple | FDK | **glint** | LAME-MP3 | ffmpeg | vo-aacenc |
+|---|---|---|---|---|---|---|
+| speech | **−6.9** | −5.4 | −3.6 ⑶ | −2.2 | −0.7 | +1.4 |
+| electronic | −9.9 | **−11.4** | −3.6 ⑶ | −3.1 | −1.9 | +2.3 |
+| quartet | −2.9 | −2.6 | **−5.5 ⑴** | −2.0 | +0.2 | +1.2 |
+| industrial | −1.1 | −0.8 | **−1.6 ⑴** | −0.0 | +1.6 | +1.3 |
+| piano | **−9.4** | −8.5 | −8.7 ⑵ | −7.5 | −4.1 | −1.8 |
+| castanets | −7.4 | **−9.0** | −3.5 ⑶ | +2.6 | +7.1 | +18.6 |
+
+glint places 1st–3rd on every clip: behind only Apple and FDK overall,
+ahead of ffmpeg-native, LAME and vo-aacenc everywhere. On castanets
+glint's PEAQ ODG (−0.04) actually ties Apple/FDK (−0.08) — the short
+blocks land the transients. At **256 kbps** ODG is ≈0 (transparent) for
+Apple, FDK, glint and LAME on all clips; glint has the highest SNR of
+any AAC encoder on 4/6 clips (e.g. quartet 50.6 dB and **NMR −15.0,
+1st**; speech 42.2 dB, NMR −16.6 vs Apple −18.1) while vo-aacenc never
+reaches a negative castanets NMR at any rate.
+
+**Speed** (M1, 60 s speech, 44.1 kHz stereo 128k): glint-aac speed
+~85×, normal ~41×, best ~37× realtime; Apple ~104×, FDK ~90×,
+vo-aacenc ~100×, ffmpeg-native ~34×. No perf pass has run on the AAC
+path yet (the MP3 path got −27..−45% from two passes; the same LUT
+machinery applies).
+
+**RAM** (measured; encoder context + static tables): glint-aac desktop
+double ≈ **117 KB** (61.4 KB context + 55.5 KB lazily-built tables);
+vo-aacenc ≈ **48 KB** (heap, via its own allocator hook; zero BSS).
+The AAC equivalent of the MP3 fixed-point/`GLINT_SMALL_BUFFERS` diet
+(which took MP3 from 213 KB to 64 KB) is phase 3 of the roadmap.
 
 ## Building
 

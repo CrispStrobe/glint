@@ -750,6 +750,47 @@ afconvert are the yardsticks, vo-aacenc is the Shine-role baseline):
 5. **Bandwidth heuristic → psy-driven max_sfb** (current cutoffs are a
    placeholder table roughly tracking fdk defaults).
 
+## A1b. AAC league table — measured 2026-07-06 (post short blocks)
+
+`python tests/compare_encoders.py --codec aac` (new `--codec` flag; ADTS
+everywhere; lame-q2 rides along as MP3 anchor). Contenders: Apple
+afconvert `-f adts -d aac -s 0` (CBR), fdkaac (`brew install
+fdk-aac-encoder`, `-f 2` for ADTS), ffmpeg native aac, vo-aacenc
+(`~/code/glint-tools/vo-aacenc/aac-enc`, built from mstorsjo/vo-aacenc:
+autoreconf+configure for the lib, then
+`cc -O2 -I. -Icommon/include -o aac-enc aac-enc.c wavreader.c
+common/cmnMemory.c .libs/libvo-aacenc.a`; NB `-r` is BITRATE in bps).
+Full table in the 2026-07-06 run log; NMR summary at 128k:
+
+- glint-normal places 1st on quartet (−5.5 vs Apple −2.9 / fdk −2.6)
+  and industrial (−1.6 vs Apple −1.1 / fdk −0.8); 2nd on piano (−8.7,
+  between Apple −9.4 and fdk −8.5); 3rd on speech (−3.6 vs −6.9/−5.4),
+  electronic (−3.6 vs −9.9/−11.4) and castanets (−3.5 vs −7.4/−9.0,
+  but ODG −0.04 ≈ Apple/fdk's −0.08 — PEAQ says the transients are
+  fine; the NMR gap is steady-state). ALWAYS ahead of ffmpeg-native,
+  LAME-MP3 and vo-aacenc (vo: castanets NMR +18.6, ODG −3.x on tonal
+  clips — the quality floor of the league).
+- 256k: ODG ≈ 0 for Apple/fdk/glint/LAME on every clip. glint SNR
+  highest of the AAC field on 4/6 clips; quartet NMR −15.0 = 1st.
+  Remaining NMR gap to Apple/fdk at 128k on speech/electronic =
+  the TNS + better-psy (tonality) work, not rate control.
+- glint-speed sometimes beats normal on castanets NMR (−5.1 vs −3.5):
+  shaping the long frames around transitions costs a little there —
+  revisit when shorts get shaped (A1.4).
+- Speed (this run, moderate load): glint 39-86x depending on tier/clip;
+  Apple ~100x, fdk 53-110x, vo ~94-168x, ffmpeg-native 6-56x. Idle
+  spot-check: glint-aac speed/normal/best = 85/41/37x. No AAC perf
+  pass yet.
+- RAM (method: sizeof(glint_aac_context) via a measurement TU that
+  #includes aac_encoder.cpp; statics via `size -m` per object with
+  -fno-lto): glint-aac double = 61.4 KB context + 55.5 KB BSS
+  (33.4 mdct tables + 22.1 psy model) ≈ 117 KB. vo-aacenc = 48 KB
+  heap total (measured by logging its cmnMemAlloc; zero BSS) — its
+  "several hundred KB" reputation is Arduino-wrapper overhead, so the
+  phase-3 target is UNDER 48 KB, which is genuinely tight (the 2x1024
+  double MDCT lookback alone is 16 KB → int16/int32 input buffers and
+  a Q31 path are mandatory, plus single-slot psy/mdct models).
+
 ## A2. Phase 3 — fixed-point path + RAM diet (roadmap)
 
 Q31 signal path, GLINT_SMALL_BUFFERS treatment, target: beat vo-aacenc's
