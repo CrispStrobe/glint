@@ -121,10 +121,11 @@ void aac_section_and_count(const int16_t* ix, const AacBandLayout& layout,
 // sf[b] = clamp(G - sf_offsets[b], 0, 255); sf_offsets may be null (all 0).
 // Offsets must stay in [-30, 30] so the scalefactor dpcm range (+-60) holds.
 // gain_hint < 0 runs a fresh binary search; otherwise a local walk from the
-// hint (cheap refits inside the shaping loop).
+// hint (cheap refits inside the shaping loop). gain_floor is VBR's
+// constant-quality floor: never quantize finer than this anchor gain.
 void aac_fit_channel(const SpecT* spec, const AacBandLayout& layout,
                      int budget_bits, const int* sf_offsets, int gain_hint,
-                     AacChannelPlan* plan);
+                     int gain_floor, AacChannelPlan* plan);
 
 // Per-band reconstruction noise sum((spec - dequant)^2) over coded bands.
 void aac_band_noise(const AacChannelPlan& plan, const SpecT* spec,

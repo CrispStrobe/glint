@@ -27,7 +27,9 @@ pub struct glint_aac_config {
     pub num_channels: c_int,
     pub bitrate: c_int,
     pub quality: c_int,
-    pub reserved: [c_int; 6], // must be zero
+    pub vbr: c_int,         // 0 = CBR, 1 = constant-quality VBR
+    pub vbr_quality: c_int, // 0 (best) .. 9 (smallest), when vbr = 1
+    pub reserved: [c_int; 4], // must be zero
 }
 
 extern "C" {

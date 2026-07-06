@@ -479,7 +479,7 @@ static void test_aac_coder_count_matches_emission() {
     glint::aac::aac_make_layout(sri, glint::aac::kSeqLong, 40, nullptr, 1, &layout);
     glint::aac::AacChannelPlan plan;
     plan.tns.active = 0;
-    glint::aac::aac_fit_channel(spec, layout, 3000, nullptr, -1, &plan);
+    glint::aac::aac_fit_channel(spec, layout, 3000, nullptr, -1, 0, &plan);
     CHECK(plan.ics_bits <= 3000, "fitted plan respects the bit budget");
     CHECK(plan.global_gain >= 0 && plan.global_gain <= 255, "global_gain in range");
 
@@ -501,7 +501,7 @@ static void test_aac_coder_count_matches_emission() {
     CHECK(sl.num_lines == 8 * 112 || sl.num_lines > 0, "short layout lines");
     glint::aac::AacChannelPlan splan;
     splan.tns.active = 0;
-    glint::aac::aac_fit_channel(spec, sl, 2500, nullptr, -1, &splan);
+    glint::aac::aac_fit_channel(spec, sl, 2500, nullptr, -1, 0, &splan);
     CHECK(splan.ics_bits <= 2500, "short plan respects the bit budget");
     glint::aac::AacBitWriter scount(0);
     glint::aac::aac_write_ics_body(scount, splan, sl, false);
@@ -510,7 +510,7 @@ static void test_aac_coder_count_matches_emission() {
 
 static void test_aac_api_smoke() {
     std::printf("AAC API smoke (ADTS framing)...\n");
-    glint_aac_config cfg;
+    glint_aac_config cfg = {};  // zero-init per the header contract
     cfg.sample_rate = 44100;
     cfg.num_channels = 2;
     cfg.bitrate = 128;

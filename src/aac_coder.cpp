@@ -469,7 +469,7 @@ bool eval_gain(const P34T* p34, const SpecT* spec, const AacBandLayout& L,
 
 void aac_fit_channel(const SpecT* spec, const AacBandLayout& L,
                      int budget_bits, const int* sf_offsets, int gain_hint,
-                     AacChannelPlan* plan) {
+                     int gain_floor, AacChannelPlan* plan) {
     const int n = L.num_lines;
 
     P34T p34[1024];
@@ -497,15 +497,17 @@ void aac_fit_channel(const SpecT* spec, const AacBandLayout& L,
     trial.tns = plan->tns;  // caller decides TNS before fitting; bits count
     std::memset(trial.ix, 0, sizeof(trial.ix));
 
+    if (gain_floor < 0) gain_floor = 0;
     bool have_fit = false;
     if (gain_hint >= 0) {
         // Local walk from the hint: bits(G) is (near-)monotone decreasing in
         // G, and shaping moves the answer by only a step or two per iteration.
         int g = gain_hint;
+        if (g < gain_floor) g = gain_floor;
         if (eval_gain(p34, spec, L, budget_bits, sf_offsets, g, &trial)) {
             *plan = trial;
             have_fit = true;
-            while (g > 0 &&
+            while (g > gain_floor &&
                    eval_gain(p34, spec, L, budget_bits, sf_offsets, g - 1, &trial)) {
                 g--;
                 *plan = trial;
@@ -521,7 +523,7 @@ void aac_fit_channel(const SpecT* spec, const AacBandLayout& L,
             }
         }
     } else {
-        int lo = 0, hi = 255;
+        int lo = gain_floor, hi = 255;
         while (lo <= hi) {
             int mid = (lo + hi) / 2;
             if (eval_gain(p34, spec, L, budget_bits, sf_offsets, mid, &trial)) {

@@ -134,7 +134,9 @@ class _GlintAacConfig(ctypes.Structure):
         ("num_channels", ctypes.c_int),
         ("bitrate", ctypes.c_int),
         ("quality", ctypes.c_int),
-        ("reserved", ctypes.c_int * 6),
+        ("vbr", ctypes.c_int),
+        ("vbr_quality", ctypes.c_int),
+        ("reserved", ctypes.c_int * 4),
     ]
 
 
@@ -467,6 +469,7 @@ class AacEncoder(Encoder):
         channels: int = 2,
         bitrate: int = 128,
         quality: int = QUALITY_NORMAL,
+        vbr_quality: Optional[int] = None,
         lib_path: Optional[str] = None,
     ):
         self._lib = load_library(lib_path)
@@ -482,6 +485,9 @@ class AacEncoder(Encoder):
             bitrate=bitrate,
             quality=quality,
         )
+        if vbr_quality is not None:
+            cfg.vbr = 1
+            cfg.vbr_quality = int(vbr_quality)
         handle = self._lib.glint_aac_create(ctypes.byref(cfg))
         if not handle:
             raise ConfigError(

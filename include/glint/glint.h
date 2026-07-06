@@ -108,10 +108,12 @@ typedef struct glint_aac_context* glint_aac_t;
 struct glint_aac_config {
     int sample_rate;
     int num_channels;
-    int bitrate;        // kbps
+    int bitrate;        // kbps; under VBR this is only the per-frame CAP hint
     enum glint_quality quality;  // SPEED = no noise shaping; NORMAL/BEST = psy
                                  // NMR shaping loop (BEST iterates further)
-    int reserved[6];    // must be zero
+    int vbr;            // 0 = CBR (default), 1 = constant-quality VBR
+    int vbr_quality;    // 0 (best/largest) .. 9 (worst/smallest), when vbr=1
+    int reserved[4];    // must be zero
 };
 
 // Library version as (major << 16) | (minor << 8) | patch.

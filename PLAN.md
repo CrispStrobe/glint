@@ -920,6 +920,26 @@ best −52%. Absolute: double 272x/168x realtime (speed/best), fixed/INT
 word-split unquoted $args — a broken gate loop compared stale files and
 reported false DIFFERs; use eval or arrays.
 
+## A4. AAC VBR — DONE (2026-07-06)
+
+Constant-quality VBR the way ADTS wants it: no debt controller, every
+frame may spend to the 6144-bit/ch cap, and a per-quality ANCHOR-GAIN
+FLOOR (aac_fit_channel gain_floor param) is what limits spend — the
+direct analog of MP3's vbr_target_gain, minus all the Xing/placeholder
+machinery (ADTS frames are self-describing; nothing to rewrite).
+Config: glint_aac_config.vbr / vbr_quality (consumed two reserved
+slots — same struct size, zero = CBR; the smoke test promptly proved
+WHY the zero-init contract exists: a stack-constructed config had
+garbage in .vbr). Shaping under VBR runs at spent+25% like MP3's VBR
+shaping. Ladder kVbrGain[10] = 133..162 (~1.5 dB noise/step),
+calibrated on the speech clip: V0 311 kbps / NMR −16.8 / 0.0% audible
+(beats CBR-256's −16.6), V2 220k, V4 153k / −4.1, V6 100k, V9 42k;
+electronic V4 lands at 134k (content-adaptive, as VBR should).
+GLINT_AAC_VBR_GAIN overrides the floor for experiments. CLI -V works
+for .aac outputs now; python binding takes vbr_quality=, rust/dart
+struct mirrors updated. CBR paths byte-identical; all decode gates
+green (a V4 config joined tests/test_aac.py).
+
 ## A2b. No-FPU integer hot path — DONE (2026-07-06), GLINT_AAC_INT
 
 GLINT_MODE=fixed now also defines GLINT_AAC_INT: spectra are int32 (Q3,

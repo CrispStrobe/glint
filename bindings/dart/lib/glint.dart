@@ -54,7 +54,13 @@ final class GlintAacConfig extends Struct {
   @Int32()
   external int quality;
 
-  @Array(6)
+  @Int32()
+  external int vbr;
+
+  @Int32()
+  external int vbrQuality;
+
+  @Array(4)
   external Array<Int32> reserved;
 }
 

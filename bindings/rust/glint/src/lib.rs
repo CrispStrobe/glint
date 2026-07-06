@@ -172,7 +172,9 @@ impl AacEncoder {
                 num_channels: channels as i32,
                 bitrate: bitrate as i32,
                 quality: quality as i32,
-                reserved: [0; 6],
+                vbr: 0,
+                vbr_quality: 0,
+                reserved: [0; 4],
             };
             let handle = glint_aac_create(&cfg);
             if handle.is_null() {

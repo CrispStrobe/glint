@@ -66,6 +66,8 @@ struct glint_aac_context {
     int max_sfb_long;
     int max_sfb_short;
     int quality;                    // glint_quality
+    int vbr;                        // constant-quality VBR
+    int vbr_gain_floor;             // anchor-gain floor from vbr_quality
     int force_short;                // GLINT_AAC_FORCE_SHORT diagnostic
 
     // Block pipeline: the frame emitted on each call covers (blk0, blk1).
@@ -312,11 +314,18 @@ int emit_frame(glint_aac_context* c, int next_attack, uint8_t* out) {
     }
 
     // ---- budget ----
-    double avail = c->target_acc - c->bits_spent;
-    double cap = static_cast<double>(kDecoderBufBits) * ch;
-    if (avail > cap) avail = cap;
-    double floor_bits = 0.35 * c->bits_per_frame;
-    if (avail < floor_bits) avail = floor_bits;
+    // VBR: no debt controller — every frame may spend up to the decoder
+    // buffer cap; the constant-quality gain floor is what limits spend.
+    double avail;
+    if (c->vbr) {
+        avail = static_cast<double>(kDecoderBufBits) * ch;
+    } else {
+        avail = c->target_acc - c->bits_spent;
+        double cap = static_cast<double>(kDecoderBufBits) * ch;
+        if (avail > cap) avail = cap;
+        double floor_bits = 0.35 * c->bits_per_frame;
+        if (avail < floor_bits) avail = floor_bits;
+    }
 
     const int info_bits = (seq == kSeqShort) ? 15 : 11;  // ics_info
     int fixed_overhead = kAdtsHeaderBits + 3 /*END*/ + 7 /*worst-case align*/;
@@ -405,14 +414,16 @@ int emit_frame(glint_aac_context* c, int next_attack, uint8_t* out) {
         double share = (e0 + e1 > 0) ? e0 / (e0 + e1) : 0.5;
         if (share < 0.3) share = 0.3;
         if (share > 0.7) share = 0.7;
-        int budget0 = static_cast<int>(spend * share);
-        aac_fit_channel(c->spec[0], L, budget0, nullptr, -1, &c->plan[0]);
+        const int gf = c->vbr ? c->vbr_gain_floor : 0;
+        int budget0 = c->vbr ? spend / 2 : static_cast<int>(spend * share);
+        aac_fit_channel(c->spec[0], L, budget0, nullptr, -1, gf, &c->plan[0]);
         if (shape) shape_channel(c, 0, budget0);
         int budget1 = spend - c->plan[0].ics_bits;  // leftover flows to ch 1
-        aac_fit_channel(c->spec[1], L, budget1, nullptr, -1, &c->plan[1]);
+        aac_fit_channel(c->spec[1], L, budget1, nullptr, -1, gf, &c->plan[1]);
         if (shape) shape_channel(c, 1, budget1);
     } else {
-        aac_fit_channel(c->spec[0], L, spend, nullptr, -1, &c->plan[0]);
+        aac_fit_channel(c->spec[0], L, spend, nullptr, -1,
+                        c->vbr ? c->vbr_gain_floor : 0, &c->plan[0]);
         if (shape) shape_channel(c, 0, spend);
     }
 
@@ -513,6 +524,26 @@ glint_aac_t glint_aac_create(const struct glint_aac_config* cfg) {
     c->quality = (cfg->quality >= GLINT_QUALITY_BEST) ? GLINT_QUALITY_BEST
                  : (cfg->quality == GLINT_QUALITY_NORMAL) ? GLINT_QUALITY_NORMAL
                                                           : GLINT_QUALITY_SPEED;
+    c->vbr = cfg->vbr ? 1 : 0;
+    if (c->vbr) {
+        // Constant-quality anchor-gain floors, V0 (finest) .. V9 (coarsest).
+        // Each step is ~1.5 dB of quantization noise; calibrated against the
+        // CBR anchors the rate search settles on for the reference clips
+        // (see PLAN.md A4). GLINT_AAC_VBR_GAIN overrides for experiments.
+        // Calibrated on the reference speech clip (V0 ~300k, V4 ~160k,
+        // V9 ~50k stereo; music runs lower/higher with content — that's VBR).
+        static const int kVbrGain[10] = {
+            133, 137, 140, 143, 146, 149, 152, 155, 158, 162
+        };
+        int q = cfg->vbr_quality;
+        if (q < 0) q = 0;
+        if (q > 9) q = 9;
+        c->vbr_gain_floor = kVbrGain[q];
+        if (const char* e = getenv("GLINT_AAC_VBR_GAIN")) {
+            int v = atoi(e);
+            if (v > 0 && v < 256) c->vbr_gain_floor = v;
+        }
+    }
     c->force_short = getenv("GLINT_AAC_FORCE_SHORT") != nullptr;
     c->bits_per_frame = static_cast<double>(c->bitrate_bps) * kAacFrameLen / c->sample_rate;
 
@@ -626,7 +657,11 @@ void shape_channel(glint_aac_context* c, int chn, int budget) {
     }
     if (worst <= kShapeTarget) return;
 
-    int shape_bits = plan.ics_bits + (budget - plan.ics_bits) / 2;
+    // CBR: spent + HALF the leftover (the MP3 reservoir lesson). VBR: the
+    // budget is the buffer cap, not a rate signal — give shaping spent +25%
+    // like MP3's VBR shaping.
+    int shape_bits = c->vbr ? plan.ics_bits + plan.ics_bits / 4
+                            : plan.ics_bits + (budget - plan.ics_bits) / 2;
     if (shape_bits > budget) shape_bits = budget;
 
     int off[kMaxSfb] = {0};
@@ -674,7 +709,8 @@ void shape_channel(glint_aac_context* c, int chn, int budget) {
 
         AacChannelPlan cand;
         cand.tns = cur.tns;  // fit reads the caller's TNS decision from the plan
-        aac_fit_channel(spec, L, shape_bits, off, cur.fit_gain, &cand);
+        aac_fit_channel(spec, L, shape_bits, off, cur.fit_gain,
+                        c->vbr ? c->vbr_gain_floor : 0, &cand);
         double cand_noise[kMaxSfb];
         aac_band_noise(cand, spec, L, cand_noise);
         double j = 0.0, total = 0.0;

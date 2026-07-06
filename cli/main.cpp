@@ -361,12 +361,18 @@ static bool parse_raw_spec(const char* spec, int* rate, int* channels, int* bits
 
 // Encode the (already header-parsed) WAV stream to ADTS AAC-LC.
 static int encode_aac(FILE* wav_file, const char* output_path, const WavInfo& wav,
-                      int enc_channels, int bitrate, glint_quality quality) {
+                      int enc_channels, int bitrate, glint_quality quality,
+                      int vbr_quality) {
     glint_aac_config cfg;
+    memset(&cfg, 0, sizeof(cfg));  // zero-init per the header contract
     cfg.sample_rate = wav.sample_rate;
     cfg.num_channels = enc_channels;
     cfg.bitrate = bitrate;
     cfg.quality = quality;
+    if (vbr_quality >= 0) {
+        cfg.vbr = 1;
+        cfg.vbr_quality = vbr_quality;
+    }
     glint_aac_t enc = glint_aac_create(&cfg);
     if (!enc) {
         fprintf(stderr, "Error: unsupported AAC config (%d Hz, %d ch, %d kbps)\n",
@@ -380,8 +386,13 @@ static int encode_aac(FILE* wav_file, const char* output_path, const WavInfo& wa
         glint_aac_destroy(enc);
         return 1;
     }
-    fprintf(stderr, "Encoding: AAC-LC %d kbps, %s\n", bitrate,
-            enc_channels == 1 ? "mono" : "stereo");
+    if (vbr_quality >= 0) {
+        fprintf(stderr, "Encoding: AAC-LC VBR V%d, %s\n", vbr_quality,
+                enc_channels == 1 ? "mono" : "stereo");
+    } else {
+        fprintf(stderr, "Encoding: AAC-LC %d kbps, %s\n", bitrate,
+                enc_channels == 1 ? "mono" : "stereo");
+    }
 
     int samples_per_frame = glint_aac_samples_per_frame(enc);
     int nch = wav.num_channels;
@@ -596,11 +607,6 @@ int main(int argc, char** argv) {
     }
 
     if (use_aac) {
-        if (vbr_quality >= 0) {
-            fprintf(stderr, "Error: VBR is not supported for AAC yet\n");
-            fclose(wav_file);
-            return 1;
-        }
         glint_quality aac_quality = GLINT_QUALITY_NORMAL;
         if (quality_str) {
             if (strcmp(quality_str, "speed") == 0) aac_quality = GLINT_QUALITY_SPEED;
@@ -614,7 +620,8 @@ int main(int argc, char** argv) {
         }
         int aac_channels = wav.num_channels;
         if (mode == GLINT_MONO && wav.num_channels == 2) aac_channels = 1;
-        int rc = encode_aac(wav_file, output_path, wav, aac_channels, bitrate, aac_quality);
+        int rc = encode_aac(wav_file, output_path, wav, aac_channels, bitrate,
+                            aac_quality, vbr_quality);
         fclose(wav_file);
         return rc;
     }

@@ -111,6 +111,8 @@ def main():
         (48000, True, 128, [], 30.0, False),
         # burst train: exercises the short-block scheduler (START/SHORT/STOP)
         (44100, True, 192, [], 20.0, True),
+        # AAC VBR V4 (constant-quality; -b ignored as rate target)
+        (44100, True, 128, ["-V", "4"], 25.0, False),
     ]
 
     tmpdir = tempfile.mkdtemp(prefix="glint_aac_test_")
