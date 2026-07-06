@@ -1,9 +1,11 @@
-// glint - AAC-LC encoder core (phase 1: long blocks, CBR-average, ADTS)
+// glint - AAC-LC encoder core (long + short blocks, CBR-average, ADTS)
 // MIT License - Clean-room implementation
 //
-// One glint_aac_encode call consumes 1024 samples per channel and emits one
-// ADTS frame. The MDCT looks back one block, so the stream is delayed by
-// 1024 samples; glint_aac_flush emits one final frame covering the tail.
+// Window scheduling needs one block of lookahead (a LONG_START must be
+// emitted BEFORE the transient frame), so the encoder holds one block:
+// glint_aac_encode(block t) emits the frame covering blocks (t-2, t-1),
+// total encoder delay 2048 samples. The first call emits a silence frame.
+// glint_aac_flush emits the two tail frames (held block + final overlap).
 //
 // Rate control is a bit-debt controller: each frame's budget is the running
 // target minus bits already spent, clamped to the decoder's per-channel input
@@ -30,7 +32,7 @@ using namespace glint::aac;
 using namespace glint::aac_tables;
 
 constexpr int kAdtsHeaderBits = 56;   // protection_absent = 1
-constexpr int kMaxOutBytes = 4096;    // >= 7 + 2*6144/8 with margin
+constexpr int kMaxOutBytes = 8192;    // flush emits two frames back-to-back
 constexpr int kDecoderBufBits = 6144; // per-channel input buffer cap (ISO)
 
 int samplerate_index(int sr) {
@@ -57,13 +59,26 @@ struct glint_aac_context {
     int sr_index;
     int num_channels;
     int bitrate_bps;
-    int max_sfb;
+    int max_sfb_long;
+    int max_sfb_short;
     int quality;                    // glint_quality
+    int force_short;                // GLINT_AAC_FORCE_SHORT diagnostic
 
-    double prev[2][kAacFrameLen];   // MDCT lookback (last input block)
-    double spec[2][kAacFrameLen];   // coded-domain spectra (M/S bands transformed)
+    // Block pipeline: the frame emitted on each call covers (blk0, blk1).
+    double blk0[2][kAacFrameLen];   // older block
+    double blk1[2][kAacFrameLen];   // newer block
+    int attack0, attack1;           // transient flags for blk0 / blk1
+    int pos0, pos1;                 // attack sub-block (0..7) within the block
+    int prev_short;
+
+    // Transient detector state (per channel)
+    double hp_last[2];              // last input sample of the previous block
+    double base_e[2];               // rolling sub-block energy baseline
+
+    AacBandLayout layout;           // current frame's common band layout
+    double spec[2][kAacFrameLen];   // coded-order spectra (M/S bands transformed)
     AacChannelPlan plan[2];
-    uint8_t ms_used[kMaxSfb];       // per-sfb M/S flags (stereo)
+    uint8_t ms_used[kMaxSfb];       // per-band M/S flags (stereo)
     int ms_present;                 // 0 = none, 1 = per-band flags, 2 = all
     double mask[2][kMaxSfb];        // per-channel shaping masks (coded domain)
 
@@ -81,19 +96,12 @@ struct glint_aac_context {
 
 namespace {
 
-// NMR-driven noise shaping, ported from the MP3 nmr_outer_loop with the same
-// hard-won constants: shape to 0.125x the mask (~9 dB below), amplify every
-// band within 6 dB of the worst offender, accept only iterates that improve
-// the summed noise/mask objective under a 1.25x total-noise guard, and run
-// the gain re-search under shape_bits = unshaped spend + HALF the leftover
-// budget (full-budget shaping consumed the underspend the rate controller
-// needs to see — the MP3 stereo-best 5 dB SNR lesson).
+// NMR-driven noise shaping. Ported from the MP3 nmr_outer_loop but with
+// AAC-specific structure found by measurement (see PLAN.md A1.1): shape to
+// 0.125x the mask, bidirectional scalefactor offsets, per-band ceiling at
+// the MASK, two amplification tiers, 2.5x total-noise backstop, and
+// shape_bits = unshaped spend + HALF the leftover budget.
 constexpr double kShapeTarget = 0.125;
-// Backstop only. The real safety is the per-band ceiling (no band may end
-// above max(target, its initial ratio)): bidirectional shaping is SUPPOSED
-// to raise raw noise in over-coded loud bands, so MP3's tight total-noise
-// guard (1.25, tuned for a unidirectional loop) rejected exactly the
-// redistribution we want — measured: it froze shaping at ~-0.5 dB NMR.
 constexpr double kNoiseGuard = 2.5;
 // Offsets are bidirectional (+ = finer, - = coarser than the anchor); the
 // +-30 bound keeps any two coded bands' scalefactors within the +-60 dpcm
@@ -103,27 +111,17 @@ constexpr int kMaxSfOffset = 30;
 void shape_channel(glint_aac_context* c, int chn, int budget);
 
 // Per-band M/S decision + in-place transform of c->spec, and the coded-domain
-// shaping masks for both channels. The decision compares mask-relative coding
-// cost: code the band as M/S iff (t+eM)(t+eS) < (t+eL)(t+eR), t = min of the
-// two channels' masks (a perceptual-entropy product rule; energy-only rules
-// misfire on out-of-phase content). In M/S bands BOTH channels shape against
-// t: noise in M or S lands in decoded L and R (l = m+s, r = m-s), so the
-// side channel must never be shaped against a mask the quieter original
-// channel does not have — the AAC form of the MP3 side-channel lesson.
-void decide_ms(glint_aac_context* c) {
-    const uint16_t* swb = kSwbOffsetLong[c->sr_index];
-    const int nb = c->max_sfb;
-
-    double maskL[kMaxSfb], maskR[kMaxSfb];
-    double e0 = aac_compute_masks(c->spec[0], c->sr_index, nb, c->emax_run, maskL);
-    double e1 = aac_compute_masks(c->spec[1], c->sr_index, nb, c->emax_run, maskR);
-    if (e0 > c->emax_run) c->emax_run = e0;
-    if (e1 > c->emax_run) c->emax_run = e1;
-
+// shaping masks for both channels. maskL/maskR may be null (short frames):
+// the product rule then degenerates to the pure energy rule eM*eS < eL*eR.
+// In M/S bands BOTH channels shape against t = min(maskL, maskR): noise in M
+// or S lands in decoded L and R (l = m+s, r = m-s), so the side channel must
+// never be shaped against a mask the quieter original channel does not have.
+void decide_ms(glint_aac_context* c, const double* maskL, const double* maskR) {
+    const AacBandLayout& L = c->layout;
     int n_ms = 0;
-    for (int b = 0; b < nb; b++) {
+    for (int b = 0; b < L.num_bands; b++) {
         double eL = 0, eR = 0, eM = 0, eS = 0;
-        for (int i = swb[b]; i < swb[b + 1]; i++) {
+        for (int i = L.offset[b]; i < L.offset[b + 1]; i++) {
             double l = c->spec[0][i], r = c->spec[1][i];
             double m = 0.5 * (l + r), s = 0.5 * (l - r);
             eL += l * l;
@@ -131,11 +129,12 @@ void decide_ms(glint_aac_context* c) {
             eM += m * m;
             eS += s * s;
         }
-        double t = maskL[b] < maskR[b] ? maskL[b] : maskR[b];
+        double t = 0.0;
+        if (maskL && maskR) t = maskL[b] < maskR[b] ? maskL[b] : maskR[b];
         if ((t + eM) * (t + eS) < (t + eL) * (t + eR)) {
             c->ms_used[b] = 1;
             n_ms++;
-            for (int i = swb[b]; i < swb[b + 1]; i++) {
+            for (int i = L.offset[b]; i < L.offset[b + 1]; i++) {
                 double l = c->spec[0][i], r = c->spec[1][i];
                 c->spec[0][i] = 0.5 * (l + r);
                 c->spec[1][i] = 0.5 * (l - r);
@@ -144,11 +143,221 @@ void decide_ms(glint_aac_context* c) {
             c->mask[1][b] = t;
         } else {
             c->ms_used[b] = 0;
-            c->mask[0][b] = maskL[b];
-            c->mask[1][b] = maskR[b];
+            c->mask[0][b] = maskL ? maskL[b] : 0.0;
+            c->mask[1][b] = maskR ? maskR[b] : 0.0;
         }
     }
-    c->ms_present = (n_ms == 0) ? 0 : (n_ms == nb) ? 2 : 1;
+    c->ms_present = (n_ms == 0) ? 0 : (n_ms == L.num_bands) ? 2 : 1;
+}
+
+// Transient detector: 8 sub-block energies of the first-difference signal;
+// attack when one jumps 8x over the rolling baseline (with a silence floor).
+bool detect_attack(const double* x, double* hp_last, double* base_e, int* pos) {
+    constexpr double kRatio = 8.0;
+    constexpr double kFloor = 1e6;  // diff-energy floor at int16 scale
+    double prev = *hp_last;
+    double base = *base_e;
+    bool attack = false;
+    int p = 0;
+    for (int w = 0; w < 8; w++) {
+        double e = 0.0;
+        for (int n = 0; n < 128; n++) {
+            double d = x[128 * w + n] - prev;
+            prev = x[128 * w + n];
+            e += d * d;
+        }
+        if (!attack && e > kRatio * base && e > kFloor) {
+            attack = true;
+            p = w;
+        }
+        base = base > e ? 0.7 * base + 0.3 * e : e;  // fast rise, slow fall
+    }
+    *hp_last = prev;
+    *base_e = base;
+    *pos = p;
+    return attack;
+}
+
+// One frame: window-decide, MDCT, M/S, fit, shape, emit ADTS at out. Returns
+// frame bytes. next_attack = transient flag of the block AFTER blk1.
+int emit_frame(glint_aac_context* c, int next_attack, uint8_t* out) {
+    const int ch = c->num_channels;
+
+    // ---- window decision ----
+    int short_f = c->attack0 || c->attack1 || c->force_short;
+    int next_short = c->attack1 || next_attack;
+    if (!short_f && c->prev_short && next_short) short_f = 1;  // bridge
+    int seq = short_f ? kSeqShort
+              : next_short ? kSeqStart
+              : c->prev_short ? kSeqStop
+                              : kSeqLong;
+
+    if (seq == kSeqShort) {
+        // Group split at the attack window: [0,s) [s,s+2) [s+2,8)
+        int s = c->attack1 ? (c->pos1 + 4 > 7 ? 7 : c->pos1 + 4)
+                : c->attack0 ? (c->pos0 - 4 < 0 ? 0 : c->pos0 - 4)
+                             : 0;
+        uint8_t glen[3];
+        int ng = 0;
+        if (s > 0) glen[ng++] = static_cast<uint8_t>(s);
+        int mid = (s + 2 > 8) ? 8 - s : 2;
+        glen[ng++] = static_cast<uint8_t>(mid);
+        if (s + mid < 8) glen[ng++] = static_cast<uint8_t>(8 - s - mid);
+        aac_make_layout(c->sr_index, kSeqShort, c->max_sfb_short, glen, ng, &c->layout);
+    } else {
+        aac_make_layout(c->sr_index, seq, c->max_sfb_long, nullptr, 1, &c->layout);
+    }
+    c->prev_short = short_f;
+    const AacBandLayout& L = c->layout;
+
+    // ---- MDCT into coded order ----
+    for (int chn = 0; chn < ch; chn++) {
+        if (seq == kSeqShort) {
+            double natural[kAacFrameLen];
+            aac_mdct_frame(seq, c->blk0[chn], c->blk1[chn], natural);
+            aac_reorder_short(natural, L, c->sr_index, c->spec[chn]);
+        } else {
+            aac_mdct_frame(seq, c->blk0[chn], c->blk1[chn], c->spec[chn]);
+        }
+    }
+
+    // ---- budget ----
+    double avail = c->target_acc - c->bits_spent;
+    double cap = static_cast<double>(kDecoderBufBits) * ch;
+    if (avail > cap) avail = cap;
+    double floor_bits = 0.35 * c->bits_per_frame;
+    if (avail < floor_bits) avail = floor_bits;
+
+    const int info_bits = (seq == kSeqShort) ? 15 : 11;  // ics_info
+    int fixed_overhead = kAdtsHeaderBits + 3 /*END*/ + 7 /*worst-case align*/;
+    if (ch == 2) {
+        fixed_overhead += 3 + 4 + 1 + info_bits + 2;  // CPE hdr + ics_info + ms_mask
+    } else {
+        fixed_overhead += 3 + 4 + info_bits;
+    }
+
+    // ---- masks + M/S ----
+    // Long-family frames get psy masks; short frames use the energy-only M/S
+    // rule and are not shaped (the MP3 lesson: attack-dominated masks
+    // mislead on transition frames; short windows already localize noise).
+    const bool shape = (c->quality >= GLINT_QUALITY_NORMAL) && seq == kSeqLong;
+    double maskL[kMaxSfb], maskR[kMaxSfb];
+    const double* ml = nullptr;
+    const double* mr = nullptr;
+    if (seq != kSeqShort) {
+        double e0 = aac_compute_masks(c->spec[0], c->sr_index, L.num_bands,
+                                      c->emax_run, maskL);
+        if (e0 > c->emax_run) c->emax_run = e0;
+        ml = maskL;
+        if (ch == 2) {
+            double e1 = aac_compute_masks(c->spec[1], c->sr_index, L.num_bands,
+                                          c->emax_run, maskR);
+            if (e1 > c->emax_run) c->emax_run = e1;
+            mr = maskR;
+        }
+    }
+
+    if (ch == 2) {
+        decide_ms(c, ml, mr);
+        if (c->ms_present == 1) fixed_overhead += L.num_bands;  // ms_used bits
+    } else {
+        std::memcpy(c->mask[0], maskL, sizeof(double) * L.num_bands);
+    }
+
+    int spend = static_cast<int>(avail) - fixed_overhead;
+    if (spend < 64) spend = 64;
+
+    // ---- fit (+shape) ----
+    if (ch == 2) {
+        double e0 = 0, e1 = 0;
+        for (int i = 0; i < L.num_lines; i++) {
+            e0 += c->spec[0][i] * c->spec[0][i];
+            e1 += c->spec[1][i] * c->spec[1][i];
+        }
+        double share = (e0 + e1 > 0) ? e0 / (e0 + e1) : 0.5;
+        if (share < 0.3) share = 0.3;
+        if (share > 0.7) share = 0.7;
+        int budget0 = static_cast<int>(spend * share);
+        aac_fit_channel(c->spec[0], L, budget0, nullptr, -1, &c->plan[0]);
+        if (shape) shape_channel(c, 0, budget0);
+        int budget1 = spend - c->plan[0].ics_bits;  // leftover flows to ch 1
+        aac_fit_channel(c->spec[1], L, budget1, nullptr, -1, &c->plan[1]);
+        if (shape) shape_channel(c, 1, budget1);
+    } else {
+        aac_fit_channel(c->spec[0], L, spend, nullptr, -1, &c->plan[0]);
+        if (shape) shape_channel(c, 0, spend);
+    }
+
+    // ---- emit raw_data_block at out+7, then prepend the ADTS header ----
+    AacBitWriter bw(out + 7, kMaxOutBytes / 2 - 7);
+    if (ch == 2) {
+        bw.put(1, 3);                       // id_syn_ele CPE
+        bw.put(0, 4);                       // element_instance_tag
+        bw.put(1, 1);                       // common_window
+        aac_write_ics_info(bw, L);
+        bw.put(c->ms_present, 2);           // ms_mask_present
+        if (c->ms_present == 1) {
+            for (int b = 0; b < L.num_bands; b++) bw.put(c->ms_used[b], 1);
+        }
+        aac_write_ics_body(bw, c->plan[0], L, false);
+        aac_write_ics_body(bw, c->plan[1], L, false);
+    } else {
+        bw.put(0, 3);                       // id_syn_ele SCE
+        bw.put(0, 4);                       // element_instance_tag
+        aac_write_ics_body(bw, c->plan[0], L, true);
+    }
+    bw.put(7, 3);                           // id_syn_ele END
+    bw.byte_align();
+
+    int frame_len = bw.bytes() + 7;
+
+    // ADTS header (MPEG-4, AAC-LC, protection absent)
+    int profile = 1;  // AAC-LC = audio object type 2, coded as 2-1
+    out[0] = 0xFF;
+    out[1] = 0xF1;
+    out[2] = static_cast<uint8_t>((profile << 6) | (c->sr_index << 2) |
+                                  ((ch >> 2) & 1));
+    out[3] = static_cast<uint8_t>(((ch & 3) << 6) | ((frame_len >> 11) & 3));
+    out[4] = static_cast<uint8_t>((frame_len >> 3) & 0xFF);
+    out[5] = static_cast<uint8_t>(((frame_len & 7) << 5) | 0x1F);
+    out[6] = 0xFC;
+
+    c->target_acc += c->bits_per_frame;
+    c->bits_spent += 8.0 * frame_len;
+    return frame_len;
+}
+
+// Advance the block pipeline with `cur` (or silence when null).
+void push_block(glint_aac_context* c, const double cur[2][kAacFrameLen],
+                int attack_cur, int pos_cur) {
+    for (int chn = 0; chn < c->num_channels; chn++) {
+        std::memcpy(c->blk0[chn], c->blk1[chn], sizeof(c->blk0[chn]));
+        if (cur) {
+            std::memcpy(c->blk1[chn], cur[chn], sizeof(c->blk1[chn]));
+        } else {
+            std::memset(c->blk1[chn], 0, sizeof(c->blk1[chn]));
+        }
+    }
+    c->attack0 = c->attack1;
+    c->pos0 = c->pos1;
+    c->attack1 = attack_cur;
+    c->pos1 = pos_cur;
+}
+
+const uint8_t* encode_common(glint_aac_context* c,
+                             const double cur[2][kAacFrameLen], int* out_size) {
+    int attack_cur = 0, pos_cur = 0;
+    for (int chn = 0; chn < c->num_channels; chn++) {
+        int p = 0;
+        bool a = detect_attack(cur[chn], &c->hp_last[chn], &c->base_e[chn], &p);
+        if (a && (!attack_cur || p < pos_cur)) pos_cur = p;
+        attack_cur |= a;
+    }
+    int n = emit_frame(c, attack_cur, c->out);
+    push_block(c, cur, attack_cur, pos_cur);
+    c->frames_in++;
+    *out_size = n;
+    return c->out;
 }
 
 }  // namespace
@@ -172,6 +381,7 @@ glint_aac_t glint_aac_create(const struct glint_aac_config* cfg) {
     c->quality = (cfg->quality >= GLINT_QUALITY_BEST) ? GLINT_QUALITY_BEST
                  : (cfg->quality == GLINT_QUALITY_NORMAL) ? GLINT_QUALITY_NORMAL
                                                           : GLINT_QUALITY_SPEED;
+    c->force_short = getenv("GLINT_AAC_FORCE_SHORT") != nullptr;
     c->bits_per_frame = static_cast<double>(c->bitrate_bps) * kAacFrameLen / c->sample_rate;
 
     // max_sfb from the bandwidth cutoff: first band whose start line reaches
@@ -179,17 +389,27 @@ glint_aac_t glint_aac_create(const struct glint_aac_config* cfg) {
     double cut = cutoff_hz(c->bitrate_bps / c->num_channels);
     double hz_per_line = 0.5 * c->sample_rate / kAacFrameLen;
     int cut_line = static_cast<int>(cut / hz_per_line);
-    const uint16_t* swb = kSwbOffsetLong[sri];
-    int nswb = kNumSwbLong[sri];
-    int msfb = nswb;
-    for (int b = 1; b <= nswb; b++) {
-        if (swb[b] >= cut_line) {
-            msfb = b;
-            break;
+    {
+        const uint16_t* swb = kSwbOffsetLong[sri];
+        int nswb = kNumSwbLong[sri];
+        int msfb = nswb;
+        for (int b = 1; b <= nswb; b++) {
+            if (swb[b] >= cut_line) { msfb = b; break; }
         }
+        if (msfb < 4) msfb = 4;
+        c->max_sfb_long = msfb;
     }
-    if (msfb < 4) msfb = 4;
-    c->max_sfb = msfb;
+    {
+        const uint16_t* swb = kSwbOffsetShort[sri];
+        int nswb = kNumSwbShort[sri];
+        int cut_line_s = (cut_line + 7) / 8;
+        int msfb = nswb;
+        for (int b = 1; b <= nswb; b++) {
+            if (swb[b] >= cut_line_s) { msfb = b; break; }
+        }
+        if (msfb < 3) msfb = 3;
+        c->max_sfb_short = msfb;
+    }
     return c;
 }
 
@@ -198,114 +418,18 @@ int glint_aac_samples_per_frame(glint_aac_t c) {
     return kAacFrameLen;
 }
 
-static const uint8_t* encode_block(glint_aac_context* c, int* out_size) {
-    const int ch = c->num_channels;
-
-    // ---- fit both channels under this frame's budget ----
-    double avail = c->target_acc - c->bits_spent;
-    double cap = static_cast<double>(kDecoderBufBits) * ch;
-    if (avail > cap) avail = cap;
-    double floor_bits = 0.35 * c->bits_per_frame;
-    if (avail < floor_bits) avail = floor_bits;
-
-    int fixed_overhead = kAdtsHeaderBits + 3 /*END*/ + 7 /*worst-case align*/;
-    if (ch == 2) {
-        fixed_overhead += 3 + 4 + 1 + 11 + 2;  // CPE id, tag, common_window, ics_info, ms_mask
-    } else {
-        fixed_overhead += 3 + 4 + 11;          // SCE id, tag, ics_info
-    }
-    int spend = static_cast<int>(avail) - fixed_overhead;
-    if (spend < 64) spend = 64;
-
-    const bool shape = c->quality >= GLINT_QUALITY_NORMAL;
-    if (ch == 2) {
-        decide_ms(c);
-        if (c->ms_present == 1) fixed_overhead += c->max_sfb;  // ms_used bits
-        spend = static_cast<int>(avail) - fixed_overhead;
-        if (spend < 64) spend = 64;
-
-        double e0 = 0, e1 = 0;
-        for (int i = 0; i < kAacFrameLen; i++) {
-            e0 += c->spec[0][i] * c->spec[0][i];
-            e1 += c->spec[1][i] * c->spec[1][i];
-        }
-        double share = (e0 + e1 > 0) ? e0 / (e0 + e1) : 0.5;
-        if (share < 0.3) share = 0.3;
-        if (share > 0.7) share = 0.7;
-        int budget0 = static_cast<int>(spend * share);
-        aac_fit_channel(c->spec[0], c->sr_index, c->max_sfb, budget0, nullptr, -1, &c->plan[0]);
-        if (shape) shape_channel(c, 0, budget0);
-        int budget1 = spend - c->plan[0].ics_bits;  // leftover flows to ch 1
-        aac_fit_channel(c->spec[1], c->sr_index, c->max_sfb, budget1, nullptr, -1, &c->plan[1]);
-        if (shape) shape_channel(c, 1, budget1);
-    } else {
-        if (shape) {
-            double e = aac_compute_masks(c->spec[0], c->sr_index, c->max_sfb,
-                                         c->emax_run, c->mask[0]);
-            if (e > c->emax_run) c->emax_run = e;
-        }
-        aac_fit_channel(c->spec[0], c->sr_index, c->max_sfb, spend, nullptr, -1, &c->plan[0]);
-        if (shape) shape_channel(c, 0, spend);
-    }
-
-    // ---- emit raw_data_block into out+7, then prepend the ADTS header ----
-    AacBitWriter bw(c->out + 7, kMaxOutBytes - 7);
-    if (ch == 2) {
-        bw.put(1, 3);                       // id_syn_ele CPE
-        bw.put(0, 4);                       // element_instance_tag
-        bw.put(1, 1);                       // common_window
-        aac_write_ics_info(bw, c->max_sfb);
-        bw.put(c->ms_present, 2);           // ms_mask_present
-        if (c->ms_present == 1) {
-            for (int b = 0; b < c->max_sfb; b++) bw.put(c->ms_used[b], 1);
-        }
-        aac_write_ics_body(bw, c->plan[0], c->sr_index, false);
-        aac_write_ics_body(bw, c->plan[1], c->sr_index, false);
-    } else {
-        bw.put(0, 3);                       // id_syn_ele SCE
-        bw.put(0, 4);                       // element_instance_tag
-        aac_write_ics_body(bw, c->plan[0], c->sr_index, true);
-    }
-    bw.put(7, 3);                           // id_syn_ele END
-    bw.byte_align();
-
-    int payload = bw.bytes();
-    int frame_len = payload + 7;
-
-    // ADTS header (MPEG-4, AAC-LC, protection absent)
-    uint8_t* h = c->out;
-    int profile = 1;  // AAC-LC = audio object type 2, coded as 2-1
-    h[0] = 0xFF;
-    h[1] = 0xF1;      // sync low, ID=0 (MPEG-4), layer 00, protection_absent 1
-    h[2] = static_cast<uint8_t>((profile << 6) | (c->sr_index << 2) | 0 |
-                                ((ch >> 2) & 1));
-    h[3] = static_cast<uint8_t>(((ch & 3) << 6) | ((frame_len >> 11) & 3));
-    h[4] = static_cast<uint8_t>((frame_len >> 3) & 0xFF);
-    h[5] = static_cast<uint8_t>(((frame_len & 7) << 5) | 0x1F);  // fullness hi
-    h[6] = 0xFC;      // fullness lo (0x7FF), 0 raw blocks
-
-    c->target_acc += c->bits_per_frame;
-    c->bits_spent += 8.0 * frame_len;
-
-    *out_size = frame_len;
-    return c->out;
-}
-
 const uint8_t* glint_aac_encode(glint_aac_t c, const int16_t** channel_data, int* out_size) {
     if (!c || !channel_data || !out_size || c->flushed) {
         if (out_size) *out_size = 0;
         return nullptr;
     }
+    double cur[2][kAacFrameLen];
     for (int chn = 0; chn < c->num_channels; chn++) {
-        double cur[kAacFrameLen];
         for (int i = 0; i < kAacFrameLen; i++) {
-            cur[i] = static_cast<double>(channel_data[chn][i]);
+            cur[chn][i] = static_cast<double>(channel_data[chn][i]);
         }
-        aac_mdct_long(c->prev[chn], cur, c->spec[chn]);
-        std::memcpy(c->prev[chn], cur, sizeof(cur));
     }
-    c->frames_in++;
-    return encode_block(c, out_size);
+    return encode_common(c, cur, out_size);
 }
 
 const uint8_t* glint_aac_encode_float(glint_aac_t c, const float** channel_data, int* out_size) {
@@ -313,16 +437,13 @@ const uint8_t* glint_aac_encode_float(glint_aac_t c, const float** channel_data,
         if (out_size) *out_size = 0;
         return nullptr;
     }
+    double cur[2][kAacFrameLen];
     for (int chn = 0; chn < c->num_channels; chn++) {
-        double cur[kAacFrameLen];
         for (int i = 0; i < kAacFrameLen; i++) {
-            cur[i] = static_cast<double>(channel_data[chn][i]) * 32768.0;
+            cur[chn][i] = static_cast<double>(channel_data[chn][i]) * 32768.0;
         }
-        aac_mdct_long(c->prev[chn], cur, c->spec[chn]);
-        std::memcpy(c->prev[chn], cur, sizeof(cur));
     }
-    c->frames_in++;
-    return encode_block(c, out_size);
+    return encode_common(c, cur, out_size);
 }
 
 const uint8_t* glint_aac_flush(glint_aac_t c, int* out_size) {
@@ -331,12 +452,12 @@ const uint8_t* glint_aac_flush(glint_aac_t c, int* out_size) {
         return nullptr;
     }
     c->flushed = 1;
-    double zeros[kAacFrameLen];
-    std::memset(zeros, 0, sizeof(zeros));
-    for (int chn = 0; chn < c->num_channels; chn++) {
-        aac_mdct_long(c->prev[chn], zeros, c->spec[chn]);
-    }
-    return encode_block(c, out_size);
+    // Two tail frames: (blk0, blk1) and (blk1, silence).
+    int n1 = emit_frame(c, 0, c->out);
+    push_block(c, nullptr, 0, 0);
+    int n2 = emit_frame(c, 0, c->out + n1);
+    *out_size = n1 + n2;
+    return c->out;
 }
 
 void glint_aac_destroy(glint_aac_t c) {
@@ -349,13 +470,14 @@ namespace {
 
 void shape_channel(glint_aac_context* c, int chn, int budget) {
     using namespace glint::aac;
+    const AacBandLayout& L = c->layout;
     AacChannelPlan& plan = c->plan[chn];
     const double* spec = c->spec[chn];
-    const int nb = plan.max_sfb;
+    const int nb = L.num_bands;
 
-    const double* mask = c->mask[chn];  // coded-domain masks from encode_block
+    const double* mask = c->mask[chn];  // coded-domain masks from emit_frame
     double noise[kMaxSfb];
-    aac_band_noise(plan, spec, c->sr_index, noise);
+    aac_band_noise(plan, spec, L, noise);
 
     double r0[kMaxSfb];
     double j_best = 0.0, total0 = 0.0, worst = 0.0;
@@ -388,12 +510,9 @@ void shape_channel(glint_aac_context* c, int chn, int budget) {
             }
         }
         if (w <= kShapeTarget) break;
-        // Amplify only the bands close to the worst offender. MP3 uses 0.25
-        // (6 dB) here, but its 128k reservoir gives shaping slack; AAC CBR at
-        // 128k has none, so a wide amplification front forces the gain anchor
-        // up 2+ steps (+3 dB total noise) per round and the noise guard
-        // rejects everything. Narrower rounds walk the same path in smaller,
-        // acceptable steps.
+        // Narrow rounds: AAC CBR has no reservoir slack, so a wide
+        // amplification front forces the gain anchor up several steps at
+        // once and every iterate gets rejected.
         double thresh = kShapeTarget > w * 0.5 ? kShapeTarget : w * 0.5;
 
         bool changed = false;
@@ -401,21 +520,15 @@ void shape_channel(glint_aac_context* c, int chn, int budget) {
             if (mask[b] <= 0.0) continue;
             double r = cur_noise[b] / mask[b];
             // Tier A: any band over the MASK is audible and must be fixed
-            // every round — otherwise a gain-anchor rise leaves near-mask
-            // bands newly audible and the per-band ceiling vetoes the whole
-            // iterate (measured as a total freeze at 128k).
-            // Tier B: below the mask, only the near-worst bands move, so the
-            // amplification front stays narrow.
+            // every round. Tier B: below the mask, only near-worst bands.
             if ((r > 1.0 || r >= thresh) && off[b] < kMaxSfOffset) {
-                off[b] += 2;  // 2 sf steps = ~3 dB finer, MP3's amplification grain
+                off[b] += 2;  // 2 sf steps = ~3 dB finer
                 was_amped[b] = true;
                 changed = true;
             } else if (r < kShapeTarget * 0.25 && off[b] > -kMaxSfOffset &&
                        !was_amped[b]) {
-                // Over-coded band (>=6 dB below the shaping target): donate
-                // bits by coarsening, so the gain anchor need not rise. MP3's
-                // loop could only amplify; AAC scalefactors go both ways.
-                // Hysteresis: never coarsen a band the loop had to rescue.
+                // Over-coded band donates bits by coarsening (hysteresis:
+                // never coarsen a band the loop had to rescue).
                 off[b] -= 2;
                 changed = true;
             }
@@ -423,9 +536,9 @@ void shape_channel(glint_aac_context* c, int chn, int budget) {
         if (!changed) break;
 
         AacChannelPlan cand;
-        aac_fit_channel(spec, c->sr_index, nb, shape_bits, off, cur.fit_gain, &cand);
+        aac_fit_channel(spec, L, shape_bits, off, cur.fit_gain, &cand);
         double cand_noise[kMaxSfb];
-        aac_band_noise(cand, spec, c->sr_index, cand_noise);
+        aac_band_noise(cand, spec, L, cand_noise);
         double j = 0.0, total = 0.0;
         bool band_ok = true;
         for (int b = 0; b < nb; b++) {
@@ -434,9 +547,7 @@ void shape_channel(glint_aac_context* c, int chn, int budget) {
                 double r = cand_noise[b] / mask[b];
                 j += r;
                 // No band may become audible that wasn't: below the mask
-                // (r < 1) noise placement is free — that freedom IS the
-                // shaping; a ceiling at the target instead of the mask
-                // measured as a near-total freeze at 128k.
+                // noise placement is free — that freedom IS the shaping.
                 double ceiling = 1.0 > r0[b] ? 1.0 : r0[b];
                 if (r > ceiling * 1.05) band_ok = false;
             }

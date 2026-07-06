@@ -725,8 +725,27 @@ afconvert are the yardsticks, vo-aacenc is the Shine-role baseline):
    256k −15.0 / 0.0% audible, SNR 50.6. The AAC path now beats glint's
    MP3 path outright (speech 256k: 41.9/−16.0 vs MP3 joint 38.0/−13.8).
    Remaining Apple gap at 128k: −3.05 vs −6.52.
-3. **Window switching + short blocks** (8×128 MDCT, start/stop windows,
-   scale_factor_grouping) — scheduler + lookahead ports from MP3.
+3. **Window switching + short blocks — DONE (2026-07-06).** All four
+   window sequences; 8×256 MDCTs over the centre region [448,1600);
+   attack-split grouping (≤3 groups: [0,s) [s,s+2) [s+2,8), s from the
+   attack sub-block ±4 window offset); band-layout abstraction
+   (AacBandLayout) makes short frames look like long ones to the
+   quantizer/sectioner (coded-order interleave group→sfb→window, the
+   MP3 reorder trick; sections never cross groups; sect_len esc 7/3-bit
+   vs 31/5-bit). Transient detector: 8 sub-block first-difference
+   energies vs rolling baseline (8×, fast-rise slow-fall), one-block
+   lookahead hold → encoder delay 2048; flush emits two tail frames.
+   Short frames are NOT psy-shaped and use the energy-only M/S rule
+   (t=0 in the product rule); START/STOP not shaped (MP3 lesson).
+   GLINT_AAC_FORCE_SHORT=1 forces all-short for diagnostics.
+   **Castanets 128k best: NMR +17.7 → −3.46, audible 13.4→3.1%;
+   256k +9.2 → −9.77.** Contenders on the same clip at 128k: LAME
+   +1.15, ffmpeg-native AAC +7.14, Apple −6.70/1.9%. Steady clips
+   improve-or-hold exactly (quartet byte-similar — scheduler never
+   fires; electronic gains 2.7 dB NMR from real transients; speech
+   +0.5 dB NMR, +0.4 SNR). Wire-validated: ffmpeg + CoreAudio decode
+   all transition sequences with zero errors; burst-train config added
+   to tests/test_aac.py.
 4. **TNS** — biggest LC feature vo-aacenc barely uses; speech/transients.
 5. **Bandwidth heuristic → psy-driven max_sfb** (current cutoffs are a
    placeholder table roughly tracking fdk defaults).

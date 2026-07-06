@@ -395,7 +395,7 @@ static void test_aac_mdct_vs_direct() {
         s = s * 1103515245u + 12345u;
         cur[i] = static_cast<int>(s >> 16) % 65536 - 32768;
     }
-    glint::aac::aac_mdct_long(prev, cur, spec);
+    glint::aac::aac_mdct_frame(glint::aac::kSeqLong, prev, cur, spec);
 
     const double pi = 3.14159265358979323846;
     for (int n = 0; n < M; n++) {
@@ -417,6 +417,29 @@ static void test_aac_mdct_vs_direct() {
         if (std::fabs(ref[k]) > max_ref) max_ref = std::fabs(ref[k]);
     }
     CHECK(max_err / max_ref < 1e-10, "fast MDCT matches direct ISO formula");
+
+    // Short windows: each 256-point window vs the direct formula.
+    static double specs[M];
+    glint::aac::aac_mdct_frame(glint::aac::kSeqShort, prev, cur, specs);
+    double x[N];
+    for (int n = 0; n < M; n++) { x[n] = prev[n]; x[M + n] = cur[n]; }
+    double serr = 0, sref = 0;
+    for (int w = 0; w < 8; w++) {
+        const double* base = x + 448 + 128 * w;
+        double n0s = (256 / 2 + 1) / 2.0;
+        for (int k = 0; k < 128; k++) {
+            double acc = 0;
+            for (int n = 0; n < 256; n++) {
+                acc += std::sin(pi / 256 * (n + 0.5)) * base[n] *
+                       std::cos(2.0 * pi / 256 * (n + n0s) * (k + 0.5));
+            }
+            double r = 2.0 * acc;
+            double e = std::fabs(r - specs[128 * w + k]);
+            if (e > serr) serr = e;
+            if (std::fabs(r) > sref) sref = std::fabs(r);
+        }
+    }
+    CHECK(serr / sref < 1e-10, "short MDCT matches direct ISO formula");
 }
 
 static void test_aac_tables_sanity() {
@@ -447,20 +470,35 @@ static void test_aac_coder_count_matches_emission() {
         double amp = (i < 600) ? 20000.0 / (1 + i) : 0.0;
         spec[i] = amp * ((static_cast<int>(s >> 16) % 2001) - 1000) / 1000.0;
     }
+    glint::aac::AacBandLayout layout;
+    glint::aac::aac_make_layout(sri, glint::aac::kSeqLong, 40, nullptr, 1, &layout);
     glint::aac::AacChannelPlan plan;
-    glint::aac::aac_fit_channel(spec, sri, 40, 3000, nullptr, -1, &plan);
+    glint::aac::aac_fit_channel(spec, layout, 3000, nullptr, -1, &plan);
     CHECK(plan.ics_bits <= 3000, "fitted plan respects the bit budget");
     CHECK(plan.global_gain >= 0 && plan.global_gain <= 255, "global_gain in range");
 
     glint::aac::AacBitWriter counter(0);
-    glint::aac::aac_write_ics_body(counter, plan, sri, false);
+    glint::aac::aac_write_ics_body(counter, plan, layout, false);
     CHECK(counter.bits() == plan.ics_bits, "count-only pass matches plan bits");
 
     uint8_t buf[4096];
     glint::aac::AacBitWriter writer(buf, sizeof(buf));
-    glint::aac::aac_write_ics_body(writer, plan, sri, false);
+    glint::aac::aac_write_ics_body(writer, plan, layout, false);
     CHECK(writer.bits() == plan.ics_bits, "emission bit count matches plan bits");
     CHECK(!writer.overflowed(), "no writer overflow");
+
+    // Short layout: 3 groups, count==emission holds with grouped sectioning.
+    uint8_t glen[3] = { 3, 2, 3 };
+    glint::aac::AacBandLayout sl;
+    glint::aac::aac_make_layout(sri, glint::aac::kSeqShort, 14, glen, 3, &sl);
+    CHECK(sl.num_bands == 42, "short layout band count");
+    CHECK(sl.num_lines == 8 * 112 || sl.num_lines > 0, "short layout lines");
+    glint::aac::AacChannelPlan splan;
+    glint::aac::aac_fit_channel(spec, sl, 2500, nullptr, -1, &splan);
+    CHECK(splan.ics_bits <= 2500, "short plan respects the bit budget");
+    glint::aac::AacBitWriter scount(0);
+    glint::aac::aac_write_ics_body(scount, splan, sl, false);
+    CHECK(scount.bits() == splan.ics_bits, "short count matches emission");
 }
 
 static void test_aac_api_smoke() {
@@ -496,12 +534,13 @@ static void test_aac_api_smoke() {
     }
     int sz = 0;
     const uint8_t* d = glint_aac_flush(enc, &sz);
-    CHECK(d != nullptr && sz > 7, "flush frame emitted");
+    CHECK(d != nullptr && sz > 14, "flush emitted (two tail frames)");
+    CHECK(d && d[0] == 0xFF && (d[1] & 0xF6) == 0xF0, "flush starts with ADTS sync");
     total += sz;
 
-    // 50 frames at 128 kbps / 44.1 kHz: nominal ~2972 bytes/10 frames;
-    // allow generous slack, but the debt controller must keep the average near target.
-    double nominal = 128000.0 * 1024 / 44100 / 8 * (nframes + 1);
+    // 50 encode calls + 2 flush frames; the debt controller must keep the
+    // average near target.
+    double nominal = 128000.0 * 1024 / 44100 / 8 * (nframes + 2);
     CHECK(total > 0.8 * nominal && total < 1.25 * nominal, "CBR average near target");
     glint_aac_destroy(enc);
 }

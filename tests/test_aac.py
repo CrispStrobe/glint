@@ -33,8 +33,10 @@ def write_wav(path, rate, data):
         w.writeframes(pcm.tobytes())
 
 
-def gen_signal(rate, seconds, stereo):
-    """Deterministic tones + filtered noise, moderately hard to encode."""
+def gen_signal(rate, seconds, stereo, transient=False):
+    """Deterministic tones + filtered noise, moderately hard to encode.
+    transient=True adds a click/burst train (exercises the short-block
+    scheduler and START/SHORT/STOP transitions on the wire)."""
     n = int(rate * seconds)
     t = np.arange(n) / rate
     rng = np.random.default_rng(20260706)
@@ -46,6 +48,12 @@ def gen_signal(rate, seconds, stereo):
     noise = rng.standard_normal(n) * 0.02
     # crude lowpass on the noise
     noise = np.convolve(noise, np.ones(8) / 8.0, mode="same")
+    if transient:
+        sig = sig * 0.25
+        period = int(0.19 * rate)
+        for start in range(period // 2, n - 600, period):
+            burst = rng.standard_normal(500) * np.exp(-np.arange(500) / 60.0)
+            sig[start:start + 500] += 0.6 * burst
     left = sig + noise
     if not stereo:
         return left[:, None] * 0.9
@@ -94,24 +102,26 @@ def main():
     keep = "--keep" in sys.argv
 
     configs = [
-        # (rate, stereo, kbps, extra_args, snr_floor)
+        # (rate, stereo, kbps, extra_args, snr_floor, transient)
         # floors ~10 dB below measured at introduction (2026-07: 40/48/41/37/40)
-        (44100, True, 128, [], 30.0),
-        (44100, True, 256, [], 37.0),
-        (44100, False, 64, ["-m", "mono"], 30.0),
-        (22050, True, 48, [], 27.0),
-        (48000, True, 128, [], 30.0),
+        (44100, True, 128, [], 30.0, False),
+        (44100, True, 256, [], 37.0, False),
+        (44100, False, 64, ["-m", "mono"], 30.0, False),
+        (22050, True, 48, [], 27.0, False),
+        (48000, True, 128, [], 30.0, False),
+        # burst train: exercises the short-block scheduler (START/SHORT/STOP)
+        (44100, True, 192, [], 20.0, True),
     ]
 
     tmpdir = tempfile.mkdtemp(prefix="glint_aac_test_")
     failures = []
-    for rate, stereo, kbps, extra, floor in configs:
-        tag = f"{rate}Hz_{'st' if stereo else 'mo'}_{kbps}k"
+    for rate, stereo, kbps, extra, floor, transient in configs:
+        tag = f"{rate}Hz_{'st' if stereo else 'mo'}_{kbps}k{'_tr' if transient else ''}"
         src = os.path.join(tmpdir, f"src_{tag}.wav")
         enc = os.path.join(tmpdir, f"enc_{tag}.aac")
         dec_wav = os.path.join(tmpdir, f"dec_{tag}.wav")
 
-        ref = gen_signal(rate, 6.0, stereo)
+        ref = gen_signal(rate, 6.0, stereo, transient)
         write_wav(src, rate, ref)
 
         r = subprocess.run([cli, "-b", str(kbps)] + extra + [src, enc],
