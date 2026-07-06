@@ -33,7 +33,8 @@ using namespace glint::aac_tables;
 
 constexpr int kAdtsHeaderBits = 56;   // protection_absent = 1
 #ifdef GLINT_SMALL_BUFFERS
-constexpr int kMaxOutBytes = 4096;    // two tail frames <= ~3.2 KB at 44.1/48k
+// Two frames at the 6144-bit/ch cap: 2 * (7 + 2*6144/8) = 3086 bytes.
+constexpr int kMaxOutBytes = 3328;
 #else
 constexpr int kMaxOutBytes = 8192;    // flush emits two frames back-to-back
 #endif
