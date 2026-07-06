@@ -32,8 +32,11 @@ impl Encoder {
                 num_channels: channels as i32,
                 mode,
                 bitrate: bitrate as i32,
-                path: 0, // default
-                simd: 0, // auto
+                path: 0,    // default
+                simd: 0,    // auto
+                quality: 1, // NORMAL
+                vbr: 0,
+                vbr_quality: 0,
             };
 
             let handle = glint_create(&cfg);
@@ -140,6 +143,118 @@ impl Drop for Encoder {
             glint_destroy(self.handle);
         }
     }
+}
+
+/// AAC-LC encoder (ADTS output). Same interleaved-PCM conventions as
+/// [`Encoder`]; one `encode` call consumes `samples_per_frame()` (1024)
+/// samples per channel and returns one ADTS frame. `flush` returns the two
+/// tail frames and must be called at end of stream (encoder delay: 2048
+/// samples; the first frame is a silence priming frame).
+pub struct AacEncoder {
+    handle: glint_t,
+    samples_per_frame: usize,
+    channels: usize,
+}
+
+unsafe impl Send for AacEncoder {}
+
+impl AacEncoder {
+    /// quality: 0 = speed, 1 = normal (default), 2 = best.
+    pub fn new(
+        sample_rate: u32,
+        channels: u32,
+        bitrate: u32,
+        quality: u32,
+    ) -> Result<Self, &'static str> {
+        unsafe {
+            let cfg = glint_aac_config {
+                sample_rate: sample_rate as i32,
+                num_channels: channels as i32,
+                bitrate: bitrate as i32,
+                quality: quality as i32,
+                reserved: [0; 6],
+            };
+            let handle = glint_aac_create(&cfg);
+            if handle.is_null() {
+                return Err("glint_aac_create returned null");
+            }
+            let spf = glint_aac_samples_per_frame(handle) as usize;
+            Ok(AacEncoder { handle, samples_per_frame: spf, channels: channels as usize })
+        }
+    }
+
+    pub fn samples_per_frame(&self) -> usize {
+        self.samples_per_frame
+    }
+
+    pub fn channels(&self) -> usize {
+        self.channels
+    }
+
+    /// Encode one frame of interleaved 16-bit PCM (zero-padded if short).
+    pub fn encode(&mut self, pcm: &[i16]) -> Vec<u8> {
+        let spf = self.samples_per_frame;
+        let ch = self.channels;
+        let mut channel_bufs: Vec<Vec<i16>> = (0..ch).map(|_| vec![0i16; spf]).collect();
+        for (i, &sample) in pcm.iter().enumerate() {
+            let c = i % ch;
+            let s = i / ch;
+            if s < spf {
+                channel_bufs[c][s] = sample;
+            }
+        }
+        let ptrs: Vec<*const i16> = channel_bufs.iter().map(|b| b.as_ptr()).collect();
+        let mut out_size: i32 = 0;
+        unsafe {
+            let data = glint_aac_encode(self.handle, ptrs.as_ptr(), &mut out_size);
+            if data.is_null() || out_size <= 0 {
+                return Vec::new();
+            }
+            slice::from_raw_parts(data, out_size as usize).to_vec()
+        }
+    }
+
+    /// Flush the encoder, returning the two tail ADTS frames.
+    pub fn flush(&mut self) -> Vec<u8> {
+        let mut out_size: i32 = 0;
+        unsafe {
+            let data = glint_aac_flush(self.handle, &mut out_size);
+            if data.is_null() || out_size <= 0 {
+                return Vec::new();
+            }
+            slice::from_raw_parts(data, out_size as usize).to_vec()
+        }
+    }
+}
+
+impl Drop for AacEncoder {
+    fn drop(&mut self) {
+        unsafe {
+            glint_aac_destroy(self.handle);
+        }
+    }
+}
+
+/// Convenience function: encode an entire buffer of interleaved 16-bit PCM
+/// to AAC (ADTS) in one call. quality: 0 speed / 1 normal / 2 best.
+pub fn encode_pcm_aac(
+    pcm: &[i16],
+    sample_rate: u32,
+    channels: u32,
+    bitrate: u32,
+    quality: u32,
+) -> Vec<u8> {
+    let mut enc = match AacEncoder::new(sample_rate, channels, bitrate, quality) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+    let frame_len = enc.samples_per_frame() * enc.channels();
+    let mut aac = Vec::new();
+    for chunk in pcm.chunks(frame_len) {
+        aac.extend(enc.encode(chunk));
+    }
+    aac.extend(enc.flush());
+    aac
 }
 
 /// Convenience function: encode an entire buffer of interleaved 16-bit PCM

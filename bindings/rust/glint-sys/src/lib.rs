@@ -13,6 +13,21 @@ pub struct glint_config {
     pub bitrate: c_int,
     pub path: c_int,
     pub simd: c_int,
+    // Missing from the original binding — the C struct has had these since
+    // the quality/VBR features landed; omitting them made glint_create read
+    // uninitialized memory. Keep in sync with include/glint/glint.h.
+    pub quality: c_int,
+    pub vbr: c_int,
+    pub vbr_quality: c_int,
+}
+
+#[repr(C)]
+pub struct glint_aac_config {
+    pub sample_rate: c_int,
+    pub num_channels: c_int,
+    pub bitrate: c_int,
+    pub quality: c_int,
+    pub reserved: [c_int; 6], // must be zero
 }
 
 extern "C" {
@@ -36,4 +51,21 @@ extern "C" {
     ) -> *const u8;
     pub fn glint_flush(enc: glint_t, out_size: *mut c_int) -> *const u8;
     pub fn glint_destroy(enc: glint_t);
+
+    // AAC-LC encoder (since 0.8)
+    pub fn glint_version() -> c_int;
+    pub fn glint_aac_create(cfg: *const glint_aac_config) -> glint_t;
+    pub fn glint_aac_samples_per_frame(enc: glint_t) -> c_int;
+    pub fn glint_aac_encode(
+        enc: glint_t,
+        channel_data: *const *const i16,
+        out_size: *mut c_int,
+    ) -> *const u8;
+    pub fn glint_aac_encode_float(
+        enc: glint_t,
+        channel_data: *const *const f32,
+        out_size: *mut c_int,
+    ) -> *const u8;
+    pub fn glint_aac_flush(enc: glint_t, out_size: *mut c_int) -> *const u8;
+    pub fn glint_aac_destroy(enc: glint_t);
 }

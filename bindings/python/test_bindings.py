@@ -205,6 +205,48 @@ class TestNumpy(unittest.TestCase):
         self.assertGreater(len(mp3), 1000)
 
 
+class TestAacEncoder(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.build = _build_dir()
+        lib_path = glint._find_library(cls.build)
+        if lib_path is None:
+            raise unittest.SkipTest("libglint not found")
+        lib = glint.load_library(cls.build)
+        if not hasattr(lib, "glint_aac_create"):
+            raise unittest.SkipTest("libglint has no AAC support")
+
+    def test_aac_stereo_roundtrip(self):
+        import math
+        enc = glint.AacEncoder(sample_rate=44100, channels=2, bitrate=128,
+                               lib_path=self.build)
+        self.assertEqual(enc.samples_per_frame, 1024)
+        spf = enc.samples_per_frame
+        out = b""
+        for f in range(20):
+            frame = []
+            for i in range(spf):
+                v = int(12000 * math.sin(2 * math.pi * 440 * (f * spf + i) / 44100))
+                frame.extend((v, v // 2))
+            out += enc.encode(frame)
+        out += enc.flush()
+        enc.close()
+        # 20 encode calls + 2 flush frames, each an ADTS frame
+        self.assertGreater(len(out), 20 * 100)
+        self.assertEqual(out[0], 0xFF)
+        self.assertEqual(out[1] & 0xF6, 0xF0)
+
+    def test_aac_invalid_config(self):
+        with self.assertRaises(glint.ConfigError):
+            glint.AacEncoder(sample_rate=12345, channels=2, bitrate=128,
+                             lib_path=self.build)
+
+    def test_version(self):
+        lib = glint.load_library(self.build)
+        v = lib.glint_version()
+        self.assertGreaterEqual(v, (0 << 16) | (8 << 8))
+
+
 if __name__ == "__main__":
     # Strip our custom argv before unittest parses it
     build = _build_dir()

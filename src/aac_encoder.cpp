@@ -413,6 +413,10 @@ const uint8_t* encode_common(glint_aac_context* c,
 
 extern "C" {
 
+int glint_version(void) {
+    return (0 << 16) | (8 << 8) | 0;  // 0.8.0
+}
+
 glint_aac_t glint_aac_create(const struct glint_aac_config* cfg) {
     if (!cfg) return nullptr;
     int sri = samplerate_index(cfg->sample_rate);

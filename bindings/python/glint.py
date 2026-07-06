@@ -121,7 +121,22 @@ class _GlintConfig(ctypes.Structure):
         ("path", ctypes.c_int),
         ("simd", ctypes.c_int),
         ("quality", ctypes.c_int),
+        # vbr fields exist in the C struct; omitting them made glint_create
+        # read uninitialized memory. Keep in sync with include/glint/glint.h.
+        ("vbr", ctypes.c_int),
+        ("vbr_quality", ctypes.c_int),
     ]
+
+class _GlintAacConfig(ctypes.Structure):
+    # Keep in sync with struct glint_aac_config (zero-init: reserved must be 0)
+    _fields_ = [
+        ("sample_rate", ctypes.c_int),
+        ("num_channels", ctypes.c_int),
+        ("bitrate", ctypes.c_int),
+        ("quality", ctypes.c_int),
+        ("reserved", ctypes.c_int * 6),
+    ]
+
 
 # Callback type: void (*glint_write_cb)(const uint8_t* data, int size, void* user_data)
 _glint_write_cb = ctypes.CFUNCTYPE(None, ctypes.POINTER(ctypes.c_uint8),
@@ -157,6 +172,27 @@ def _setup_signatures(lib):
     lib.glint_destroy.argtypes = [_glint_t]
     lib.glint_destroy.restype = None
 
+    # AAC API (present since 0.8; guard for older shared libraries)
+    try:
+        lib.glint_version.argtypes = []
+        lib.glint_version.restype = ctypes.c_int
+        lib.glint_aac_create.argtypes = [ctypes.POINTER(_GlintAacConfig)]
+        lib.glint_aac_create.restype = _glint_t
+        lib.glint_aac_samples_per_frame.argtypes = [_glint_t]
+        lib.glint_aac_samples_per_frame.restype = ctypes.c_int
+        lib.glint_aac_encode.argtypes = [
+            _glint_t,
+            ctypes.POINTER(ctypes.POINTER(ctypes.c_int16)),
+            ctypes.POINTER(ctypes.c_int),
+        ]
+        lib.glint_aac_encode.restype = ctypes.POINTER(ctypes.c_uint8)
+        lib.glint_aac_flush.argtypes = [_glint_t, ctypes.POINTER(ctypes.c_int)]
+        lib.glint_aac_flush.restype = ctypes.POINTER(ctypes.c_uint8)
+        lib.glint_aac_destroy.argtypes = [_glint_t]
+        lib.glint_aac_destroy.restype = None
+    except AttributeError:
+        pass
+
 
 # ---------------------------------------------------------------------------
 # Constants (mirror the C enums)
@@ -166,6 +202,10 @@ MODE_MONO = 0
 MODE_DUAL = 1
 MODE_JOINT = 2
 MODE_STEREO = 3
+
+QUALITY_SPEED = 0
+QUALITY_NORMAL = 1
+QUALITY_BEST = 2
 
 PATH_DEFAULT = 0
 PATH_DOUBLE = 1
@@ -403,6 +443,75 @@ class Encoder:
 
         out_size = ctypes.c_int(0)
         ptr = self._lib.glint_encode(
+            self._handle,
+            ctypes.cast(ch_ptrs, ctypes.POINTER(ctypes.POINTER(ctypes.c_int16))),
+            ctypes.byref(out_size),
+        )
+        if ptr and out_size.value > 0:
+            return ctypes.string_at(ptr, out_size.value)
+        return b""
+
+
+class AacEncoder(Encoder):
+    """AAC-LC encoder (ADTS output). Same PCM input conventions as Encoder.
+
+    One encode() call consumes samples_per_frame (1024) samples per channel
+    and returns one ADTS frame (the first call returns a silence priming
+    frame; encoder delay is 2048 samples). flush() returns the two tail
+    frames and MUST be called at end of stream.
+    """
+
+    def __init__(
+        self,
+        sample_rate: int = 44100,
+        channels: int = 2,
+        bitrate: int = 128,
+        quality: int = QUALITY_NORMAL,
+        lib_path: Optional[str] = None,
+    ):
+        self._lib = load_library(lib_path)
+        self._handle = None
+        self._write_cb_ref = None
+
+        if not hasattr(self._lib, "glint_aac_create"):
+            raise GlintError("loaded libglint has no AAC support (< 0.8)")
+
+        cfg = _GlintAacConfig(
+            sample_rate=sample_rate,
+            num_channels=channels,
+            bitrate=bitrate,
+            quality=quality,
+        )
+        handle = self._lib.glint_aac_create(ctypes.byref(cfg))
+        if not handle:
+            raise ConfigError(
+                f"glint_aac_create failed (sr={sample_rate}, ch={channels}, "
+                f"br={bitrate})"
+            )
+        self._handle = handle
+        self._channels = channels
+        self._samples_per_frame = self._lib.glint_aac_samples_per_frame(handle)
+
+    def flush(self) -> bytes:
+        self._check_alive()
+        out_size = ctypes.c_int(0)
+        ptr = self._lib.glint_aac_flush(self._handle, ctypes.byref(out_size))
+        if ptr and out_size.value > 0:
+            return ctypes.string_at(ptr, out_size.value)
+        return b""
+
+    def close(self):
+        if self._handle:
+            self._lib.glint_aac_destroy(self._handle)
+            self._handle = None
+
+    def _do_encode(self, channel_arrays):
+        nch = len(channel_arrays)
+        ch_ptrs = (ctypes.POINTER(ctypes.c_int16) * nch)()
+        for i, arr in enumerate(channel_arrays):
+            ch_ptrs[i] = ctypes.cast(arr, ctypes.POINTER(ctypes.c_int16))
+        out_size = ctypes.c_int(0)
+        ptr = self._lib.glint_aac_encode(
             self._handle,
             ctypes.cast(ch_ptrs, ctypes.POINTER(ctypes.POINTER(ctypes.c_int16))),
             ctypes.byref(out_size),

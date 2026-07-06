@@ -5,6 +5,8 @@ import 'dart:ffi';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:ffi/ffi.dart';
+
 // --- FFI type definitions ---
 
 final class GlintConfig extends Struct {
@@ -25,6 +27,35 @@ final class GlintConfig extends Struct {
 
   @Int32()
   external int simd;
+
+  // quality/vbr fields exist in the C struct; omitting them made
+  // glint_create read uninitialized memory. Keep in sync with glint.h.
+  @Int32()
+  external int quality;
+
+  @Int32()
+  external int vbr;
+
+  @Int32()
+  external int vbrQuality;
+}
+
+/// Mirror of struct glint_aac_config (zero-init the reserved tail).
+final class GlintAacConfig extends Struct {
+  @Int32()
+  external int sampleRate;
+
+  @Int32()
+  external int numChannels;
+
+  @Int32()
+  external int bitrate;
+
+  @Int32()
+  external int quality;
+
+  @Array(6)
+  external Array<Int32> reserved;
 }
 
 // Native function signatures
@@ -52,6 +83,9 @@ typedef GlintFlush = Pointer<Uint8> Function(Pointer<Void> enc, Pointer<Int32> o
 
 typedef GlintDestroyNative = Void Function(Pointer<Void> enc);
 typedef GlintDestroy = void Function(Pointer<Void> enc);
+
+typedef GlintAacCreateNative = Pointer<Void> Function(Pointer<GlintAacConfig> cfg);
+typedef GlintAacCreate = Pointer<Void> Function(Pointer<GlintAacConfig> cfg);
 
 // --- Library loader ---
 
@@ -135,6 +169,8 @@ class GlintEncoder {
     cfgPtr.ref.bitrate = bitrate;
     cfgPtr.ref.path = 0;
     cfgPtr.ref.simd = 0;
+    cfgPtr.ref.quality = 1; // NORMAL
+    // vbr fields left zero (CBR); calloc zeroed the struct.
 
     _handle = create(cfgPtr);
     calloc.free(cfgPtr);
@@ -285,3 +321,123 @@ class _Calloc {
 }
 
 final calloc = _Calloc();
+
+
+/// AAC-LC encoder (ADTS output). Same interleaved-PCM conventions as
+/// [GlintEncoder]; one [encode] call consumes [samplesPerFrame] (1024)
+/// samples per channel and returns one ADTS frame. [flush] returns the two
+/// tail frames and must be called at end of stream (encoder delay: 2048
+/// samples; the first frame is a silence priming frame).
+class GlintAacEncoder {
+  late final DynamicLibrary _lib;
+  late final Pointer<Void> _handle;
+  late final int samplesPerFrame;
+  final int channels;
+
+  late final GlintEncode _aacEncode;
+  late final GlintFlush _aacFlush;
+  late final GlintDestroy _aacDestroy;
+
+  bool _disposed = false;
+
+  /// [quality]: 0 = speed, 1 = normal (default), 2 = best.
+  GlintAacEncoder({
+    int sampleRate = 44100,
+    int channels = 2,
+    int bitrate = 128,
+    int quality = 1,
+  }) : channels = channels {
+    _lib = _loadLibrary();
+
+    final create = _lib
+        .lookupFunction<GlintAacCreateNative, GlintAacCreate>('glint_aac_create');
+    final spfFn = _lib.lookupFunction<GlintSamplesPerFrameNative,
+        GlintSamplesPerFrame>('glint_aac_samples_per_frame');
+    _aacEncode =
+        _lib.lookupFunction<GlintEncodeNative, GlintEncode>('glint_aac_encode');
+    _aacFlush =
+        _lib.lookupFunction<GlintFlushNative, GlintFlush>('glint_aac_flush');
+    _aacDestroy =
+        _lib.lookupFunction<GlintDestroyNative, GlintDestroy>('glint_aac_destroy');
+
+    final cfgPtr = calloc<GlintAacConfig>(); // calloc zeroes reserved[]
+    cfgPtr.ref.sampleRate = sampleRate;
+    cfgPtr.ref.numChannels = channels;
+    cfgPtr.ref.bitrate = bitrate;
+    cfgPtr.ref.quality = quality;
+
+    _handle = create(cfgPtr);
+    calloc.free(cfgPtr);
+
+    if (_handle == nullptr) {
+      throw StateError('glint_aac_create returned null');
+    }
+    samplesPerFrame = spfFn(_handle);
+  }
+
+  /// Encode one frame of interleaved 16-bit PCM samples.
+  Uint8List encode(Int16List pcm) {
+    _checkNotDisposed();
+
+    final channelPtrs = calloc<Pointer<Int16>>(channels);
+    final buffers = <Pointer<Int16>>[];
+    for (var ch = 0; ch < channels; ch++) {
+      final buf = calloc<Int16>(samplesPerFrame);
+      buffers.add(buf);
+      channelPtrs[ch] = buf;
+      for (var s = 0;
+          s < samplesPerFrame && (s * channels + ch) < pcm.length;
+          s++) {
+        buf[s] = pcm[s * channels + ch];
+      }
+    }
+
+    final outSizePtr = calloc<Int32>();
+    final result = _aacEncode(_handle, channelPtrs, outSizePtr);
+    final outSize = outSizePtr.value;
+
+    Uint8List output;
+    if (result == nullptr || outSize <= 0) {
+      output = Uint8List(0);
+    } else {
+      output = Uint8List.fromList(result.asTypedList(outSize));
+    }
+
+    for (final buf in buffers) {
+      calloc.free(buf);
+    }
+    calloc.free(channelPtrs);
+    calloc.free(outSizePtr);
+    return output;
+  }
+
+  /// Flush the encoder, returning the two tail ADTS frames.
+  Uint8List flush() {
+    _checkNotDisposed();
+    final outSizePtr = calloc<Int32>();
+    final result = _aacFlush(_handle, outSizePtr);
+    final outSize = outSizePtr.value;
+    Uint8List output;
+    if (result == nullptr || outSize <= 0) {
+      output = Uint8List(0);
+    } else {
+      output = Uint8List.fromList(result.asTypedList(outSize));
+    }
+    calloc.free(outSizePtr);
+    return output;
+  }
+
+  /// Destroy the encoder and free native resources.
+  void dispose() {
+    if (!_disposed) {
+      _aacDestroy(_handle);
+      _disposed = true;
+    }
+  }
+
+  void _checkNotDisposed() {
+    if (_disposed) {
+      throw StateError('GlintAacEncoder has been disposed');
+    }
+  }
+}

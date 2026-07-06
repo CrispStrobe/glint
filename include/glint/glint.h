@@ -102,13 +102,20 @@ void           glint_destroy(glint_t enc);
 
 typedef struct glint_aac_context* glint_aac_t;
 
+// ZERO-INITIALIZE this struct before filling it (memset or `= {0}`): the
+// reserved tail lets future releases add options without breaking the ABI,
+// and zeroed reserved fields select defaults.
 struct glint_aac_config {
     int sample_rate;
     int num_channels;
     int bitrate;        // kbps
     enum glint_quality quality;  // SPEED = no noise shaping; NORMAL/BEST = psy
                                  // NMR shaping loop (BEST iterates further)
+    int reserved[6];    // must be zero
 };
+
+// Library version as (major << 16) | (minor << 8) | patch.
+int            glint_version(void);
 
 glint_aac_t    glint_aac_create(const struct glint_aac_config* cfg);
 int            glint_aac_samples_per_frame(glint_aac_t enc);
