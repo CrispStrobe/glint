@@ -31,6 +31,17 @@ namespace aac {
 double aac_compute_masks(const SpecT* spec, int sr_index, int max_sfb,
                          double emax_ref, double* mask, bool tonal);
 
+struct AacBandLayout;
+
+// Short-frame masks: per (group, sfb) band of a kSeqShort layout, spreading
+// only WITHIN each group (the model has no temporal masking across groups —
+// the MP3 short-mask lesson: don't let it trade across windows). Flat -14 dB
+// offset (no tonality: short windows are too coarse to estimate flatness).
+// emax_ref/return: running max in the SHORT band-energy domain — keep it
+// separate from the long-frame running max (different window scaling).
+double aac_compute_masks_short(const SpecT* spec, const AacBandLayout& layout,
+                               int sr_index, double emax_ref, double* mask);
+
 }  // namespace aac
 }  // namespace glint
 

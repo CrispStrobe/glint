@@ -97,6 +97,7 @@ struct glint_aac_context {
     double bits_spent;
 
     double emax_run;                // running max band energy (ATH calibration)
+    double emax_run_short;          // separate domain for short-frame masks
 
     int frames_in;                  // input blocks consumed
     int flushed;
@@ -145,7 +146,8 @@ double band_energy(const SpecT* spec, const AacBandLayout& L, int b) {
 // In M/S bands BOTH channels shape against t = min(maskL, maskR): noise in M
 // or S lands in decoded L and R (l = m+s, r = m-s), so the side channel must
 // never be shaped against a mask the quieter original channel does not have.
-void decide_ms(glint_aac_context* c, const double* maskL, const double* maskR) {
+void decide_ms(glint_aac_context* c, const double* maskL, const double* maskR,
+               bool masked_rule) {
     const AacBandLayout& L = c->layout;
     int n_ms = 0;
     for (int b = 0; b < L.num_bands; b++) {
@@ -182,9 +184,12 @@ void decide_ms(glint_aac_context* c, const double* maskL, const double* maskR) {
 #endif
         // tm stays in the mask (spec^2) domain for storage; t is rescaled
         // into the energy domain only for the product-rule comparison.
+        // masked_rule=false (short frames): the energy-only rule decides —
+        // the masked rule measured -0.10 ODG on transient-dense music —
+        // but the masks still flow to the allocator via c->mask.
         double tm = 0.0;
         if (maskL && maskR) tm = maskL[b] < maskR[b] ? maskL[b] : maskR[b];
-        double t = tm / mask_to_e;
+        double t = masked_rule ? tm / mask_to_e : 0.0;
         if ((t + eM) * (t + eS) < (t + eL) * (t + eR)) {
             c->ms_used[b] = 1;
             n_ms++;
@@ -360,6 +365,19 @@ int emit_frame(glint_aac_context* c, int next_attack, uint8_t* out) {
             if (e1 > c->emax_run) c->emax_run = e1;
             mr = maskR;
         }
+    } else if (c->quality >= GLINT_QUALITY_NORMAL) {
+        // Short-frame masks (per-group spreading): enables the masked M/S
+        // rule and per-(group,band) allocation on transient frames.
+        double e0 = aac_compute_masks_short(c->spec[0], L, c->sr_index,
+                                            c->emax_run_short, maskL);
+        if (e0 > c->emax_run_short) c->emax_run_short = e0;
+        ml = maskL;
+        if (ch == 2) {
+            double e1 = aac_compute_masks_short(c->spec[1], L, c->sr_index,
+                                                c->emax_run_short, maskR);
+            if (e1 > c->emax_run_short) c->emax_run_short = e1;
+            mr = maskR;
+        }
     }
 
     // TNS BEFORE M/S: the decoder recombines mid/side first and then runs
@@ -397,10 +415,12 @@ int emit_frame(glint_aac_context* c, int next_attack, uint8_t* out) {
     }
 
     if (ch == 2) {
-        decide_ms(c, ml, mr);
+        decide_ms(c, ml, mr, seq != kSeqShort);
         if (c->ms_present == 1) fixed_overhead += L.num_bands;  // ms_used bits
     } else {
-        for (int b = 0; b < L.num_bands; b++) c->mask[0][b] = static_cast<float>(maskL[b]);
+        for (int b = 0; b < L.num_bands; b++) {
+            c->mask[0][b] = static_cast<float>(ml ? maskL[b] : 0.0);
+        }
     }
 
     int spend = static_cast<int>(avail) - fixed_overhead;
@@ -424,26 +444,37 @@ int emit_frame(glint_aac_context* c, int next_attack, uint8_t* out) {
         // masks mislead on decay tails (castanets ODG -0.01 -> -0.23 when
         // allocated directly there; the START/STOP lesson again), or (b)
         // below ~56 kbps/ch where the walk measured better (64k mono).
-        const bool direct = shape && !c->vbr &&
-                            c->frames_since_short >= 26 &&
-                            (c->bitrate_bps / ch) >= 56000;
-        if (direct) {
-            aac_fit_channel_masked(c->spec[0], L, c->mask[0], budget0, &c->plan[0]);
+        const bool rate_ok = (c->bitrate_bps / ch) >= 56000;
+        // Hard post-transient gate: for < 26 frames after a short the WALK
+        // is the better tool (a graduated alpha derate was tried and lost
+        // everywhere — a derated allocator does nothing, the walk works).
+        const bool direct = shape && !c->vbr && rate_ok &&
+                            c->frames_since_short >= 26;
+        // Short frames: per-group masked allocation (no walk exists there;
+        // the alternative is the flat budget fit).
+        const bool direct_s = (c->quality >= GLINT_QUALITY_NORMAL) &&
+                              !c->vbr && seq == kSeqShort && rate_ok;
+        if (direct || direct_s) {
+            aac_fit_channel_masked(c->spec[0], L, c->mask[0], budget0, 1.0,
+                                   &c->plan[0]);
         } else {
             aac_fit_channel(c->spec[0], L, budget0, nullptr, -1, gf, &c->plan[0]);
             if (shape) shape_channel(c, 0, budget0);
         }
         int budget1 = spend - c->plan[0].ics_bits;  // leftover flows to ch 1
-        if (direct) {
-            aac_fit_channel_masked(c->spec[1], L, c->mask[1], budget1, &c->plan[1]);
+        if (direct || direct_s) {
+            aac_fit_channel_masked(c->spec[1], L, c->mask[1], budget1, 1.0,
+                                   &c->plan[1]);
         } else {
             aac_fit_channel(c->spec[1], L, budget1, nullptr, -1, gf, &c->plan[1]);
             if (shape) shape_channel(c, 1, budget1);
         }
     } else {
-        if (shape && !c->vbr && c->frames_since_short >= 26 &&
-            (c->bitrate_bps / ch) >= 56000) {
-            aac_fit_channel_masked(c->spec[0], L, c->mask[0], spend, &c->plan[0]);
+        if (!c->vbr && (c->bitrate_bps / ch) >= 56000 &&
+            ((shape && c->frames_since_short >= 26) ||
+             (c->quality >= GLINT_QUALITY_NORMAL && seq == kSeqShort))) {
+            aac_fit_channel_masked(c->spec[0], L, c->mask[0], spend, 1.0,
+                                   &c->plan[0]);
         } else {
             aac_fit_channel(c->spec[0], L, spend, nullptr, -1,
                             c->vbr ? c->vbr_gain_floor : 0, &c->plan[0]);

@@ -914,6 +914,30 @@ from a flat start). Two experiments:
   synthetics for masked placement — floors are decode sanity, not
   quality gates).
 
+## A6. Shaped short frames — DONE (2026-07-06)
+
+Short frames were the last flat-quantized path. Added
+aac_compute_masks_short (per-group Schroeder spreading over the short
+sfbs, flat −14 dB offset — no tonality at 128-line resolution; energies
+normalized per window inside the model, returned in the band domain;
+SEPARATE emax_run_short domain) and ran the direct allocator on short
+frames with its own tilt kAlphaS.
+Measured decisions:
+- kAlphaS = 0.2 (kAlphaL stays 0.6): 0.35+ dumped noise onto the tonal
+  background INSIDE short frames — castanets ODG fine but the synthetic
+  burst-train SNR collapsed 26→15 dB and electronic ODG dipped; 0.2
+  keeps nearly all the NMR win with burst SNR 23.6.
+- The masked M/S rule on shorts was suspected for an electronic ODG dip
+  and DISENTANGLED: it was innocent (energy rule kept anyway — masks
+  still flow to the allocator). The dip traced to the long-frame
+  transient gate, and a graduated alpha derate (scale by fss/26) LOST
+  everywhere — a derated allocator does nothing while the walk works,
+  so the hard >= 26-frame gate stays with the walk as fallback.
+Final (128k best vs pre-shorts): castanets NMR −8.40→−8.45, audible
+0.9→0.8, ODG 0.00 (transparent); electronic −4.28→−4.34, aud 8.7→8.6;
+speech −3.55→−3.64, p95 2.42→2.11, aud 12.6→11.8; quartet −5.84,
+aud 6.9, ODG −0.38; speech-256 −17.03. All suites green.
+
 ## A2c. Embedded validation harness — DONE (2026-07-06)
 
 embedded/: shared FPU-free bench core; QEMU mps2-an385 semihosted run

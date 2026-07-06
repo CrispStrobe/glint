@@ -138,9 +138,11 @@ void aac_band_noise(const AacChannelPlan& plan, const SpecT* spec,
 // amplify/de-amplify walk, which measured ~5 dB short of the noise~mask
 // allocation across the whole spectrum at 128k. `mask` is in the CODED
 // spec domain (same as aac_band_noise); tns must be set in *plan.
+// alpha_scale in [0,1] derates the mask-derived tilt (graduated trust:
+// post-transient frames pass ~0, steady frames 1).
 void aac_fit_channel_masked(const SpecT* spec, const AacBandLayout& layout,
                             const float* mask, int budget_bits,
-                            AacChannelPlan* plan);
+                            double alpha_scale, AacChannelPlan* plan);
 
 // Emit ics_info / individual_channel_stream. `include_ics_info` follows the
 // wire layout: true for SCE (and CPE with common_window=0), false for the two

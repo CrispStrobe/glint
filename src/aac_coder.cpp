@@ -549,7 +549,7 @@ void aac_fit_channel(const SpecT* spec, const AacBandLayout& L,
 
 void aac_fit_channel_masked(const SpecT* spec, const AacBandLayout& L,
                             const float* mask, int budget_bits,
-                            AacChannelPlan* plan) {
+                            double alpha_scale, AacChannelPlan* plan) {
     const int n = L.num_lines;
     const int nb = L.num_bands;
 
@@ -587,8 +587,14 @@ void aac_fit_channel_masked(const SpecT* spec, const AacBandLayout& L,
         } else {
             // alpha compresses the mask-derived allocation tilt: 1 = pure
             // noise~mask (trusts the model fully), 0 = flat quantizer noise.
-            static const double kAlpha =
+            // Short-frame masks are cruder (no tonality, no temporal
+            // masking) — trust them less.
+            static const double kAlphaL =
                 getenv("GLINT_AAC_ALPHA") ? atof(getenv("GLINT_AAC_ALPHA")) : 0.6;
+            static const double kAlphaS =
+                getenv("GLINT_AAC_ALPHA_S") ? atof(getenv("GLINT_AAC_ALPHA_S")) : 0.2;
+            const double kAlpha =
+                ((L.window_sequence == 2) ? kAlphaS : kAlphaL) * alpha_scale;
             sf_base[b] = 100.0 + 2.0 * kAlpha * std::log2(12.0 * m / w);
         }
         sf_cap[b] = e > 0.0
