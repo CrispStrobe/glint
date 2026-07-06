@@ -76,6 +76,7 @@ struct glint_aac_context {
     int attack0, attack1;           // transient flags for blk0 / blk1
     int pos0, pos1;                 // attack sub-block (0..7) within the block
     int prev_short;
+    int frames_since_short;         // conservative-path window after transients
 
     // Transient detector state (per channel)
     double hp_last[2];              // last input sample of the previous block
@@ -300,6 +301,7 @@ int emit_frame(glint_aac_context* c, int next_attack, uint8_t* out) {
         aac_make_layout(c->sr_index, seq, c->max_sfb_long, nullptr, 1, &c->layout);
     }
     c->prev_short = short_f;
+    c->frames_since_short = short_f ? 0 : c->frames_since_short + 1;
     const AacBandLayout& L = c->layout;
 
     // ---- MDCT into coded order ----
@@ -416,15 +418,37 @@ int emit_frame(glint_aac_context* c, int next_attack, uint8_t* out) {
         if (share > 0.7) share = 0.7;
         const int gf = c->vbr ? c->vbr_gain_floor : 0;
         int budget0 = c->vbr ? spend / 2 : static_cast<int>(spend * share);
-        aac_fit_channel(c->spec[0], L, budget0, nullptr, -1, gf, &c->plan[0]);
-        if (shape) shape_channel(c, 0, budget0);
+        // Distortion-controlled allocation at normal/best CBR: per-band
+        // noise targets ~ mask^alpha * k with k bisected to the budget.
+        // Conservative walk instead when (a) close after a transient — the
+        // masks mislead on decay tails (castanets ODG -0.01 -> -0.23 when
+        // allocated directly there; the START/STOP lesson again), or (b)
+        // below ~56 kbps/ch where the walk measured better (64k mono).
+        const bool direct = shape && !c->vbr &&
+                            c->frames_since_short >= 26 &&
+                            (c->bitrate_bps / ch) >= 56000;
+        if (direct) {
+            aac_fit_channel_masked(c->spec[0], L, c->mask[0], budget0, &c->plan[0]);
+        } else {
+            aac_fit_channel(c->spec[0], L, budget0, nullptr, -1, gf, &c->plan[0]);
+            if (shape) shape_channel(c, 0, budget0);
+        }
         int budget1 = spend - c->plan[0].ics_bits;  // leftover flows to ch 1
-        aac_fit_channel(c->spec[1], L, budget1, nullptr, -1, gf, &c->plan[1]);
-        if (shape) shape_channel(c, 1, budget1);
+        if (direct) {
+            aac_fit_channel_masked(c->spec[1], L, c->mask[1], budget1, &c->plan[1]);
+        } else {
+            aac_fit_channel(c->spec[1], L, budget1, nullptr, -1, gf, &c->plan[1]);
+            if (shape) shape_channel(c, 1, budget1);
+        }
     } else {
-        aac_fit_channel(c->spec[0], L, spend, nullptr, -1,
-                        c->vbr ? c->vbr_gain_floor : 0, &c->plan[0]);
-        if (shape) shape_channel(c, 0, spend);
+        if (shape && !c->vbr && c->frames_since_short >= 26 &&
+            (c->bitrate_bps / ch) >= 56000) {
+            aac_fit_channel_masked(c->spec[0], L, c->mask[0], spend, &c->plan[0]);
+        } else {
+            aac_fit_channel(c->spec[0], L, spend, nullptr, -1,
+                            c->vbr ? c->vbr_gain_floor : 0, &c->plan[0]);
+            if (shape) shape_channel(c, 0, spend);
+        }
     }
 
     // ---- emit raw_data_block at out+7, then prepend the ADTS header ----

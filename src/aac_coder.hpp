@@ -131,6 +131,17 @@ void aac_fit_channel(const SpecT* spec, const AacBandLayout& layout,
 void aac_band_noise(const AacChannelPlan& plan, const SpecT* spec,
                     const AacBandLayout& layout, double* noise);
 
+// Distortion-controlled fit (normal/best CBR): per-band scalefactors in
+// closed form from noise targets mask[b]*k (uniform-quantizer noise model),
+// with the single loudness knob k bisected to the bit budget, then one
+// measure-and-correct refinement pass. This replaces the iterative
+// amplify/de-amplify walk, which measured ~5 dB short of the noise~mask
+// allocation across the whole spectrum at 128k. `mask` is in the CODED
+// spec domain (same as aac_band_noise); tns must be set in *plan.
+void aac_fit_channel_masked(const SpecT* spec, const AacBandLayout& layout,
+                            const float* mask, int budget_bits,
+                            AacChannelPlan* plan);
+
 // Emit ics_info / individual_channel_stream. `include_ics_info` follows the
 // wire layout: true for SCE (and CPE with common_window=0), false for the two
 // ICS of a common_window CPE, whose shared ics_info the caller writes once.

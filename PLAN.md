@@ -879,6 +879,41 @@ throughout (SpecT/PcmT in aac_coder_types_fwd.hpp):
 - FFT bit-reversal computed inline (no rev table),
 - output buffer 4 KB (two tail frames fit).
 
+## A5. Distortion-controlled allocator — DONE (2026-07-06); PE rate control REJECTED
+
+The 128k push. Per-Bark diagnosis vs Apple showed we were ~5-7 dB worse
+ACROSS the whole spectrum at equal bits — the iterative amplify/walk
+never reaches a noise~mask allocation (it stalls near its own target
+from a flat start). Two experiments:
+- **PE bit-demand rate control: REJECTED.** Scaling per-frame budgets
+  by a perceptual-entropy proxy (EMA-normalized, [0.75,1.5]x) measured
+  WORSE at strong settings and a no-op at gentle ones — bit quantity
+  was not the binding constraint. Reverted; don't retry without a
+  different difficulty signal.
+- **aac_fit_channel_masked: SHIPPED** (normal/best CBR long frames).
+  Per-band scalefactors in closed form from noise targets
+  mask^alpha * k (uniform-noise model: sf = 100 + 2*alpha*log2(12m/w)),
+  the loudness knob k bisected as an INTEGER sf offset (2 sf steps per
+  factor 2 — deterministic), a min-SNR floor on CODED bands only
+  (kSnrMinDb 10; applying it to masked bands force-coded inaudible
+  junk and collapsed ODG to -3.3 — the sf_zero guard is essential),
+  and one measure-and-correct pass. alpha swept by ODG/PESQ: 1.0
+  (pure mask-following) LOSES on speech (PESQ 4.54->4.24 — the model
+  trusts our crude masks too much); **alpha = 0.6 shipped**.
+  Gating that made it safe: allocator only when frames_since_short >=
+  26 (direct allocation on post/pre-transient long frames cost
+  castanets ODG -0.01 -> -0.23; with the gate castanets is EXACTLY
+  baseline) and >= 56 kbps/ch (the walk measured better at 64k mono).
+  Everything else keeps the A1.1 walk.
+  Results (best, vs the walk): speech 128k ODG -0.85 -> -0.82, p95
+  2.42 -> 2.27, audible 12.6 -> 11.9%; electronic 128k ODG -0.49 ->
+  -0.37, audible 9.2 -> 8.7; quartet audible 8.5 -> 6.9 (ODG -0.35 ->
+  -0.39, within PEAQ noise); speech 256k NMR -16.62 -> -17.16, p95
+  -10.33 -> -11.05, 0.0% audible; castanets/64k hold. Decode-gate SNR
+  floors re-based (the allocator legitimately trades raw SNR on tonal
+  synthetics for masked placement — floors are decode sanity, not
+  quality gates).
+
 ## A2c. Embedded validation harness — DONE (2026-07-06)
 
 embedded/: shared FPU-free bench core; QEMU mps2-an385 semihosted run

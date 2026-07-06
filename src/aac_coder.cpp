@@ -446,6 +446,28 @@ void aac_section_and_count(const int16_t* ix, const AacBandLayout& L,
 
 namespace {
 
+// Build the p34 cache (linear |x|^0.75, or Q16 log2 of it on the integer
+// profile) for the first `n` lines.
+void build_p34(const SpecT* spec, int n, P34T* p34) {
+#ifdef GLINT_AAC_INT
+    for (int i = 0; i < n; i++) {
+        int32_t v = spec[i] < 0 ? -spec[i] : spec[i];
+        if (v == 0) {
+            p34[i] = INT32_MIN;
+        } else {
+            int64_t l2 = static_cast<int64_t>(intmath::ilog2_q16(static_cast<uint32_t>(v))) -
+                         (static_cast<int64_t>(kSpecFracBits) << 16);
+            p34[i] = static_cast<int32_t>((l2 * 3) >> 2);
+        }
+    }
+#else
+    for (int i = 0; i < n; i++) {
+        p34[i] = static_cast<P34T>(std::pow(std::fabs(static_cast<double>(spec[i])), 0.75));
+    }
+#endif
+}
+
+
 // Evaluate anchor gain G: quantize with sf[b] = clamp(G - off[b]), section,
 // exact-count. Returns true when magnitudes and the bit budget both fit.
 bool eval_gain(const P34T* p34, const SpecT* spec, const AacBandLayout& L,
@@ -473,24 +495,7 @@ void aac_fit_channel(const SpecT* spec, const AacBandLayout& L,
     const int n = L.num_lines;
 
     P34T p34[1024];
-#ifdef GLINT_AAC_INT
-    // Log-domain cache: p34log = 0.75 * (log2|S| - kSpecFracBits) in Q16,
-    // so quantization is one add + one exp2 lookup per coefficient.
-    for (int i = 0; i < n; i++) {
-        int32_t v = spec[i] < 0 ? -spec[i] : spec[i];
-        if (v == 0) {
-            p34[i] = INT32_MIN;
-        } else {
-            int64_t l2 = static_cast<int64_t>(intmath::ilog2_q16(static_cast<uint32_t>(v))) -
-                         (static_cast<int64_t>(kSpecFracBits) << 16);
-            p34[i] = static_cast<int32_t>((l2 * 3) >> 2);
-        }
-    }
-#else
-    for (int i = 0; i < n; i++) {
-        p34[i] = static_cast<P34T>(std::pow(std::fabs(static_cast<double>(spec[i])), 0.75));
-    }
-#endif
+    build_p34(spec, n, p34);
     std::memset(plan->ix, 0, sizeof(plan->ix));
 
     AacChannelPlan trial;
@@ -539,6 +544,143 @@ void aac_fit_channel(const SpecT* spec, const AacBandLayout& L,
         // Unreachable for int16-derived spectra (gain 255 zeroes everything),
         // but keep the guarantee: take the coarsest anchor as-is.
         eval_gain(p34, spec, L, budget_bits, sf_offsets, 255, plan);
+    }
+}
+
+void aac_fit_channel_masked(const SpecT* spec, const AacBandLayout& L,
+                            const float* mask, int budget_bits,
+                            AacChannelPlan* plan) {
+    const int n = L.num_lines;
+    const int nb = L.num_bands;
+
+    P34T p34[1024];
+    build_p34(spec, n, p34);
+    std::memset(plan->ix, 0, sizeof(plan->ix));
+
+    // Per-band scalefactor base: noise(sf) ~ width * step^2 / 12 with
+    // step = 2^(0.25*(sf-100)) (spec domain), so for a noise target T_b:
+    //   sf_b = 100 + 2*log2(12*T_b/width_b)
+    // The loudness knob k scales every T_b = mask_b * k; in sf units a
+    // factor of 2 in k is exactly +2 scalefactor steps, so bisect an
+    // integer offset instead of a float k (deterministic, INT-friendly).
+    // Per-band minimum-SNR cap: never target noise above e/10^(snrmin/10)
+    // even when the mask allows it — the margin that protects tonal bands
+    // against mask estimation error (pure mask-following measured PESQ
+    // 4.54 -> 4.24 on speech; the cap restores it). The cap is absolute
+    // (does not scale with the loudness knob).
+    static const double kSnrMinDb =
+        getenv("GLINT_AAC_SNRMIN") ? atof(getenv("GLINT_AAC_SNRMIN")) : 10.0;
+    const double snr_lin = std::pow(10.0, kSnrMinDb / 10.0);
+    double sf_base[kMaxSfb];
+    double sf_cap[kMaxSfb];
+    double sf_zero[kMaxSfb];
+    for (int b = 0; b < nb; b++) {
+        double w = L.offset[b + 1] - L.offset[b];
+        double m = mask[b] > 0.0f ? static_cast<double>(mask[b]) : 0.0;
+        double e = 0.0;
+        for (int i = L.offset[b]; i < L.offset[b + 1]; i++) {
+            double v = static_cast<double>(spec[i]);
+            e += v * v;
+        }
+        if (m <= 0.0) {
+            sf_base[b] = 0.0;  // no mask info: quantize fine, let bits decide
+        } else {
+            // alpha compresses the mask-derived allocation tilt: 1 = pure
+            // noise~mask (trusts the model fully), 0 = flat quantizer noise.
+            static const double kAlpha =
+                getenv("GLINT_AAC_ALPHA") ? atof(getenv("GLINT_AAC_ALPHA")) : 0.6;
+            sf_base[b] = 100.0 + 2.0 * kAlpha * std::log2(12.0 * m / w);
+        }
+        sf_cap[b] = e > 0.0
+            ? 100.0 + 2.0 * std::log2(12.0 * (e / snr_lin) / w)
+            : 255.0;
+        // sf at which the noise target equals the band energy: above this
+        // the band zeroes itself (free) — the SNR floor must NOT drag such
+        // masked bands back into being coded (that mistake burned the whole
+        // budget on inaudible junk: speech ODG -0.97 -> -3.35).
+        sf_zero[b] = e > 0.0
+            ? 100.0 + 2.0 * std::log2(12.0 * e / w)
+            : -1.0;
+    }
+
+    AacChannelPlan trial;
+    trial.tns = plan->tns;
+    std::memset(trial.ix, 0, sizeof(trial.ix));
+
+    auto eval_off = [&](int off, AacChannelPlan* out) -> bool {
+        for (int b = 0; b < nb; b++) {
+            double v = sf_base[b] + off;
+            // SNR floor only for bands that are actually being coded
+            // (target below the band energy); fully masked bands stay free
+            // to zero themselves.
+            if (v < sf_zero[b] && v > sf_cap[b]) v = sf_cap[b];
+            int s = v <= 0.0 ? 0 : v >= 255.0 ? 255 : static_cast<int>(v + 0.5);
+            out->sf[b] = static_cast<uint8_t>(s);
+        }
+        // dpcm constraint: adjacent CODED bands within +-60. Clamp by a
+        // forward pass (masks are smooth, so this rarely binds).
+        for (int b = 1; b < nb; b++) {
+            int prev = out->sf[b - 1];
+            int cur = out->sf[b];
+            if (cur > prev + 60) cur = prev + 60;
+            if (cur < prev - 60) cur = prev - 60;
+            out->sf[b] = static_cast<uint8_t>(cur);
+        }
+        out->global_gain = out->sf[0];
+        out->fit_gain = off;  // repurposed: the accepted offset
+        int maxabs = aac_quantize(p34, spec, L, out->sf, out->ix);
+        if (maxabs > kMaxQuant) return false;
+        aac_section_and_count(out->ix, L, out);
+        return out->ics_bits <= budget_bits;
+    };
+
+    // Bisect the offset: higher offset = coarser everywhere = fewer bits.
+    // Range covers the whole gain scale relative to the mask targets.
+    int lo = -255, hi = 255, best = hi;
+    bool have = false;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;  // rounds toward zero; fine for search
+        if (eval_off(mid, &trial)) {
+            best = mid;
+            *plan = trial;
+            have = true;
+            hi = mid - 1;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    if (!have) {
+        eval_off(255, plan);
+        return;
+    }
+
+    // One measure-and-correct pass: the uniform-noise model misses the dead
+    // zone and zeroed bands; give badly-over bands one 2-step boost if the
+    // budget allows, preferring the worst offenders.
+    double noise[kMaxSfb];
+    aac_band_noise(*plan, spec, L, noise);
+    AacChannelPlan refine = *plan;
+    bool changed = false;
+    for (int b = 0; b < nb; b++) {
+        if (mask[b] <= 0.0f) continue;
+        double target = static_cast<double>(mask[b]) * std::pow(2.0, 0.5 * plan->fit_gain);
+        if (noise[b] > 4.0 * target && refine.sf[b] >= 2) {
+            int s = refine.sf[b] - 2;
+            int prev = b > 0 ? refine.sf[b - 1] : s;
+            if (b > 0 && s < prev - 60) s = prev - 60;
+            refine.sf[b] = static_cast<uint8_t>(s);
+            changed = true;
+        }
+    }
+    if (changed) {
+        refine.global_gain = refine.sf[0];
+        int maxabs = aac_quantize(p34, spec, L, refine.sf, refine.ix);
+        if (maxabs <= kMaxQuant) {
+            aac_section_and_count(refine.ix, L, &refine);
+            if (refine.ics_bits <= budget_bits) {
+                *plan = refine;
+            }
+        }
     }
 }
 
