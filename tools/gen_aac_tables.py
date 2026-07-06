@@ -172,7 +172,36 @@ def main():
     assert sample_rates == [96000, 88200, 64000, 48000, 44100, 32000,
                             24000, 22050, 16000, 12000, 11025, 8000]
 
-    print("all cross-checks passed: 11 spectral books, scf book, 12 sfb tables")
+    # ---- TNS ----------------------------------------------------------------
+    # Max-bands limits (ffmpeg aactab.c; 13th entry is the 7350 Hz index we
+    # don't support). Cross-check: the 4-bit TNS coefficient map must match
+    # vo-aacenc's Q31 tnsCoeff4 table, which validates the arcsin/sine
+    # (de)quantization formula the encoder implements in code:
+    #   iqfac(+) = (2^(res-1) - 0.5) / (pi/2), iqfac(-) with + 0.5,
+    #   coef = sin(idx / iqfac)
+    import math
+    tns_long = extract_array(ff, "ff_tns_max_bands_1024")[:12]
+    tns_short = extract_array(ff, "ff_tns_max_bands_128")[:12]
+    vo_c4 = extract_array(vo, "tnsCoeff3Borders")  # presence check only
+    vo_c4 = extract_array(vo, "tnsCoeff4")
+    iqp = (2 ** 3 - 0.5) / (math.pi / 2)
+    iqm = (2 ** 3 + 0.5) / (math.pi / 2)
+    # vo table order: idx -8..7 (two's complement order 0..7, -8..-1)? Try both
+    # orders and require one to match within Q31 rounding.
+    def q31(x):
+        v = int(round(x * (1 << 31)))
+        return max(-(1 << 31), min((1 << 31) - 1, v))
+    ref_signed = [q31(math.sin(i / (iqm if i < 0 else iqp)))
+                  for i in range(-8, 8)]
+    ref_wrapped = [q31(math.sin(i / (iqm if i < 0 else iqp)))
+                   for i in list(range(0, 8)) + list(range(-8, 0))]
+    vo_signed = [v - (1 << 32) if v >= (1 << 31) else v for v in vo_c4]
+    # vo computed the map with fixed-point sine: agree to ~100 Q31 ULPs.
+    ok = any(all(abs(a - b) <= 256 for a, b in zip(vo_signed, ref))
+             for ref in (ref_signed, ref_wrapped))
+    assert ok, "TNS coef formula does not reproduce vo-aacenc tnsCoeff4"
+
+    print("all cross-checks passed: 11 spectral books, scf book, 12 sfb tables, TNS coef map")
 
     # ---- emit ---------------------------------------------------------------
     def fmt(vals, per_line=12, hexfmt=False):
@@ -266,6 +295,14 @@ def main():
     h.append("};")
     h.append("inline constexpr const uint16_t* kSpecCodes[11] = {")
     h.append("    " + ", ".join(f"kSpecCodes{k+1}" for k in range(11)) + ",")
+    h.append("};")
+    h.append("")
+    h.append("// TNS: max scalefactor bands the filter may cover (long/short windows).")
+    h.append("inline constexpr uint8_t kTnsMaxBandsLong[kNumSampleRates] = {")
+    h.append(fmt(tns_long))
+    h.append("};")
+    h.append("inline constexpr uint8_t kTnsMaxBandsShort[kNumSampleRates] = {")
+    h.append(fmt(tns_short))
     h.append("};")
     h.append("")
     h.append("// Scalefactor codebook: index = dpcm + 60, dpcm in [-60, 60].")

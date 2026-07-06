@@ -286,6 +286,7 @@ void aac_fit_channel(const double* spec, const AacBandLayout& L,
     std::memset(plan->ix, 0, sizeof(plan->ix));
 
     AacChannelPlan trial;
+    trial.tns = plan->tns;  // caller decides TNS before fitting; bits count
     std::memset(trial.ix, 0, sizeof(trial.ix));
 
     bool have_fit = false;
@@ -394,7 +395,19 @@ void aac_write_ics_body(AacBitWriter& bw, const AacChannelPlan& plan,
     }
 
     bw.put(0, 1);  // pulse_data_present
-    bw.put(0, 1);  // tns_data_present
+    bw.put(plan.tns.active, 1);  // tns_data_present
+    if (plan.tns.active) {
+        // Long windows, one filter, 4-bit coefficients, forward direction.
+        bw.put(1, 2);                    // n_filt
+        bw.put(1, 1);                    // coef_res = 4-bit
+        bw.put(plan.tns.length, 6);
+        bw.put(plan.tns.order, 5);
+        bw.put(0, 1);                    // direction = forward
+        bw.put(0, 1);                    // coef_compress = 0
+        for (int m = 0; m < plan.tns.order; m++) {
+            bw.put(static_cast<uint32_t>(plan.tns.coef_idx[m]) & 0xF, 4);
+        }
+    }
     bw.put(0, 1);  // gain_control_data_present
 
     // spectral_data

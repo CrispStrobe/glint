@@ -473,6 +473,7 @@ static void test_aac_coder_count_matches_emission() {
     glint::aac::AacBandLayout layout;
     glint::aac::aac_make_layout(sri, glint::aac::kSeqLong, 40, nullptr, 1, &layout);
     glint::aac::AacChannelPlan plan;
+    plan.tns.active = 0;
     glint::aac::aac_fit_channel(spec, layout, 3000, nullptr, -1, &plan);
     CHECK(plan.ics_bits <= 3000, "fitted plan respects the bit budget");
     CHECK(plan.global_gain >= 0 && plan.global_gain <= 255, "global_gain in range");
@@ -494,6 +495,7 @@ static void test_aac_coder_count_matches_emission() {
     CHECK(sl.num_bands == 42, "short layout band count");
     CHECK(sl.num_lines == 8 * 112 || sl.num_lines > 0, "short layout lines");
     glint::aac::AacChannelPlan splan;
+    splan.tns.active = 0;
     glint::aac::aac_fit_channel(spec, sl, 2500, nullptr, -1, &splan);
     CHECK(splan.ics_bits <= 2500, "short plan respects the bit budget");
     glint::aac::AacBitWriter scount(0);

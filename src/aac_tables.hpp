@@ -406,6 +406,14 @@ inline constexpr const uint16_t* kSpecCodes[11] = {
     kSpecCodes1, kSpecCodes2, kSpecCodes3, kSpecCodes4, kSpecCodes5, kSpecCodes6, kSpecCodes7, kSpecCodes8, kSpecCodes9, kSpecCodes10, kSpecCodes11,
 };
 
+// TNS: max scalefactor bands the filter may cover (long/short windows).
+inline constexpr uint8_t kTnsMaxBandsLong[kNumSampleRates] = {
+    31, 31, 34, 40, 42, 51, 46, 46, 42, 42, 42, 39,
+};
+inline constexpr uint8_t kTnsMaxBandsShort[kNumSampleRates] = {
+    9, 9, 10, 14, 14, 14, 14, 14, 14, 14, 14, 14,
+};
+
 // Scalefactor codebook: index = dpcm + 60, dpcm in [-60, 60].
 inline constexpr uint8_t kScfBits[121] = {
     18, 18, 18, 18, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19,

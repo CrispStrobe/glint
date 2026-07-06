@@ -746,7 +746,41 @@ afconvert are the yardsticks, vo-aacenc is the Shine-role baseline):
    +0.5 dB NMR, +0.4 SNR). Wire-validated: ffmpeg + CoreAudio decode
    all transition sequences with zero errors; burst-train config added
    to tests/test_aac.py.
-4. **TNS** — biggest LC feature vo-aacenc barely uses; speech/transients.
+4. **TNS — DONE (2026-07-06), selective activation.** Long-family
+   windows, one filter over [~2.5 kHz band, min(max_sfb,
+   tns_max_bands)), order ≤ 8, 4-bit arcsin-quantized reflection
+   coefficients, forward direction, active only when LPC prediction
+   gain ≥ 4.0. Measured (best): castanets 128k NMR −3.46 → **−8.38**
+   (audible 3.1→1.0% — now ahead of Apple's −7.41, near FDK's −9.02);
+   electronic 128k −3.64 → −4.30, 256k −14.61 → −15.39; speech and
+   quartet hold (quartet: filter never fires on strings — the
+   selectivity working as intended). GLINT_AAC_NO_TNS=1 disables
+   (diagnostic).
+   **Hard-won wire/DSP invariants (a full debugging afternoon):**
+   - The transmitted values are REFLECTION coefficients; the ISO
+     dequant map is +sin(idx/iqfac) (== vo-aacenc's tnsCoeff4, which
+     the table generator cross-checks). ffmpeg stores its
+     tns_tmp2_map PRE-NEGATED and negates again inside
+     compute_lpc_coefs — the double negation cancels. Transmit k
+     as-is; do NOT negate to "match" ffmpeg's r = -coef line.
+   - tns length counts down from num_swb (the samplerate's FULL sfb
+     count), NOT from max_sfb: length = num_swb - start_band. The
+     decoder clips the line range to min(max_sfb, tns_max_bands).
+   - Decoder tool order is M/S recombine THEN per-channel TNS
+     synthesis → encoder must TNS-filter L/R BEFORE the M/S
+     transform. Stereo speech cannot catch this bug (L≈R makes the
+     filters identical, and identical filters commute with M/S) —
+     MONO is the oracle for TNS correctness.
+   - Naive activation (gain ≥ 1.4, order 12, from 1 kHz) REGRESSED
+     every metric (ODG −0.87 → −1.09): with per-band scalefactor
+     shaping already active, TNS's spectral whitening fights the
+     allocator and only strongly-predictable frames profit. Judge
+     TNS on ODG/PESQ + castanets NMR, not speech Bark-NMR.
+   - Wire-correctness probe that settles "is the filter inverted
+     right": encode at 640k with/without TNS — a real mismatch
+     collapses SNR to ~15 dB; correct TNS costs ~1.5 dB at the 65 dB
+     level. In-process round-trip vs the decoder recursion
+     (scratch test) proved the math exact before the wire hunt.
 5. **Bandwidth heuristic → psy-driven max_sfb** (current cutoffs are a
    placeholder table roughly tracking fdk defaults).
 

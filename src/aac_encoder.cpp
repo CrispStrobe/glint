@@ -257,6 +257,47 @@ int emit_frame(glint_aac_context* c, int next_attack, uint8_t* out) {
         }
     }
 
+    // TNS BEFORE M/S: the decoder recombines mid/side first and then runs
+    // each channel's TNS synthesis on the OUTPUT channel, so the encoder
+    // must analyze/filter the original L/R (masks above are pre-filter).
+    // Its bits are part of the exact ICS cost the rate search sees.
+    //
+    // Mask compensation: the fit/shaping run on the FILTERED spectrum, but
+    // the masks describe the unfiltered domain. The decoder's 1/A synthesis
+    // amplifies filtered-domain noise by the same local gain it restores to
+    // the signal, so scale each in-region band's mask by the band's energy
+    // ratio E_filtered/E_unfiltered (the filter is short against the band
+    // width, so the local approximation holds). Without this, TNS measured
+    // as a regression on every metric (ODG -0.87 -> -1.09 at 128k).
+    for (int chn = 0; chn < ch; chn++) {
+        c->plan[chn].tns.active = 0;
+        if (seq != kSeqShort && !getenv("GLINT_AAC_NO_TNS")) {
+            double e_unf[kMaxSfb];
+            for (int b = 0; b < L.num_bands; b++) {
+                double acc = 0.0;
+                for (int i = L.offset[b]; i < L.offset[b + 1]; i++) {
+                    acc += c->spec[chn][i] * c->spec[chn][i];
+                }
+                e_unf[b] = acc;
+            }
+            aac_tns_analyze(c->spec[chn], L, c->sr_index, &c->plan[chn].tns);
+            if (c->plan[chn].tns.active) {
+                double* mask = (chn == 0) ? maskL : maskR;
+                for (int b = 0; b < L.num_bands; b++) {
+                    if (e_unf[b] <= 0.0) continue;
+                    double acc = 0.0;
+                    for (int i = L.offset[b]; i < L.offset[b + 1]; i++) {
+                        acc += c->spec[chn][i] * c->spec[chn][i];
+                    }
+                    double ratio = acc / e_unf[b];
+                    if (ratio < 1e-4) ratio = 1e-4;
+                    if (ratio > 1e4) ratio = 1e4;
+                    mask[b] *= ratio;
+                }
+            }
+        }
+    }
+
     if (ch == 2) {
         decide_ms(c, ml, mr);
         if (c->ms_present == 1) fixed_overhead += L.num_bands;  // ms_used bits
@@ -536,6 +577,7 @@ void shape_channel(glint_aac_context* c, int chn, int budget) {
         if (!changed) break;
 
         AacChannelPlan cand;
+        cand.tns = cur.tns;  // fit reads the caller's TNS decision from the plan
         aac_fit_channel(spec, L, shape_bits, off, cur.fit_gain, &cand);
         double cand_noise[kMaxSfb];
         aac_band_noise(cand, spec, L, cand_noise);

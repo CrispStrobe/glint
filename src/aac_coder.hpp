@@ -6,6 +6,8 @@
 
 #include <cstdint>
 
+#include "aac_tns.hpp"
+
 namespace glint {
 namespace aac {
 
@@ -90,9 +92,12 @@ private:
 };
 
 // One channel's fitted quantization plan for a frame (bands per `layout`).
+// `tns` must be set (by aac_tns_analyze, or active = 0) BEFORE fitting:
+// its bits are part of the exact ICS cost the rate search sees.
 struct AacChannelPlan {
     int global_gain;            // wire value = sf of the first coded band
     int fit_gain;               // the gain anchor G the rate search settled on
+    AacTnsFilter tns;
     uint8_t book[kMaxSfb];      // per-band codebook (0 = zero band)
     uint8_t sf[kMaxSfb];        // effective per-band scalefactor (= G - offset)
     int16_t ix[1024];           // signed quantized coefficients (coded order)
