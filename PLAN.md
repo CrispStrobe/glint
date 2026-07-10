@@ -1403,3 +1403,18 @@ becomes real work in the PLC item.
 Remaining in O2: silk_Decode top level (frame-size/rate dispatch, stereo
 weights + MS->LR unmix, resamplers to the API rate, LBRR/VAD header
 flags), opus_decode_native integration + hybrid, PLC/CNG, RFC vectors.
+
+## O2 progress 5 (2026-07-10): stereo layer DONE; resamplers in flight
+
+opus_silk_stereo.{hpp,cpp}: stereo predictor decode (joint 5x5 MSBs +
+uniform3/uniform5 fine, Q13 dequant with half-substep 6554 Q16, pred[0]
+-= pred[1] for cascaded application), mid-only flag, MS->LR unmix
+(2-sample carry, 8 ms predictor interpolation, 3-tap smoothed mid into
+side, saturated L/R). Gate: tools/crosscheck_opus_silk_stereo.py — 300
+sequences x 4 chained frames, byte-identical. Resampler module being
+built in background with its own byte-exact gate.
+
+Remaining in O2 after resamplers: silk_Decode top level (dec_API.c:
+header flags VAD/LBRR per frame, frame-size dispatch, stereo glue incl.
+mid-only handling, resample to API rate), opus_decode_native integration
++ hybrid (SILK + CELT in one ec), PLC/CNG, RFC test vectors.
