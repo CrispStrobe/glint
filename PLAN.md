@@ -1932,3 +1932,13 @@ decode_lost now takes start/end (hybrid 17, CELT 0) like the ctls.
 Debug signature: FEC output plausible-but-loud, ranges fine, plain PLC
 byte-exact. Driver lesson: match FLOAT2INT16 exactly (float multiply +
 lrintf; double lrint rounds differently at half-LSB points).
+
+## O5.2: output gain — ALREADY DONE (no work needed)
+
+The RFC 7845 OpusHead Q7.8 dB output gain has been parsed
+(OggOpusReader::head), exposed (output_gain()) and applied
+(tools/opusfile_dec_cli.cpp) since the Ogg layer landed — the
+equivalent of libopus OPUS_SET_GAIN for the .opus file path. Remaining
+O5: multistream/surround (mapping family 1), non-48k decoder output
+rates (SILK side is trivial — the resampler takes api_hz; CELT needs
+the reference's downsample-by-N in the synthesis path).
