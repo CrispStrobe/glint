@@ -1869,3 +1869,30 @@ the highest raw SNR on most clips and is often ~1.5-2x faster.
 Remaining gap = tonality analysis (piano/torture 96k VBR boosts).
 Listening pack refreshed with the tuned encoder + VBR variants
 (listening_opus/*_glint_vbr96k.opus).
+
+## O4 tonality analysis (2026-07-10) — done (the last analyzer block)
+
+src/opus_analysis.{hpp,cpp}: reduced port of the reference
+tonality_analysis (src/analysis.c float path) — FFT-phase-
+predictability tonality per bin (480-pt FFT at 24 kHz packing TWO
+240-offset windows as real/imag; fast_atan2f kept — the metric was
+tuned with it), band tonality with stationarity memory, tonality_slope,
+activity (noisiness + relativeE trackers), leak_boost ladders
+(LEAKAGE_SLOPE 2/oct-ish, OFFSET 2.5). The music/speech MLP, bandwidth
+detector and BFCC features are NOT ported — no consumer needs them.
+The analysis window is generated (sin^2(pi(i+1)/480) matches the
+reference table). Input: mono mean downmixed at +-1 scale through the
+analysis.c-local float down2_hp resampler (2 all-pass sections). Reuses
+CeltImdct::MixedFft (made public) with explicit 1/N kiss scaling.
+Consumers: dynalloc follower += leak_boost/64; trim -= 2*(slope+.05)
+clamped; compute_vbr activity reduction + 1.2*tonal boost +
+pitch_change kick (gain>.4, tonality>.3, pitch jump >26%).
+
+Measured: **VBR rates now track libopus almost exactly** (96k target:
+electronic 73.7 vs libopus 73.9, quartet 100.9 vs 101.3, castanets
+107.4 vs 106.3; piano earns 113.7 — the tonal boost). League rows:
+**piano 96k glint-vbr ODG -1.24 -> -0.77** (2nd place, ahead of
+libopus-cbr -1.03; libopus-vbr -0.58), **torture 96k glint-cbr -1.84
+-> -0.92** / vbr -2.49 -> -1.22 (libopus -0.76/-0.85) — the two league
+losses are now near-parity. Piano 96k VBR audible band-frames 9.0 ->
+3.8%. CBR clip SNRs +-0.3 dB. Gate 11/11, ranges libopus-certified.

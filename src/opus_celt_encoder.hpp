@@ -18,6 +18,7 @@
 
 #include <cstdint>
 
+#include "opus_analysis.hpp"
 #include "opus_ec.hpp"
 #include "opus_mdct.hpp"
 
@@ -70,6 +71,8 @@ private:
     int vbr_bitrate_ = 0;
     double stereo_saving_ = 0;
     float spec_avg_ = 0;
+    // FFT-phase tonality analyzer (policy inputs for VBR/trim/dynalloc).
+    TonalityAnalyzer analysis_;
     float old_ebands_[2 * 21] = {};
     float energy_error_[2 * 21] = {};
     float delayed_intra_ = 1.0f;

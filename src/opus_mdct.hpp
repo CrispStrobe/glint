@@ -135,13 +135,13 @@ public:
     int size(int shift) const { return n_ >> shift; }  // time samples (2S)
     int max_shift() const { return maxshift_; }
 
-private:
     struct Cpx {
         double re, im;
     };
 
     // Mixed-radix (2/3/4/5) forward complex DFT, natural order in and out,
-    // unscaled: Z[k] = sum_j z[j] e^{-2 pi i jk / n}.
+    // unscaled: Z[k] = sum_j z[j] e^{-2 pi i jk / n}. Public: the encoder's
+    // tonality analyzer reuses it for its 480-point analysis FFT.
     struct MixedFft {
         int n = 0;
         std::vector<Cpx> tw;  // e^{-2 pi i k / n}, k = 0..n-1
@@ -152,6 +152,7 @@ private:
         void recurse(const Cpx* x, Cpx* y, int len, int stride) const;
     };
 
+private:
     int n_ = 0;
     int maxshift_ = 0;
     std::vector<std::vector<double>> trig_;  // per shift: cos(2pi(i+1/8)/N), i<N/2

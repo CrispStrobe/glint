@@ -32,7 +32,7 @@ DEC_SRCS = ["opus_ec.cpp", "opus_laplace.cpp", "opus_cwrs.cpp",
 ENC_SRCS = ["opus_ec.cpp", "opus_laplace.cpp", "opus_cwrs.cpp",
             "opus_celt_rate.cpp", "opus_mdct.cpp",
             "opus_celt_enc_energy.cpp", "opus_celt_enc_vq.cpp",
-            "opus_celt_enc_bands.cpp", "opus_celt_encoder.cpp",
+            "opus_celt_enc_bands.cpp", "opus_celt_encoder.cpp", "opus_analysis.cpp",
             "opus_celt_bands.cpp", "opus_celt_energy.cpp",
             "opus_celt_pitch.cpp"]
 

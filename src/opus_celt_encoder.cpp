@@ -311,7 +311,8 @@ float dynalloc_analysis(const float* band_log_e, const float* band_log_e2,
                         const float* old_band_e, int end, int C,
                         int* offsets, int lsb_depth, int is_transient,
                         int lm, int effective_bytes, int* importance,
-                        int* spread_weight, int32_t* tot_boost_out) {
+                        int* spread_weight, int32_t* tot_boost_out,
+                        const AnalysisInfo& ainfo) {
     float follower[2 * kNbEBands], noise_floor[kNbEBands];
     float band_log_e3[kNbEBands];
     std::memset(offsets, 0, kNbEBands * sizeof(int));
@@ -418,6 +419,11 @@ float dynalloc_analysis(const float* band_log_e, const float* band_log_e2,
         for (int i = 0; i < end; i++) {
             if (i < 8) follower[i] *= 2;
             if (i >= 12) follower[i] *= 0.5f;
+        }
+        if (ainfo.valid) {
+            // Boost bands whose neighbours would leak into/out of them.
+            for (int i = 0; i < imin(kLeakBands, end); i++)
+                follower[i] += (1.0f / 64) * ainfo.leak_boost[i];
         }
         int32_t tot_boost = 0;
         for (int i = 0; i < end; i++) {
@@ -550,7 +556,7 @@ int spreading_decision(const float* X, int* average, int last_decision,
 int alloc_trim_analysis(const float* X, const float* band_log_e, int end,
                         int lm, int C, int n0, double tf_estimate,
                         int intensity, int32_t equiv_rate,
-                        double* stereo_saving) {
+                        double* stereo_saving, const AnalysisInfo& ainfo) {
     double trim = 5.0;
     if (equiv_rate < 64000) {
         trim = 4.0;
@@ -592,6 +598,10 @@ int alloc_trim_analysis(const float* X, const float* band_log_e, int end,
     diff /= C * (end - 1);
     trim -= std::max(-2.0, std::min(2.0, (diff + 1.0) / 6));
     trim -= 2 * tf_estimate;
+    if (ainfo.valid)
+        trim -= std::max(-2.0f, std::min(2.0f,
+                                         2.0f * (ainfo.tonality_slope +
+                                                 0.05f)));
     int trim_index = static_cast<int>(std::floor(0.5 + trim));
     return imax(0, imin(10, trim_index));
 }
@@ -604,13 +614,18 @@ int32_t compute_vbr(int32_t base_target, int lm, int32_t equiv_rate,
                     int last_coded_bands, int C, int intensity,
                     double stereo_saving, int32_t tot_boost,
                     double tf_estimate, float max_depth,
-                    float temporal_vbr) {
+                    float temporal_vbr, const AnalysisInfo& ainfo,
+                    int pitch_change) {
     int coded_bands = last_coded_bands ? last_coded_bands : kNbEBands;
     int coded_bins = kEBands[coded_bands] << lm;
     if (C == 2)
         coded_bins += kEBands[imin(intensity, coded_bands)] << lm;
 
     int32_t target = base_target;
+    // Low-activity frames need fewer bits.
+    if (ainfo.valid && ainfo.activity < 0.4f)
+        target -= static_cast<int32_t>((coded_bins << kBitRes) *
+                                       (0.4f - ainfo.activity));
     if (C == 2) {
         // Bits we can save when the signal is (nearly) mono.
         int coded_stereo_bands = imin(intensity, coded_bands);
@@ -628,6 +643,18 @@ int32_t compute_vbr(int32_t base_target, int lm, int32_t equiv_rate,
     const double tf_calibration = 0.044;
     target += static_cast<int32_t>((tf_estimate - tf_calibration) *
                                    target);
+    // Tonality boost (compensating for the average), plus a pitch-change
+    // kick: highly tonal content needs the extra rate most.
+    if (ainfo.valid) {
+        float tonal = std::max(0.0f, ainfo.tonality - 0.15f) - 0.12f;
+        int32_t tonal_target =
+            target + static_cast<int32_t>((coded_bins << kBitRes) *
+                                          1.2f * tonal);
+        if (pitch_change)
+            tonal_target += static_cast<int32_t>(
+                (coded_bins << kBitRes) * 0.8f);
+        target = tonal_target;
+    }
     // Don't bury the signal: cap the rate by the depth over the noise
     // floor (no point coding below the quantization floor).
     {
@@ -670,6 +697,7 @@ void CeltEncoder::init(int channels) {
     intensity_ = 0;
     stereo_saving_ = 0;
     spec_avg_ = 0;
+    analysis_.init();
     mdct_window_fill(window_, kOverlap);
 }
 
@@ -698,6 +726,10 @@ int CeltEncoder::encode_frame(const float* pcm, int frame_size,
     RangeEncoder enc;
     enc.init(out, static_cast<uint32_t>(nbytes));
     const int32_t total_bits = nbytes * 8;
+
+    // Tonality analysis on the raw input (policy: VBR/trim/dynalloc).
+    analysis_.feed(pcm, frame_size, C);
+    const AnalysisInfo& ainfo = analysis_.info();
 
     // Pre-emphasis (reference signal scale), raw samples after the
     // filtered overlap history.
@@ -796,6 +828,15 @@ int CeltEncoder::encode_frame(const float* pcm, int frame_size,
         }
     }
 
+    // A pitch jump on strongly-voiced tonal content (new note) earns a
+    // VBR kick; only consumed when the analysis is valid.
+    int pitch_change = 0;
+    if ((gain1 > 0.4 || prefilter_gain_ > 0.4) &&
+        (!ainfo.valid || ainfo.tonality > 0.3f) &&
+        (pitch_index > 1.26 * prefilter_period_ ||
+         pitch_index < 0.79 * prefilter_period_))
+        pitch_change = 1;
+
     // Transient detection on the (prefiltered) input incl. history.
     // Gate on the bit budget BEFORE the MDCT: the flag on the wire, the
     // transform interleave and the decoder's tf_res derivation must all
@@ -882,7 +923,7 @@ int CeltEncoder::encode_frame(const float* pcm, int frame_size,
     float max_depth = dynalloc_analysis(
         band_log_e, band_log_e2, old_ebands_, end, C, offsets,
         /*lsb_depth=*/16, is_transient, lm, effective_bytes, importance,
-        spread_weight, &tot_boost_analysis);
+        spread_weight, &tot_boost_analysis, ainfo);
 
     // Per-band TF resolution (quality item 3). Disabled at very small
     // frames, like the reference.
@@ -1059,7 +1100,8 @@ int CeltEncoder::encode_frame(const float* pcm, int frame_size,
         (total_bits << kBitRes) - total_boost) {
         alloc_trim = alloc_trim_analysis(x_norm, band_log_e, end, lm, C,
                                          n, tf_estimate, intensity,
-                                         equiv_rate, &stereo_saving_);
+                                         equiv_rate, &stereo_saving_,
+                                         ainfo);
         enc.enc_icdf(alloc_trim, celt::kTrimIcdf, 7);
     }
 
@@ -1072,7 +1114,7 @@ int CeltEncoder::encode_frame(const float* pcm, int frame_size,
         int32_t target = compute_vbr(
             base_target, lm, equiv_rate, last_coded_bands_, C, intensity,
             stereo_saving_, tot_boost_analysis, tf_estimate, max_depth,
-            temporal_vbr);
+            temporal_vbr, ainfo, pitch_change);
         int32_t tellf = static_cast<int32_t>(enc.tell_frac());
         target += tellf;
         // Never shrink below what's already written (+2-byte margin so
