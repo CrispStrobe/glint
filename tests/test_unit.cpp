@@ -822,6 +822,62 @@ static void test_opus_celt_prims() {
     }
 }
 
+// --- Opus CELT allocator + IMDCT smoke (deep checks are the libopus
+// cross-check tools; these guard regressions without the oracle) ---
+#include "opus_celt_rate.hpp"
+#include "opus_mdct.hpp"
+
+static void test_opus_celt_alloc_mdct() {
+    std::printf("Opus CELT allocator + IMDCT smoke...\n");
+    using namespace glint::opus;
+
+    // bits2pulses/pulses2bits are cache-consistent: converting a pulse
+    // count's own bit cost back returns the same pseudo-pulse index —
+    // valid only where the uint8 cost curve is strictly monotonic (wide
+    // bands saturate at 255 and plateau, where nearest-match rounding
+    // legitimately picks the lowest index).
+    bool rt_ok = true;
+    for (int lm = 0; lm < 4; lm++)
+        for (int band = 0; band < 21; band += 4) {
+            // cache[0] is the row's max pseudo-pulse index; indices beyond
+            // it are out-of-domain (the reference reads adjacent-row
+            // garbage there too — the allocator never produces them).
+            int maxp = celt::kCacheBits[celt::kCacheIndex[(lm + 1) * 21 +
+                                                          band]];
+            for (int p = 2; p + 1 <= maxp && p <= 8; p++) {
+                int lo = pulses2bits(band, lm, p - 1);
+                int mid = pulses2bits(band, lm, p);
+                int hi = pulses2bits(band, lm, p + 1);
+                if (!(lo < mid && mid < hi && hi < 250)) continue;
+                if (bits2pulses(band, lm, mid) != p) rt_ok = false;
+            }
+        }
+    CHECK(rt_ok, "bits2pulses(pulses2bits(p)) == p (in-domain)");
+
+    int caps1[21], caps2[21];
+    init_caps(caps1, 0, 1);
+    init_caps(caps2, 3, 2);
+    bool caps_ok = true;
+    for (int i = 0; i < 21; i++)
+        if (caps1[i] <= 0 || caps2[i] <= caps1[i]) caps_ok = false;
+    CHECK(caps_ok, "caps positive and grow with LM/C");
+
+    // IMDCT energy sanity: a single unit spectral line at shift 3 must
+    // produce a bounded, nonzero waveform (exact values are covered by
+    // tools/crosscheck_opus_mdct.py against libopus).
+    CeltImdct imdct;
+    double window[120];
+    mdct_window_fill(window, 120);
+    double spec[120] = { 0 };
+    spec[7] = 1.0;
+    double out[240] = { 0 };
+    imdct.backward(spec, out, window, 120, 3, 1);
+    double peak = 0;
+    for (int i = 0; i < 180; i++)
+        peak = out[i] > peak ? out[i] : (-out[i] > peak ? -out[i] : peak);
+    CHECK(peak > 0.1 && peak < 4.0, "IMDCT line response bounded");
+}
+
 int main() {
     std::printf("=== glint unit tests ===\n\n");
 
@@ -850,6 +906,7 @@ int main() {
 
     test_opus_range_coder();
     test_opus_celt_prims();
+    test_opus_celt_alloc_mdct();
 
     std::printf("\n%d/%d tests passed\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;
