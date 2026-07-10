@@ -552,6 +552,332 @@ static void test_aac_api_smoke() {
     glint_aac_destroy(enc);
 }
 
+// --- Opus range coder (PLAN § O0) ---
+#include "opus_ec.hpp"
+
+// xorshift32; encode and decode passes replay the same op script from the
+// same seed, so op parameters never need to be stored.
+static uint32_t ec_rand_state;
+static uint32_t ec_rand() {
+    uint32_t x = ec_rand_state;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    return ec_rand_state = x;
+}
+
+// icdf[s] = 256 - fh(s): 5 symbols with widths 56/80/80/28/12.
+static const uint8_t kEcTestIcdf[5] = { 200, 120, 40, 12, 0 };
+
+static void ec_script_encode(uint32_t seed, int ops,
+                             glint::opus::RangeEncoder& enc,
+                             uint32_t* tells) {
+    ec_rand_state = seed;
+    if (tells) tells[0] = enc.tell();
+    for (int i = 0; i < ops; i++) {
+        switch (ec_rand() % 5) {
+        case 0: {
+            uint32_t ft = 2 + ec_rand() % ((1u << 15) - 2);
+            uint32_t fl = ec_rand() % ft;
+            enc.encode(fl, fl + 1, ft);
+            break;
+        }
+        case 1: {
+            unsigned logp = 1 + ec_rand() % 14;
+            int bit = static_cast<int>(ec_rand() & 1);
+            enc.enc_bit_logp(bit, logp);
+            break;
+        }
+        case 2:
+            enc.enc_icdf(static_cast<int>(ec_rand() % 5), kEcTestIcdf, 8);
+            break;
+        case 3: {
+            uint32_t ft = 2 + ec_rand() % (1u << 20);
+            uint32_t v = ec_rand() % ft;
+            enc.enc_uint(v, ft);
+            break;
+        }
+        case 4: {
+            unsigned bits = 1 + ec_rand() % 24;
+            uint32_t v = ec_rand() & ((1u << bits) - 1);
+            enc.enc_bits(v, bits);
+            break;
+        }
+        }
+        if (tells) tells[i + 1] = enc.tell();
+    }
+}
+
+static void ec_script_decode(uint32_t seed, int ops,
+                             glint::opus::RangeDecoder& dec,
+                             const uint32_t* tells, bool* values_ok,
+                             bool* tells_ok) {
+    ec_rand_state = seed;
+    *values_ok = true;
+    *tells_ok = !tells || dec.tell() == tells[0];
+    for (int i = 0; i < ops; i++) {
+        switch (ec_rand() % 5) {
+        case 0: {
+            uint32_t ft = 2 + ec_rand() % ((1u << 15) - 2);
+            uint32_t fl = ec_rand() % ft;
+            if (dec.decode(ft) != fl) *values_ok = false;
+            dec.dec_update(fl, fl + 1, ft);
+            break;
+        }
+        case 1: {
+            unsigned logp = 1 + ec_rand() % 14;
+            int bit = static_cast<int>(ec_rand() & 1);
+            if (dec.dec_bit_logp(logp) != bit) *values_ok = false;
+            break;
+        }
+        case 2: {
+            int s = static_cast<int>(ec_rand() % 5);
+            if (dec.dec_icdf(kEcTestIcdf, 8) != s) *values_ok = false;
+            break;
+        }
+        case 3: {
+            uint32_t ft = 2 + ec_rand() % (1u << 20);
+            uint32_t v = ec_rand() % ft;
+            if (dec.dec_uint(ft) != v) *values_ok = false;
+            break;
+        }
+        case 4: {
+            unsigned bits = 1 + ec_rand() % 24;
+            uint32_t v = ec_rand() & ((1u << bits) - 1);
+            if (dec.dec_bits(bits) != v) *values_ok = false;
+            break;
+        }
+        }
+        if (tells && dec.tell() != tells[i + 1]) *tells_ok = false;
+    }
+}
+
+static void test_opus_range_coder() {
+    std::printf("Opus range coder...\n");
+    using glint::opus::RangeEncoder;
+    using glint::opus::RangeDecoder;
+    enum { kOps = 2000, kBufSize = 8192 };
+    static uint8_t buf[kBufSize];
+    static uint32_t tells[kOps + 1];
+
+    for (uint32_t seed = 1; seed <= 5; seed++) {
+        RangeEncoder enc;
+        enc.init(buf, kBufSize);
+        ec_script_encode(seed, kOps, enc, tells);
+        uint32_t final_tell = enc.tell();
+        enc.done();
+        CHECK(enc.error() == 0, "encoder buffer did not overflow");
+
+        RangeDecoder dec;
+        dec.init(buf, kBufSize);
+        bool values_ok = false, tells_ok = false;
+        ec_script_decode(seed, kOps, dec, tells, &values_ok, &tells_ok);
+        CHECK(values_ok, "all decoded values match encoded");
+        CHECK(tells_ok, "decoder tell() tracks encoder tell() per op");
+        CHECK(dec.error() == 0, "decoder error flag clear");
+
+        // The stream must fit in ceil(tell/8) bytes — re-run the same
+        // script into an exact-size buffer and decode from that.
+        uint32_t nbytes = (final_tell + 7) / 8;
+        CHECK(nbytes <= kBufSize, "exact size within scratch buffer");
+        RangeEncoder enc2;
+        enc2.init(buf, nbytes);
+        ec_script_encode(seed, kOps, enc2, nullptr);
+        enc2.done();
+        CHECK(enc2.error() == 0, "exact-size buffer suffices (done() bound)");
+        RangeDecoder dec2;
+        dec2.init(buf, nbytes);
+        ec_script_decode(seed, kOps, dec2, nullptr, &values_ok, &tells_ok);
+        CHECK(values_ok, "exact-size round-trip decodes");
+    }
+
+    // Carry stress: maximal symbols drive val to the top of the range,
+    // exercising the buffered-0xFF carry chain in carry_out().
+    {
+        uint8_t cbuf[256];
+        RangeEncoder enc;
+        enc.init(cbuf, sizeof(cbuf));
+        for (int i = 0; i < 100; i++) enc.encode(255, 256, 256);
+        enc.done();
+        CHECK(enc.error() == 0, "carry stress encode fits");
+        RangeDecoder dec;
+        dec.init(cbuf, sizeof(cbuf));
+        bool ok = true;
+        for (int i = 0; i < 100; i++) {
+            if (dec.decode(256) != 255) ok = false;
+            dec.dec_update(255, 256, 256);
+        }
+        CHECK(ok, "carry stress round-trip");
+    }
+
+    // enc_uint edges around the range/raw split at 2^8 and power-of-2 fts.
+    {
+        static const uint32_t fts[] = {
+            2, 3, 255, 256, 257, 1u << 16, (1u << 16) + 1, 1u << 24
+        };
+        uint8_t ubuf[512];
+        RangeEncoder enc;
+        enc.init(ubuf, sizeof(ubuf));
+        for (uint32_t ft : fts) {
+            const uint32_t vals[4] = { 0, 1, ft / 2, ft - 1 };
+            for (uint32_t v : vals) enc.enc_uint(v, ft);
+        }
+        uint32_t etell = enc.tell();
+        enc.done();
+        CHECK(enc.error() == 0, "uint edges encode fits");
+        RangeDecoder dec;
+        dec.init(ubuf, sizeof(ubuf));
+        bool ok = true;
+        for (uint32_t ft : fts) {
+            const uint32_t vals[4] = { 0, 1, ft / 2, ft - 1 };
+            for (uint32_t v : vals)
+                if (dec.dec_uint(ft) != v) ok = false;
+        }
+        CHECK(ok, "uint edges round-trip");
+        CHECK(dec.tell() == etell, "uint edges tell parity");
+        CHECK(dec.error() == 0, "uint edges no decoder error");
+    }
+}
+
+// --- Opus CELT primitives (PLAN § O1) ---
+#include "opus_laplace.hpp"
+#include "opus_cwrs.hpp"
+#include "opus_celt_tables.hpp"
+
+static void test_opus_celt_prims() {
+    std::printf("Opus CELT primitives (tables, laplace, cwrs)...\n");
+    using namespace glint::opus;
+
+    // Generated-tables sanity (deep checks live in the generator itself).
+    CHECK(celt::kEBands[0] == 0 && celt::kEBands[21] == 100,
+          "eBands endpoints");
+    CHECK(celt::kWindow[119] > 0.999 && celt::kWindow[0] < 1e-3,
+          "window shape");
+    CHECK(celt::kEProbModel[0][0][0] > 0, "e_prob_model nonzero");
+
+    // Laplace round-trip, including the flat-tail clamp path. Parameters
+    // drawn exactly like CELT uses them (prob<<7, decay<<6).
+    enum { kNVals = 300 };
+    static uint8_t buf[4096];
+    static unsigned fss[kNVals];
+    static int decays[kNVals], coded[kNVals];
+    static uint32_t tells[kNVals];
+    ec_rand_state = 42;
+    RangeEncoder enc;
+    enc.init(buf, sizeof(buf));
+    for (int i = 0; i < kNVals; i++) {
+        fss[i] = (1 + ec_rand() % 255) << 7;
+        decays[i] = (1 + ec_rand() % 178) << 6;
+        int v = static_cast<int>(ec_rand() % 81) - 40;
+        if (i % 8 == 0) v = static_cast<int>(ec_rand() % 4000) - 2000;
+        coded[i] = laplace_encode(enc, v, fss[i], decays[i]);
+        tells[i] = enc.tell();
+    }
+    enc.done();
+    CHECK(enc.error() == 0, "laplace encode fits");
+    RangeDecoder dec;
+    dec.init(buf, sizeof(buf));
+    bool vals_ok = true, tell_ok = true;
+    for (int i = 0; i < kNVals; i++) {
+        if (laplace_decode(dec, fss[i], decays[i]) != coded[i])
+            vals_ok = false;
+        if (dec.tell() != tells[i]) tell_ok = false;
+    }
+    CHECK(vals_ok, "laplace round-trip (incl. tail clamp)");
+    CHECK(tell_ok, "laplace tell parity");
+
+    // CWRS round-trip across representative (n, k) pairs.
+    static const int nk[][2] = { { 2, 1 },   { 2, 128 }, { 3, 128 },
+                                 { 4, 7 },   { 8, 3 },   { 22, 10 },
+                                 { 96, 4 },  { 176, 2 } };
+    for (auto& p : nk) {
+        int n = p[0], k = p[1];
+        int y[176] = { 0 };
+        // Deterministic vector: alternate signs, spread pulses.
+        int left = k;
+        for (int j = 0; left > 0; j = (j + 1) % n) {
+            int take = left > 3 ? 3 : left;
+            y[j] += (j & 1) ? -take : take;  // sign fixed per slot
+            left -= take;
+        }
+        RangeEncoder e2;
+        e2.init(buf, sizeof(buf));
+        encode_pulses(y, n, k, e2);
+        uint32_t etell = e2.tell();
+        e2.done();
+        CHECK(e2.error() == 0, "cwrs encode fits");
+        RangeDecoder d2;
+        d2.init(buf, sizeof(buf));
+        int yd[176];
+        int32_t yy = decode_pulses(yd, n, k, d2);
+        bool same = true;
+        int32_t yy_ref = 0;
+        for (int j = 0; j < n; j++) {
+            if (yd[j] != y[j]) same = false;
+            yy_ref += y[j] * y[j];
+        }
+        CHECK(same, "cwrs round-trip vector");
+        CHECK(yy == yy_ref, "cwrs yy (sum of squares)");
+        CHECK(d2.tell() == etell, "cwrs tell parity");
+    }
+}
+
+// --- Opus CELT allocator + IMDCT smoke (deep checks are the libopus
+// cross-check tools; these guard regressions without the oracle) ---
+#include "opus_celt_rate.hpp"
+#include "opus_mdct.hpp"
+
+static void test_opus_celt_alloc_mdct() {
+    std::printf("Opus CELT allocator + IMDCT smoke...\n");
+    using namespace glint::opus;
+
+    // bits2pulses/pulses2bits are cache-consistent: converting a pulse
+    // count's own bit cost back returns the same pseudo-pulse index —
+    // valid only where the uint8 cost curve is strictly monotonic (wide
+    // bands saturate at 255 and plateau, where nearest-match rounding
+    // legitimately picks the lowest index).
+    bool rt_ok = true;
+    for (int lm = 0; lm < 4; lm++)
+        for (int band = 0; band < 21; band += 4) {
+            // cache[0] is the row's max pseudo-pulse index; indices beyond
+            // it are out-of-domain (the reference reads adjacent-row
+            // garbage there too — the allocator never produces them).
+            int maxp = celt::kCacheBits[celt::kCacheIndex[(lm + 1) * 21 +
+                                                          band]];
+            for (int p = 2; p + 1 <= maxp && p <= 8; p++) {
+                int lo = pulses2bits(band, lm, p - 1);
+                int mid = pulses2bits(band, lm, p);
+                int hi = pulses2bits(band, lm, p + 1);
+                if (!(lo < mid && mid < hi && hi < 250)) continue;
+                if (bits2pulses(band, lm, mid) != p) rt_ok = false;
+            }
+        }
+    CHECK(rt_ok, "bits2pulses(pulses2bits(p)) == p (in-domain)");
+
+    int caps1[21], caps2[21];
+    init_caps(caps1, 0, 1);
+    init_caps(caps2, 3, 2);
+    bool caps_ok = true;
+    for (int i = 0; i < 21; i++)
+        if (caps1[i] <= 0 || caps2[i] <= caps1[i]) caps_ok = false;
+    CHECK(caps_ok, "caps positive and grow with LM/C");
+
+    // IMDCT energy sanity: a single unit spectral line at shift 3 must
+    // produce a bounded, nonzero waveform (exact values are covered by
+    // tools/crosscheck_opus_mdct.py against libopus).
+    CeltImdct imdct;
+    double window[120];
+    mdct_window_fill(window, 120);
+    double spec[120] = { 0 };
+    spec[7] = 1.0;
+    double out[240] = { 0 };
+    imdct.backward(spec, out, window, 120, 3, 1);
+    double peak = 0;
+    for (int i = 0; i < 180; i++)
+        peak = out[i] > peak ? out[i] : (-out[i] > peak ? -out[i] : peak);
+    CHECK(peak > 0.1 && peak < 4.0, "IMDCT line response bounded");
+}
+
 int main() {
     std::printf("=== glint unit tests ===\n\n");
 
@@ -577,6 +903,10 @@ int main() {
     test_aac_tables_sanity();
     test_aac_coder_count_matches_emission();
     test_aac_api_smoke();
+
+    test_opus_range_coder();
+    test_opus_celt_prims();
+    test_opus_celt_alloc_mdct();
 
     std::printf("\n%d/%d tests passed\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

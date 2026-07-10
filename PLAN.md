@@ -1041,3 +1041,588 @@ per-coefficient rates is fatal:
 
 Stack use (~30 KB transient in MDCT/fit) is not in the 47.6 KB figure;
 neither is vo-aacenc's stack in its 48 KB (heap-only, same basis).
+
+# Opus track (started 2026-07-10) — branch `feature/opus` ONLY
+
+**Git workflow override for this track: commit to `feature/opus`, do NOT
+merge to main** until explicitly cleared. (MP3/AAC work keeps the usual
+merge-to-main rule.)
+
+Scope assessment (2026-07-10): Opus (RFC 6716) = SILK (LPC speech coder,
+8/12/16k internal) + CELT (MDCT, 2.5–20 ms at 48k) + hybrid mode, glued by
+a shared range coder. Unlike MP3/AAC there are no scalefactors-as-side-info:
+CELT's bit allocation is IMPLICIT — decoder re-derives it from the same
+computation the encoder runs, keyed on tell_frac() at 1/8-bit precision, so
+encoder/decoder must agree bit-for-bit on entropy-coder state. The normative
+spec is the reference code (prose loses ties); decoder conformance = official
+test vectors + opus_compare quality threshold, not bit-exactness. No
+legal/patent reason for clean-room (BSD reference, royalty-free) — it's the
+project ethos only, and reference implementations remain fair game as test
+ORACLES (same rule as gen_aac_tables.py). Calibration: ffmpeg's independent
+native Opus encoder is CELT-only and still clearly behind libopus after
+years — "correct" is achievable, "league-competitive" is a long campaign.
+
+Phases:
+- **O0 — range coder — DONE (see below).**
+- **O1 — CELT decoder**: mixed-radix FFT (MDCT sizes 120/240/480/960 =
+  2^a·3·5, NOT power-of-two — the MP3/AAC FFTs don't cover this), coarse
+  energy (2-D prediction + Laplace), fine energy, the implicit allocator,
+  PVQ decode + spreading/folding + anti-collapse, TF resolution, intensity +
+  mid/side, postfilter. Interim oracle before full conformance: CELT-only
+  streams from `opus_demo` (restricted-lowdelay application forces CELT).
+- **O2 — SILK decoder + hybrid**: LPC synthesis, LTP, stereo
+  prediction/unmixing, resamplers. Gate: official test vectors 01–12 pass
+  the opus_compare threshold (both rates of each vector).
+- **O3 — Ogg Opus container** (RFC 7845): mux/demux, pre-skip, granule
+  accounting; Opus packets are not self-framing (no ADTS analog).
+- **O4 — CELT-only encoder**: reuses the decoder's allocator verbatim;
+  PVQ search, coarse/fine energy quant, TF/transient decisions, VBR.
+  Needs ec_enc_shrink + ec_enc_patch_initial_bits (not yet implemented in
+  opus_ec). Validate: decode with libopus/ffmpeg, league via
+  compare_encoders vs libopus + ffmpeg-native at matched rates.
+- **O5 (optional) — SILK/hybrid encoder** for low-rate speech.
+
+## O0. Range coder — DONE (2026-07-10), byte-identical to libopus
+
+`src/opus_ec.{hpp,cpp}`: RangeEncoder/RangeDecoder per RFC 6716 §4.1 —
+encode/encode_bin/bit_logp/icdf/uint/raw bits + tell/tell_frac, all-integer
+(safe for GLINT_MODE=fixed), in the glint library build.
+
+Verification, two layers:
+- Unit tests (test_unit.cpp): randomized op-script round-trips (5 seeds ×
+  2000 ops), per-op encoder-vs-decoder tell() parity, exact-size
+  ceil(tell/8) buffer round-trip, carry stress (max-symbol runs), enc_uint
+  edges around the 2^8 range/raw split. 260/260 pass.
+- **Wire-compat gate: `tools/crosscheck_opus_ec.py`** builds libopus 1.5.2
+  as an oracle in ~/code/glint-tools/opus-1.5.2 (static lib; ec_* symbols
+  are linkable even though not public API), compiles
+  `tools/opus_ec_crosscheck.cpp` twice (reference adapter vs glint), and
+  requires byte-identical stdout: encoded buffers (full + exact-size),
+  tell/tell_frac traces, decoded values — 8 seeds × 2000 ops × 6 op kinds.
+  **PASS on first run.** Re-run after any opus_ec change.
+
+Hard-won invariants:
+- Decoder `val` is COMPLEMENTED (distance from the top of the range):
+  init reads 127 − (b0>>1), renormalization inserts ~sym. Both sides
+  report tell()==1 immediately after init.
+- Range bits fill the buffer from the FRONT, raw bits (enc_bits) from the
+  BACK; the two streams may legally share the final byte — done() ORs the
+  raw-bit remainder into it. Total stream always fits ceil(tell/8) bytes.
+- 0xFF chunks cannot be emitted eagerly (a later carry could ripple
+  through); carry_out() buffers a run count (ext_) + one pending byte
+  (rem_) and materializes on the next non-0xFF chunk.
+- tell_frac refines ilog(rng) by 3 bits via repeated Q15 squaring of the
+  top 16 bits of rng. CELT's allocator consumes this — it must match the
+  reference EXACTLY (it does; traced per op in the cross-check).
+- Still missing from opus_ec (needed by O4, trivial adds): ec_enc_shrink,
+  ec_enc_patch_initial_bits.
+
+## O1 progress (2026-07-10): primitives + energy + allocator + IMDCT DONE
+
+All verified against libopus 1.5.2 oracles (custom-modes static build in
+~/code/glint-tools/opus-1.5.2-custom — internal symbols are linkable, and
+opus_custom_mode_create exposes the mode struct):
+
+- **CELT mode tables**: src/opus_celt_tables.hpp GENERATED by
+  tools/gen_opus_celt_tables.py (window matches the analytic formula at
+  5.2e-9; note eband5ms/band_allocation live in celt/modes.c, not
+  static_modes_float.h; eMeans is 25 entries, last 4 padding).
+- **Laplace coder** (opus_laplace): byte-identical, incl. flat-tail clamp.
+- **CWRS/PVQ enumeration** (opus_cwrs): table-free O(k) row recurrences
+  (RAM-diet friendly vs libopus's 5 KB static table); index-for-index
+  identical, cross-checked interleaved with laplace in one ec stream
+  (tools/crosscheck_opus_celt_prims.py).
+- **Energy envelope decode** (opus_celt_energy): coarse (2-D prediction +
+  budget fallbacks <15/<2/<1 bits) / fine / finalise.
+  tools/crosscheck_opus_energy.py — tells exact, energies within
+  float-vs-double tolerance.
+- **Bit allocator** (opus_celt_rate: compute_allocation_dec, bits2pulses,
+  pulses2bits, init_caps): byte-identical over 200 fuzzed scenarios
+  (tools/crosscheck_opus_alloc.py) incl. hybrid start=17, both channel
+  counts, all LM, dynalloc boosts, negative budgets.
+- **Inverse MDCT** (opus_mdct: CeltImdct + mixed-radix 2/3/4/5 FFT, all
+  four shifts 960/480/240/120): matches clt_mdct_backward to <=1.3e-5
+  (float oracle) incl. the interleaved-transient stride layout; O(S^2)
+  direct-formula self-check at 1e-11. Contract documented in the header —
+  NOTE: output is NOT plain overlap-add; out[0..ov/2) is a windowed TDAC
+  rotation (read-modify-write), rest overwritten; in-place safe.
+
+**KEY TESTING INSIGHT — fuzz oracles for decode-only components**: the
+range decoder accepts ANY byte stream, so feeding both decoders identical
+random buffers and comparing symbol/tell traces is a complete equivalence
+gate without needing an encoder. All decode-side cross-checks use this.
+
+GOTCHAS learned:
+- Reference drivers need -DUSE_ALLOCA (stack_alloc.h errors otherwise) on
+  top of -DOPUS_BUILD -DCUSTOM_MODES.
+- pulses2bits/bits2pulses are only defined for pseudo-pulse indices
+  <= cache.bits[index] (the row header); beyond that even libopus reads
+  adjacent-row garbage. The allocator guarantees in-domain values.
+- The pulse-cache bit costs saturate at 255 (uint8) on wide bands — cost
+  curves plateau, so bits->pulses->bits round-trips only hold on the
+  strictly monotonic part of the curve.
+- ec_laplace_encode may CLAMP the value it codes (flat-tail overflow);
+  any encoder must use the returned value, not the input.
+
+NEXT (O1 remainder, in order):
+1. bands.c decode side: quant_all_bands / quant_band recursion (theta
+   splitting, lowband folding, spreading rotation, anti-collapse), TF
+   decode, intensity/dual-stereo application. Fuzz-oracle against
+   quant_all_bands with random streams; alg_unquant/exp_rotation are
+   linkable for finer-grained checks.
+2. celt_decoder.c top level: flags (silence/postfilter/transient/intra),
+   dynalloc decode, denormalise, IMDCT+deemphasis chain, postfilter,
+   anti-collapse hookup, PLC stub. Oracle: opus_custom_decoder or
+   celt_decode_with_ec on CELT-only packets.
+3. TOC/packet parse (code 0-3 framing) + opus_decode top level for
+   CELT-only streams; oracle: opus_demo with restricted-lowdelay.
+4. Then SILK (O2).
+
+## O1 progress 2 (2026-07-10): band decoding DONE — the largest CELT piece
+
+**opus_celt_bands.{hpp,cpp}** — decode side of bands.c/vq.c: quant_all_bands
+(folding-source norm buffers, lowband_offset/update tracking, hybrid special
+folding at start+1, dual-stereo->intensity switch), quant_band_stereo (theta
+join, N==2 orthogonal-side sign trick), quant_band (tf recombine/subdivide
+Haar chains, Hadamard reorder for transients, resynth un-do, sqrt(N) folding
+scale), quant_partition (recursive splits, delta bit-split from bit-exact
+integer log2tan, rebalance, PVQ leaf with budget walk-down, LCG noise/fold
+fills), compute_theta (all three PDFs: step/uniform/triangular + isqrt32),
+compute_qn, exp_rotation spreading, collapse masks, stereo_merge,
+anti_collapse. Encode branches and theta-RDO dropped (decoder-only).
+
+Gate: tools/crosscheck_opus_bands.py — fuzz oracle wired exactly like
+celt_decode_with_ec (allocator -> quant_all_bands -> anti-collapse bit ->
+anti_collapse) over 150 random frames covering all LM, mono/stereo, hybrid
+start=17, transient+tf combinations, all spread modes, dual stereo,
+disable_inv. Collapse masks / LCG seeds / tells byte-identical; spectra
+match to 4e-6 (float-vs-double). PASS.
+
+Learnings:
+- The decode path's ec reads are 100% integer-driven (qn/theta PDFs, delta
+  via bitexact_cos/log2tan, cache walk-downs) — signal values never touch
+  the wire, so the fuzz oracle is complete for this layer too.
+- tf_res values must stay in tf_select_table's domain per (LM, transient)
+  when fuzzing — arbitrary values hit UB in both implementations.
+- The reference decoder aliases lowband_scratch onto X_'s last-band region;
+  a separate scratch buffer is output-identical (scratch is written before
+  read within each quant_band call, and the last band never uses it).
+- Verify print-precision actually exercises the tolerance: at %.4f the
+  spectra compared EQUAL (deltas hid below the grid) — bumped to %.6f to
+  prove real float-vs-double deltas flow through the comparison.
+
+NEXT: celt_decoder.c top level (flags, dynalloc, tf_decode, postfilter,
+denormalise + IMDCT + deemphasis, PLC stub, energy state rotation), then
+TOC/packet framing, then decode real CELT-only packets vs opus_demo.
+
+## O1 MILESTONE (2026-07-10): CELT-only Opus decoding WORKS end-to-end
+
+glint now decodes REAL Opus streams (CELT-only / restricted-lowdelay,
+fullband 48 kHz) identically to libopus:
+
+- **opus_celt_decoder.{hpp,cpp}**: full frame decode — silence/postfilter/
+  transient/intra flags, tf_decode, spread, dynalloc, trim, allocation,
+  energy layers, quant_all_bands, anti-collapse, denormalise, IMDCT
+  overlap chain, comb-filter postfilter (5-tap, cross-faded), de-emphasis,
+  energy/state rotation. Mono decoders set disable_inv=1 (celt_decoder_init
+  policy — easy to miss).
+- **opus_decoder.{hpp,cpp}**: TOC + framing codes 0-3 (padding, VBR),
+  pcm_soft_clip (the int16 API's ±1 overshoot parabola).
+- Gates:
+  - tools/crosscheck_opus_celt_dec.py — frame-level fuzz vs
+    opus_custom_decode_float with state carryover; PASS. NOTE: garbage
+    streams drive gains to ~2^32, so the float oracle's rounding noise
+    scales with the sequence's PEAK sample (persists via overlap memory);
+    tolerance must be peak-scaled or it false-fails.
+  - **tools/test_opus_e2e.py — the real-stream gate**: opus_demo
+    (restricted-lowdelay) encodes sweep+noise+bursts at 2.5/5/10/20 ms,
+    mono+stereo, VBR+CBR; glint decodes every packet with the decoder
+    final range EQUAL to the encoder's (Opus conformance identity, exact,
+    2206/2206 packets) and PCM within 3 int16 LSB of opus_demo's decode.
+- Debug war story: 4 configs showed up-to-646-LSB PCM diffs while ALL
+  final ranges matched -> integer path proven right, suspicion on floats;
+  frame-level A/B on the same stream showed ZERO diffs -> the difference
+  was opus_demo's int16 API applying opus_pcm_soft_clip (codec overshoot
+  beyond ±1 on low-rate bursty content). Ported pcm_soft_clip; all green.
+  Lesson: "final range equal + PCM off" means look OUTSIDE the decoder.
+- opus_demo lives at ~/code/glint-tools/opus_demo (built from the custom
+  tree; needs -I silk for debug.h). .bit format: per packet 4B BE length +
+  4B BE encoder final range + payload.
+
+O1 remainder (small): CELT-only narrower bandwidths (end<21 — NB/WB/SWB
+TOC configs 16..27), stream-channels != decoder-channels up/downmix paths,
+PLC (celt_decode_lost). Then O2 (SILK), O3 (Ogg).
+
+## O1 remainder (2026-07-10): endband + channel mixing DONE; PLC deferred
+
+- decode_frame now takes (stream_channels, end_band): NB/WB/SWB/FB CELT
+  configs map to end 13/17/19/21 (kEndband in opus_decoder.cpp), and
+  mono<->stereo mismatches use the reference synthesis paths (mono->stereo:
+  freq copy staged INSIDE ch1's output region, in-place IMDCT trick;
+  stereo->mono: average denormalised spectra). Decode loops use stream C;
+  memmove/postfilter/deemphasis use decoder CC.
+- E2E gate now 18 configs (bandwidths + both mismatch directions +
+  VBR/CBR + all frame sizes): ALL final ranges exact, PCM <= 4 LSB.
+- Still open in O1: PLC (celt_decode_lost) — deferred to the O2 arc since
+  opus_decode_native's PLC clock matters for SILK too.
+
+## O2 SILK decoder — architecture survey (2026-07-10) + plan
+
+SILK is FIXED-POINT throughout (int16/int32 exact) => every fuzz oracle
+gives BYTE-IDENTICAL comparisons, no float tolerances anywhere until the
+final resampler output (also integer). Decode call graph (silk/):
+
+  opus_decode_native -> silk_Decode (dec_API.c, 486 l): TOC->internal rate
+    (NB 8k / MB 12k / WB 16k), stereo weights + MS->LR, resampling to API
+    rate, PLC hookup
+  -> silk_decode_frame (169 l)
+     -> silk_decode_indices (decode_indices.c): VAD/LBRR flags ->
+        signalType/quantOffset; gains (independent: silk_gain_iCDF[sig]
+        MSB<<3 + uniform8 LSB; conditional: delta_gain); NLSF stage-1 idx
+        (CB1_iCDF by sig>>1) + per-coef stage-2 via ec_iCDF[ec_ix] with
+        NLSF_EXT extension at 0 / 2*QUANT_MAX; interp factor (20 ms only);
+        voiced: pitch lag abs(hi*fs/2+lo)/delta, contour, LTP PERIndex +
+        per-subframe LTPIndex, LTP_scaleIndex (independent only); LCG seed
+        (uniform4)
+     -> silk_decode_pulses (decode_pulses.c): rate level (by sig>>1),
+        per-16-sample-block sum_pulses with LSB-extension chain (>16 =>
+        nLshifts++, table row 9 (+1 to forbid extension at 10 LSBs)),
+        shell decoder = fixed binary-split tree (tables 3->2->1->0),
+        LSB bits per sample, signs (icdf built from silk_sign_iCDF
+        [7*(2*sig+qoffset) + min(p,6)], value map 2*a-1)
+     -> silk_decode_parameters (115 l): gains dequant (log domain),
+        NLSF_decode -> NLSF2A -> LPC coefs Q12 (both interp halves),
+        LTP coef table lookup, pitch lags from contour CB
+     -> silk_decode_core (237 l): LCG noise injection at quantOffset,
+        LTP filter (5-tap) + LPC synthesis (order 10/16) per subframe,
+        Q14 excitation -> Q10 output, rewhitening on signal-type change
+  -> stereo: silk_stereo_decode_pred + MS->LR (3-tap lowpass mix)
+  -> resamplers (resampler.c + private_*): IIR+FIR fixed-point, 8/12/16k
+     -> 48k output for the Opus layer
+
+Order of implementation (each with a byte-exact fuzz oracle):
+1. opus_silk_tables.hpp (generator running/DONE — see below).
+2. Excitation: shell decoder + decode_pulses + decode_signs.
+3. decode_indices (needs SideInfoIndices struct + decoder-state stubs).
+4. NLSF_decode + NLSF2A (+ NLSF_unpack, bwexpander, LPC_inv_pred_gain
+   stabilization chain) — isolated, ideal agent piece.
+5. Gains dequant (log2lin etc.) + decode_parameters + decode_core.
+6. decode_frame + silk_Decode + stereo + resamplers; CNG/PLC.
+7. opus_decode_native integration (mode switch, redundancy) -> hybrid
+   with CELT -> RFC test vectors 01-12 via opus_compare (O2 exit gate).
+
+Key constants: SHELL_CODEC_FRAME_LENGTH 16 (LOG2 4), SILK_MAX_PULSES 16,
+N_RATE_LEVELS 10, MAX_NB_SHELL_BLOCKS 20, MAX_LPC_ORDER 16,
+NLSF_QUANT_MAX_AMPLITUDE 4, silk_dec_map(a) = 2a-1.
+
+## O2 first bricks (2026-07-10): SILK tables + fixed-point kit DONE
+
+- **src/opus_silk_tables.hpp** GENERATED by tools/gen_opus_silk_tables.py
+  (all decoder tables incl. NLSF codebooks NB/MB+WB, pitch contours,
+  shell-code rows, LSF cos table, resampler ROM; encoder-only tables
+  skipped with the list documented in the header banner; iCDF rows and
+  codebook shapes verified at gen time).
+- **src/opus_silk_math.hpp**: the exact fixed-point kit (SMULWB/SMLAWB/
+  SMULWW/SMMUL family, saturating adds/shifts, RSHIFT_ROUND, CLZ/CLZ_FRAC,
+  DIV32_varQ / INVERSE32_varQ, lin2log/log2lin, silk_RAND). Gate:
+  tools/crosscheck_opus_silk_math.py — 2M randomized operand sets,
+  BYTE-IDENTICAL hash vs the reference inline kit. Two reconstruction
+  bugs the gate caught immediately: the varQ Newton steps use SMMUL
+  (>>32) + a (1<<29)-residual, and LSHIFT_SAT32 is clamp-THEN-shift
+  (low bits zeroed), not saturate-to-MAX.
+
+## O2 progress 2 (2026-07-10): excitation decoder DONE
+
+opus_silk_excitation.{hpp,cpp}: rate level, per-block pulse counts with
+LSB-extension chains, the fixed binary-split shell tree, LSB refinement,
+signs (PDF by 7*(2*type+offset)+min(p,6), map 2a-1). Gate:
+tools/crosscheck_opus_silk_exc.py — 300 fuzzed frames across all frame
+lengths (80..320 incl. the 10ms@12k partial block) and signal/offset
+types, pulses[] and tells BYTE-IDENTICAL. Note the tables agent's extra
+gate: every generated table memcmp'd against libopus.a symbols (76/76).
+
+NEXT in O2: decode_indices (needs SideInfoIndices + state struct),
+NLSF_decode + NLSF2A chain (agent-suitable, isolated), gains dequant,
+decode_parameters, decode_core (LPC/LTP synthesis — studied, see survey),
+decode_frame + silk_Decode + stereo + resamplers, then hybrid + PLC +
+RFC test vectors.
+
+## O2 progress 3 (2026-07-10): side-info decode + gains + pitch lags DONE
+
+opus_silk_indices.{hpp,cpp}: DecoderState (set_fs derives subframe/frame/
+ltp-mem lengths, per-rate pitch iCDFs, NLSF codebook + LPC order),
+SideInfoIndices (ZERO-INIT matters: fields not decoded for a frame type
+persist, mirroring the reference state — the fuzz gate caught stale
+garbage immediately), decode_indices (types, gains MSB+LSB / delta, two-
+stage NLSF indices with rail escapes, interp factor, pitch abs/delta +
+contour, LTP per-index + per-subframe + scaling, seed), nlsf_unpack,
+gains_dequant (chain-limited, double-step escape, log2lin), decode_pitch
+(contour codebooks, clamped). Gate: tools/crosscheck_opus_silk_indices.py
+— 400 fuzzed sequences x 3 chained frames (cond coding, prev lag/type
+carry), byte-identical incl. tells. NLSF chain (dequant/stabilize/NLSF2A)
+in flight with its own gate.
+
+## O2 progress 4 (2026-07-10): NLSF -> LPC chain DONE
+
+opus_silk_nlsf.{hpp,cpp}: residual dequant (backwards prediction, Q10
+dead-zone 102), stage-1 combination, nlsf_stabilize (20-round min-delta
+repair + sort/clamp fallback), nlsf2a (cos-table interp, P/Q convolution
+QA=16, lpc_fit Q17->Q12 with up-to-16-round chirp repair), bwexpander_32,
+lpc_inverse_pred_gain (QA=24). Gate:
+tools/crosscheck_opus_silk_nlsf.py — 2400 index vectors per path,
+byte-identical, with instrumented proof the repair paths actually ran
+(stabilize fallback 2080x, LPC_fit expansion 9108x, chirp rounds 19496x).
+Math kit gained add_sat16 (gate re-run PASS).
+Constants worth knowing: LPC_fit chirp = 65470 (0.999 Q16, NOT 65471);
+lpc_inverse_pred_gain thresholds 16773022 (0.99975 Q24) / 107374
+(1e-4 Q30) — float-rounded reference expressions.
+
+Remaining in O2: decode_parameters + decode_core (synthesis loop),
+decode_frame/silk_Decode + stereo + resamplers, hybrid, PLC, RFC vectors.
+
+## O2 MILESTONE (2026-07-10): full SILK frame decode byte-identical
+
+opus_silk_frame.{hpp,cpp}: decode_parameters (gain chain, NLSF->LPC for
+both interpolation halves, LTP codebook taps <<7, pitch lags, LTP scale;
+unvoiced zeroes controls AND resets PERIndex), decode_core (Q14 excitation
+with LCG sign dither + level adjust + offsets, per-subframe gain-step state
+rescaling via DIV32_varQ, voiced rewhitening through lpc_analysis_filter
+at k==0 / k==2-with-interp incl. the LTP-scale downscaling on independent
+frames, 5-tap LTP with +2 bias counter, order-10/16 LPC synthesis with
++order/2 bias counter, SAT16(RSHIFT_ROUND(SMULWW(.,gain_q10),8)) output),
+bwexpander (ROUNDED multiplies on purpose — SMULWB bias destabilizes),
+lpc_analysis_filter (wrapping accumulation per reference), decode_frame
+(clean path + outBuf history shuffle).
+
+Gate: tools/crosscheck_opus_silk_frame.py — 250 sequences x 4 chained
+frames vs the REAL silk_decode_frame (incl. its PLC/CNG upkeep, proving
+those are output-neutral on clean streams): xq PCM and tells
+BYTE-IDENTICAL. PLC/CNG state upkeep still stubbed (documented in code);
+becomes real work in the PLC item.
+
+Remaining in O2: silk_Decode top level (frame-size/rate dispatch, stereo
+weights + MS->LR unmix, resamplers to the API rate, LBRR/VAD header
+flags), opus_decode_native integration + hybrid, PLC/CNG, RFC vectors.
+
+## O2 progress 5 (2026-07-10): stereo layer DONE; resamplers in flight
+
+opus_silk_stereo.{hpp,cpp}: stereo predictor decode (joint 5x5 MSBs +
+uniform3/uniform5 fine, Q13 dequant with half-substep 6554 Q16, pred[0]
+-= pred[1] for cascaded application), mid-only flag, MS->LR unmix
+(2-sample carry, 8 ms predictor interpolation, 3-tap smoothed mid into
+side, saturated L/R). Gate: tools/crosscheck_opus_silk_stereo.py — 300
+sequences x 4 chained frames, byte-identical. Resampler module being
+built in background with its own byte-exact gate.
+
+Remaining in O2 after resamplers: silk_Decode top level (dec_API.c:
+header flags VAD/LBRR per frame, frame-size dispatch, stereo glue incl.
+mid-only handling, resample to API rate), opus_decode_native integration
++ hybrid (SILK + CELT in one ec), PLC/CNG, RFC test vectors.
+
+## O2 MILESTONE 2 (2026-07-10): top-level SILK decoder byte-identical
+
+- opus_silk_resampler.{hpp,cpp} (agent-built, mutant-tested gate): the
+  four decode-reachable kernels (copy, up2_HQ, IIR_FIR, down_FIR) over
+  all 15 (8/12/16 -> 8/12/16/24/48 kHz) pairs, byte-identical across 220
+  chained blocks each. Invariants: ratio math on Hz with ROUND-UP Q16,
+  first 1 ms flows through the delay-equalization buffer, down_FIR's
+  batch loop exits on inLen > 1 (reference quirk, replicated).
+- opus_silk_decoder.{hpp,cpp}: silk_Decode equivalent — VAD/LBRR header
+  flags + LBRR distribution + LBRR skip-on-normal-decode, stereo pred/
+  mid-only glue with the side-reset on mid-only transitions, per-channel
+  frame decode with the conditional-coding rules (INDEP_NO_LTP_SCALING
+  after skipped side frames), MS->LR or mono carry, resample to API rate,
+  stereo_to_mono collapse handling, channel-transition state resets.
+  DecoderState::set_fs now mirrors decoder_set_fs faithfully (guarded
+  resets incl. LastGainIndex=10, lagPrev=100 on rate change; returns
+  "resampler needs reinit").
+- Gate: tools/crosscheck_opus_silk_dec.py — 150 sequences x 3 packets
+  with mono<->stereo/rate/duration changes at packet boundaries vs the
+  reference silk_Decode: PCM and tells BYTE-IDENTICAL.
+- Integration bug the gate caught instantly: passing api HZ where the
+  resampler init takes KHZ — output lacked the resampler warm-up delay
+  while tells still matched ("tell equal + PCM off from sample 1" =
+  post-wire plumbing, same lesson family as the soft-clip story).
+
+Remaining in O2: opus layer integration (SILK-only packets in
+OpusDecoder; hybrid = SILK WB + CELT >=8k in ONE ec with the CELT start
+band 17), PLC/CNG, then RFC test vectors 01-12 as the exit gate.
+
+## O2 MILESTONE 3 (2026-07-10): full three-mode Opus decoding + 9/12 RFC vectors
+
+- OpusDecoder now routes all TOC modes: SILK-only (0..11, internal rate
+  from bandwidth, 40/60 ms via chained silk decodes), hybrid (12..15:
+  SILK-WB + CELT start band 17 on the SAME range decoder), CELT-only.
+  CELT endband by bandwidth incl. the MB->17 mapping.
+- **Transition redundancy implemented** (the deferred machinery — real
+  voip streams need it: the encoder appends a 5 ms CELT frame when
+  switching modes). Hybrid flags it (bit_logp 12 + uint(256)+2 bytes);
+  SILK-only IMPLIES it when >=17 bits remain after the SILK data (the
+  tell-gate). RangeDecoder::shrink() cuts the redundant bytes from the
+  main frame's budget. CELT->SILK: redundant frame continues the old CELT
+  state and owns the first 2.5 ms + fade; SILK->CELT: fresh CELT state
+  primed by the redundant frame + tail fade; final range = main ^
+  redundant. CELT reset on mode switch is gated on !prev_redundancy.
+  (Found via a single voip packet with a range mismatch — the last SILK
+  packet before a CELT switch.)
+- E2E gate now 38 configs incl. SILK NB/MB/WB 10-60 ms and hybrid
+  SWB/FB: ALL final ranges exact; SILK-only PCM is BIT-EXACT (0 LSB),
+  CELT/hybrid within 4 LSB.
+- **Official RFC 6716/8251 test vectors (tools/test_opus_vectors.py):
+  9/12 PASS via opus_compare, and 12/12 have ZERO range mismatches
+  (23k+ packets)** — the whole wire decode is right; vectors 05/06/10
+  fail only on PCM: they exercise NON-redundant mode transitions whose
+  crossfades need PLC frames (SILK PLC + celt_decode_lost).
+
+NEXT (the last O2 item): PLC/CNG (celt_decode_lost, silk PLC+CNG, DTX
+zero-length frames, transition fades without redundancy) -> expect
+12/12 vectors. Then O3 (Ogg) / O4 (CELT encoder).
+
+## O2 COMPLETE (2026-07-10): RFC-CONFORMANT OPUS DECODER — 12/12 test vectors
+
+**tools/test_opus_vectors.py: all 12 official RFC 6716/8251 test vectors
+PASS the normative opus_compare procedure (97.1-100% quality), with ZERO
+range mismatches across ~20k packets.** The clean-room decoder is
+conformant.
+
+Final pieces (this pass):
+- SILK PLC + CNG (opus_silk_plc.{hpp,cpp}, agent-built): conceal/update/
+  glue + comfort noise, byte-identical over 500 sequences with 605
+  concealed frames. KEY reference corrections: PLC/CNG reset LAZILY on an
+  fs mismatch inside silk_PLC/silk_CNG (decoder_set_fs does NOT reset
+  them); init runs while frame_length==0 (pitch 0, gains 1.0, CNG seed
+  3176576). decode_core's voiced-PLC->unvoiced patch writes into ctrl
+  (the PLC update must see it).
+- CELT PLC (in opus_celt_decoder.cpp, agent-built): noise/CNG branch +
+  pitch-based branch (pitch_downsample/pitch_search/_celt_lpc ports;
+  remove_doubling NOT needed), prefilter_and_fold, skip_plc, the
+  loss-safety energy block. Two latent glint bugs found by its gate:
+  background_log_e_ inits to 0 (NOT -28 — only oldLogE gets -28), and
+  synthesis passed literal 0 for start (hybrid no-op until then).
+- SilkDecoder::decode_lost (dec_API loss path: stored config, prev
+  stereo predictors, has_side=!prev_decode_only_middle, LastGainIndex=10
+  after loss, prev_decode_only_middle NOT updated).
+- opus_decoder.cpp: full transition orchestration — concealment
+  recursion for lost/DTX (F20 chunks, F10/F5 clamps), transition fade
+  sources in the OLD mode, SILK reset on CELT->SILK, hybrid->SILK
+  CELT-silence fade-out frame, gated celt_to_silk application, and the
+  vector-10 lesson: **redundancy CANCELS the transition fade**
+  (`if (redundancy) transition = 0`) and the SILK-side transition PLC
+  decodes AFTER the redundancy parse. Found by bisecting vector 10 to 8
+  diverging packets, all CELT->hybrid switches carrying redundancy.
+- Final range convention: concealed frames report 0.
+
+All gates green: 301/301 unit, every crosscheck_opus_*.py, E2E 38
+configs, 12/12 vectors.
+
+O2 leftovers for later polish: FEC (LBRR decode-on-request), DTX beyond
+the per-frame conceal, decoder sample rates != 48k (API resampling
+covers 8-48k in SILK; CELT downsample path unimplemented), OPUS_SET_GAIN.
+NEXT: O3 (Ogg Opus demux -> decode .opus FILES) and/or O4 (CELT encoder).
+
+## O3 DONE (2026-07-10): Ogg Opus — glint decodes .opus FILES
+
+opus_ogg.{hpp,cpp}: Ogg page parse with CRC (0x04C11DB7 MSB-first, zero
+init/xor, CRC field zeroed for the check), packet reassembly (lacing +
+cross-page continuation, dangling-partial drop), OpusHead/OpusTags,
+edit-list semantics (pre-skip front trim, last-granule end trim, Q7.8 dB
+output gain). Mapping families 0 and 1 up to 2 channels (multistream
+deferred). tools/opusfile_dec_cli.cpp = .opus -> int16 PCM.
+
+Gate: tools/test_opus_ogg.py — 8 ffmpeg/libopus-encoded .opus configs
+(SILK/hybrid/CELT, VBR+CBR, mono+stereo, 10-40 ms frames) decoded and
+compared against ffmpeg FORCED to decode via libopus (its native opus
+decoder differs at more LSBs): sample counts exact, PCM within 1 LSB.
+
+MERGE CONDITION (user, 2026-07-10): decode + encode both proven correct
+=> merge feature/opus to main. Decode side is done; O4 (CELT encoder)
+is the remaining gate.
+
+## O4 — CELT-only encoder (STARTED 2026-07-10): plan
+
+This is the MERGE GATE: once the encoder is proven correct (its streams
+decode with libopus AND glint's decoder, sane quality), feature/opus
+merges to main.
+
+Strategy (mirrors the MP3/AAC history: wire-correct first, quality
+iterated later). CELT's implicit allocation means the encoder REUSES the
+verified decoder machinery — the wire-coupled integer parts are already
+byte-exact: RangeEncoder (O0), laplace_encode, encode_pulses/CWRS,
+compute_allocation (needs an encode twin of the skip/intensity/dual
+symbol I/O), tables, bits2pulses/caps.
+
+Build order:
+1. Forward MDCT (agent in flight): CeltImdct::forward vs
+   clt_mdct_forward + TDAC round-trip gate.
+2. EC-ref refactor: rate/bands take {RangeEncoder*, RangeDecoder*} so
+   the same integer logic reads OR writes the skip/intensity/dual/theta
+   symbols (reference uses an `encode` flag on one ec_ctx). Decode gates
+   must stay green after the refactor.
+3. Encoder-side energy: quant_coarse_energy (two-pass intra/inter with
+   budget clamp), quant_fine_energy, quant_energy_finalise;
+   amp2Log2/compute_band_energies/normalise_bands (float side).
+4. Bands encode paths: alg_quant (op_pvq_search), stereo_split,
+   intensity_stereo, stereo_itheta + theta encode, haar/collapse on the
+   encode side of quant_band/partition/quant_all_bands.
+5. celt_encode_with_ec top level, SIMPLE first: long blocks only
+   (transient analysis later), spread normal, trim 5, no dynalloc, no
+   prefilter (gain 0), CBR via padding/ec_enc_shrink (needs the O0
+   leftovers ec_enc_shrink + ec_enc_patch_initial_bits). Output is a
+   VALID stream at any quality.
+6. Opus packetization (TOC + code 0) + Ogg mux (opus_ogg writer:
+   OpusHead/OpusTags, lacing, granule, CRC) -> glint writes .opus.
+7. Gates: (a) every stream decodes with libopus with zero errors +
+   glint-decoder/libopus PCM agreement; (b) SNR/quality floor vs source;
+   (c) league entry vs libopus/ffmpeg-native via tests/compare_encoders
+   once quality work starts.
+8. Quality iteration: transients+TF, pitch prefilter (search ported in
+   PLC already), dynalloc, trim/spread analysis, VBR. League target:
+   beat ffmpeg's native CELT encoder (realistic), approach libopus.
+
+## O4 progress (2026-07-10): energy encoder + Ogg writer + allocator twin
+
+- opus_celt_enc_energy.{hpp,cpp} (agent, byte-identical over 300
+  scenarios/617 frames): band energies/amp2Log2/normalise + the full
+  two-pass quant_coarse_energy (intra-vs-inter with badness metric +
+  biased tell tiebreak, encoder-state snapshot + front-byte restore via
+  the new RangeEncoder::buffer()), fine + finalise with error feedback.
+- **CRITICAL BUILD INSIGHT: the prebuilt libopus.a is NOT
+  float-reproducible** (FLOAT_APPROX celt_log2, NEON inner products, and
+  clang FMA contraction inside quant_coarse_energy_impl). Encoder float-
+  exactness gates must recompile the reference decision files with
+  -ffp-contract=off and pin the glint side the same way. Corollary:
+  glint's encoder under default flags is a VALID encoder that is not
+  byte-identical to any particular libopus binary — validity (decodes
+  correctly everywhere) never depends on flags; only the GATES do.
+- Reference subtleties recorded: badness = sum|qi_ideal - qi_coded|,
+  intra bias (budget*delayedIntra*loss_rate)/(C*512); max_decay =
+  min(16, nbAvailableBytes/8) only when end-start>10 (3.0 for lfe),
+  decay bound reads UNCLAMPED oldEBands while prediction uses the
+  -9-clamped copy; error[] undefined outside [start,end); encoder budget
+  must equal len*8 exactly or fallback thresholds desync.
+- Ogg Opus WRITER (opus_ogg.cpp) + allocator encode twin: see commits.
+
+## O4 MILESTONE (2026-07-10): glint ENCODES conformant Opus — MERGE GATE MET
+
+- opus_celt_enc_bands.{hpp,cpp}: encoder-only float32 band coder
+  (resynth=0 semantics: masks untransformed, no folding) —
+  BYTE-IDENTICAL with libopus quant_all_bands(encode=1) over 150 fuzzed
+  frames incl. transients/TF/stereo/hybrid.
+- opus_celt_encoder.{hpp,cpp}: the simple-first top level (long blocks,
+  no transient/tf/dynalloc/prefilter/intensity, trim 5, CBR), symbol
+  sequence mirroring glint's own conformant decoder; preemphasis +
+  forward MDCT (double, narrowed to float spectra — validity never
+  depends on transform rounding) + the byte-exact layer stack.
+- tools/opus_enc_cli.cpp writes opus_demo .bit with TOC + final ranges.
+- **Gate (tools/test_opus_encoder.py): 8 configs (mono/stereo, 64-192k,
+  2.5-20 ms) — libopus's own decoder VERIFIES our final ranges on every
+  stream (the reference certifying our conformance), glint's decoder
+  matches libopus within 3 LSB, SNR 20-29 dB.** Gotcha: the SNR must
+  align for the 120-sample codec delay (a flat -4.5 dB smells like
+  misalignment, not coding).
+- Quality is intentionally untuned (analysis decisions are the knobs:
+  transients+TF, dynalloc, trim/spread analysis, prefilter, intensity,
+  VBR) — the league work comes after the merge.
+
+**MERGE CONDITION SATISFIED: decode (12/12 RFC vectors) + encode
+(libopus-certified streams) both correct.**

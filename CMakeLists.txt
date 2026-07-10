@@ -39,6 +39,28 @@ set(GLINT_SOURCES
     src/aac_psy.cpp
     src/aac_tns.cpp
     src/aac_encoder.cpp
+    src/opus_ec.cpp
+    src/opus_laplace.cpp
+    src/opus_cwrs.cpp
+    src/opus_celt_energy.cpp
+    src/opus_celt_rate.cpp
+    src/opus_celt_bands.cpp
+    src/opus_celt_decoder.cpp
+    src/opus_decoder.cpp
+    src/opus_mdct.cpp
+    src/opus_ogg.cpp
+    src/opus_celt_enc_energy.cpp
+    src/opus_celt_enc_vq.cpp
+    src/opus_celt_enc_bands.cpp
+    src/opus_celt_encoder.cpp
+    src/opus_silk_excitation.cpp
+    src/opus_silk_indices.cpp
+    src/opus_silk_nlsf.cpp
+    src/opus_silk_plc.cpp
+    src/opus_silk_frame.cpp
+    src/opus_silk_stereo.cpp
+    src/opus_silk_resampler.cpp
+    src/opus_silk_decoder.cpp
 )
 
 # Static library

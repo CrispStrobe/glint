@@ -1,8 +1,8 @@
 # glint
 
-A clean-room **MP3 + AAC-LC encoder** in C++17, MIT licensed. The name
-nods to integers (*g-lint*) and the [Shine](https://github.com/toots/shine)
-encoder lineage.
+A clean-room **MP3 + AAC-LC encoder** and **RFC-conformant Opus
+decoder** in C++17, MIT licensed. The name nods to integers (*g-lint*)
+and the [Shine](https://github.com/toots/shine) encoder lineage.
 
 Both codecs are implemented from the ISO specs (11172-3 / 13818-3 for
 MP3, 13818-7 / 14496-3 for AAC) with no third-party encoder code
@@ -32,6 +32,15 @@ vo-aacenc (Apache-2.0) is unmaintained and last on quality.
 - **Verified wire format**: every configuration decodes with zero
   errors in both ffmpeg and Apple CoreAudio, which produce metrically
   identical output; decode-based gates run in CI.
+- **Opus decoder (new, this branch): RFC-conformant.** A clean-room
+  Opus decoder built from RFC 6716 — SILK, CELT, and hybrid modes,
+  packet-loss concealment, and mode-transition handling. **All 12
+  official RFC 6716/8251 test vectors pass** the normative
+  `opus_compare` procedure (97-100% quality) with zero final-range
+  mismatches across ~20,000 packets. SILK decodes bit-identically to
+  libopus; every layer is cross-checked by a dedicated oracle harness
+  in `tools/` (byte-exact for the integer layers, peak-scaled float
+  tolerances for the transforms). See PLAN.md O-track.
 
 ## Quick start
 
@@ -189,6 +198,12 @@ AAC: PCM → 2048/8×256-pt MDCT (4 window sequences) → TNS → per-band M/S
      → distortion-controlled allocation (noise targets ∝ mask^α, budget
        bisection) or NMR shaping walk → 11-codebook Huffman with optimal
        sectioning (exact bit accounting) → ADTS frames
+
+Opus (decode): packet → TOC/framing → range decoder → energy envelope
+     (Laplace + 2-D prediction) → implicit bit allocation (re-derived
+       by the decoder, no side info) → PVQ shapes + folding +
+       anti-collapse → inverse MDCT (mixed-radix FFT) → pitch
+       postfilter → de-emphasis → PCM
 ```
 
 Shared discipline: psychoacoustic masks aligned with the measurement
@@ -204,7 +219,9 @@ historically passed while real decoders produced garbage.
 glint/
 ├── include/glint/glint.h      C API (MP3 + AAC)
 ├── src/                       MP3 core + aac_*.{hpp,cpp} (AAC core)
-├── tools/                     AAC table generator, no-FPU checker
+│                              + opus_*.{hpp,cpp} (Opus decoder, WIP)
+├── tools/                     AAC/CELT table generators, no-FPU checker,
+│                              Opus-vs-libopus cross-check harnesses
 ├── cli/main.cpp               WAV → MP3/AAC CLI
 ├── tests/                     unit + decode gates + quality/league/ABX
 ├── bindings/                  Python (ctypes) · Rust (sys+safe) · Dart FFI
@@ -234,6 +251,8 @@ the exact invocations used in CI.
 
 ## Roadmap
 
+- **Opus** (PLAN.md O-track): decoder DONE (12/12 RFC vectors). Next:
+  Ogg Opus container (decode .opus files) → CELT-only encoder → FEC.
 - On-target RP2040/ESP32 throughput measurements (harness ships, needs
   silicon).
 - The last ~0.5 PEAQ ODG to Apple on speech/electronic at 128 kbps
