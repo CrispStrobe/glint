@@ -51,15 +51,27 @@ public:
     int decode(const uint8_t* data, int32_t len, float* pcm,
                int max_samples);
 
+    // Conceal a LOST packet of frame_size samples per channel. data (the
+    // packet FOLLOWING the loss) may carry SILK in-band FEC (LBRR): its
+    // redundant copy covers the last packet-duration of the gap and PLC
+    // fills any remainder before it. data == nullptr (or no usable FEC:
+    // CELT-only packet/mode, or frame_size shorter than the packet
+    // duration) falls back to plain PLC for the whole frame_size
+    // (reference opus_decode(..., decode_fec=1)).
+    int decode_fec(const uint8_t* data, int32_t len, float* pcm,
+                   int frame_size);
+
     // Range-coder state after the last decoded frame (the Opus
     // conformance "final range" value).
     uint32_t final_range() const { return final_range_; }
 
 private:
     // data == nullptr runs concealment (lost packet / DTX / transition
-    // fade source) in the previous mode.
+    // fade source) in the previous mode. fec decodes the packet's SILK
+    // LBRR copies (CELT band gets loss concealment).
     int decode_frame_impl(const uint8_t* data, int32_t size, float* pcm,
-                          int frame_size, int config, int stereo_flag);
+                          int frame_size, int config, int stereo_flag,
+                          int fec = 0);
 
     int channels_ = 0;
     uint32_t final_range_ = 0;

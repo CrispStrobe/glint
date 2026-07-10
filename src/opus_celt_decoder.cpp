@@ -443,13 +443,16 @@ int CeltDecoder::plc_pitch_search() const {
     return kPlcPitchLagMax - pitch_index;
 }
 
-int CeltDecoder::decode_lost(float* pcm, int frame_size) {
+int CeltDecoder::decode_lost(float* pcm, int frame_size, int start_band,
+                             int end_band) {
     const int C = channels_;
     int lm;
     for (lm = 0; lm <= 3; lm++)
         if (120 << lm == frame_size) break;
     if (lm > 3) return -1;
     const int n = frame_size;
+    if (start_band >= 0) plc_start_ = start_band;
+    if (end_band >= 0) plc_end_ = end_band;
     const int start = plc_start_;
     const int end = plc_end_;
     const int loss_duration = loss_duration_;

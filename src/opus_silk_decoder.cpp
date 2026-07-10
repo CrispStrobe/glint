@@ -16,7 +16,7 @@ namespace silk {
 int SilkDecoder::decode(RangeDecoder& dec, int16_t* samples_out,
                         int channels_api, int channels_internal,
                         int internal_khz, int32_t api_hz, int payload_ms,
-                        bool new_packet) {
+                        bool new_packet, bool fec) {
     DecoderState* ch = channel_state;
     int32_t ms_pred_q13[2] = { 0, 0 };
     int decode_only_middle = 0;
@@ -92,6 +92,8 @@ int SilkDecoder::decode(RangeDecoder& dec, int16_t* samples_out,
         }
 
         // Normal decode: LBRR (redundancy) data is parsed and discarded.
+        // FEC decode consumes it in the frame loop below instead.
+        if (!fec)
         for (int i = 0; i < ch[0].n_frames_per_packet; i++) {
             for (int n = 0; n < channels_internal; n++) {
                 if (!ch[n].lbrr_flags[i]) continue;
@@ -112,13 +114,22 @@ int SilkDecoder::decode(RangeDecoder& dec, int16_t* samples_out,
         }
     }
 
-    // Stereo predictors for THIS frame (+ mid-only if the side is silent).
+    // Stereo predictors for THIS frame (+ mid-only if the side is
+    // silent). FEC: only when this frame has an LBRR copy; else reuse
+    // the previous predictors.
     if (channels_internal == 2) {
-        stereo_decode_pred(dec, ms_pred_q13);
-        if (ch[1].vad_flags[ch[0].n_frames_decoded] == 0)
-            decode_only_middle = stereo_decode_mid_only(dec);
-        else
-            decode_only_middle = 0;
+        if (!fec || ch[0].lbrr_flags[ch[0].n_frames_decoded] == 1) {
+            stereo_decode_pred(dec, ms_pred_q13);
+            if ((!fec &&
+                 ch[1].vad_flags[ch[0].n_frames_decoded] == 0) ||
+                (fec && ch[1].lbrr_flags[ch[0].n_frames_decoded] == 0))
+                decode_only_middle = stereo_decode_mid_only(dec);
+            else
+                decode_only_middle = 0;
+        } else {
+            ms_pred_q13[0] = stereo.pred_prev_q13[0];
+            ms_pred_q13[1] = stereo.pred_prev_q13[1];
+        }
     }
 
     // First side frame after mid-only coding starts from silence.
@@ -132,7 +143,11 @@ int SilkDecoder::decode(RangeDecoder& dec, int16_t* samples_out,
         ch[1].first_frame_after_reset = 1;
     }
 
-    int has_side = !decode_only_middle;
+    int has_side =
+        !fec ? !decode_only_middle
+             : (!prev_decode_only_middle ||
+                (channels_internal == 2 &&
+                 ch[1].lbrr_flags[ch[1].n_frames_decoded] == 1));
     int16_t ch_out[2][322];  // frame + two-sample carry per channel
     int n_dec = ch[0].frame_length;
 
@@ -142,11 +157,15 @@ int SilkDecoder::decode(RangeDecoder& dec, int16_t* samples_out,
             int cond;
             if (frame_index <= 0)
                 cond = kCodeIndependently;
+            else if (fec)
+                cond = ch[n].lbrr_flags[frame_index - 1]
+                           ? kCodeConditionally
+                           : kCodeIndependently;
             else if (n > 0 && prev_decode_only_middle)
                 cond = kCodeIndependentlyNoLtpScaling;
             else
                 cond = kCodeConditionally;
-            decode_frame(&ch[n], dec, &ch_out[n][2], cond);
+            decode_frame(&ch[n], dec, &ch_out[n][2], cond, fec);
         } else {
             std::memset(&ch_out[n][2], 0, n_dec * sizeof(int16_t));
         }

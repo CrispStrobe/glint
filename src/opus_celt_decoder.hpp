@@ -46,12 +46,17 @@ public:
 
     // Conceal one lost frame (the reference celt_decode_with_ec data==NULL
     // path: celt_decode_lost + de-emphasis). frame_size is 120<<LM like
-    // decode_frame; uses the band range of the last decoded frame. After
-    // two consecutive good frames the concealment is pitch-based (waveform
-    // extrapolation in the LPC excitation domain); at stream start, for
-    // hybrid, or after >=100 ms of loss it falls back to per-band noise at
-    // decaying energy. Returns frame_size or a negative error.
-    int decode_lost(float* pcm, int frame_size);
+    // decode_frame. start_band/end_band mirror the reference's
+    // CELT_SET_{START,END}_BAND ctls the Opus layer issues before EVERY
+    // celt call including PLC — pass them (hybrid start 17) or the PLC of
+    // a freshly reset decoder sprays band-0 noise; -1 keeps the last
+    // decoded frame's range. After two consecutive good frames the
+    // concealment is pitch-based (waveform extrapolation in the LPC
+    // excitation domain); at stream start, for hybrid, or after >=100 ms
+    // of loss it falls back to per-band noise at decaying energy.
+    // Returns frame_size or a negative error.
+    int decode_lost(float* pcm, int frame_size, int start_band = -1,
+                    int end_band = -1);
 
     uint32_t range_final() const { return rng_; }
 

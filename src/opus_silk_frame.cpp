@@ -3,6 +3,8 @@
 
 #include "opus_silk_frame.hpp"
 
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "opus_silk_excitation.hpp"
@@ -268,16 +270,21 @@ void decode_core(DecoderState* st, DecoderControl& ctrl, int16_t* xq,
 }
 
 int decode_frame(DecoderState* st, RangeDecoder* dec, int16_t* xq,
-                 int cond_coding, bool lost) {
+                 int cond_coding, bool lost, bool lbrr) {
     DecoderControl ctrl;
     ctrl.ltp_scale_q14 = 0;
     int mv_len = st->ltp_mem_length - st->frame_length;
+
+    // LBRR decode of a frame that carries no LBRR copy => concealment
+    // (reference: the flag check lives inside silk_decode_frame).
+    if (lbrr && !st->lbrr_flags[st->n_frames_decoded]) lost = true;
+
 
     if (!lost) {
         int16_t pulses[(kMaxFrameLength + kShellCodecFrameLength - 1) &
                        ~(kShellCodecFrameLength - 1)];
 
-        decode_indices(st, *dec, st->n_frames_decoded, false, cond_coding);
+        decode_indices(st, *dec, st->n_frames_decoded, lbrr, cond_coding);
         decode_pulses(*dec, pulses, st->indices.signal_type,
                       st->indices.quant_offset_type, st->frame_length);
         decode_parameters(st, &ctrl, cond_coding);

@@ -1896,3 +1896,39 @@ libopus-cbr -1.03; libopus-vbr -0.58), **torture 96k glint-cbr -1.84
 -> -0.92** / vbr -2.49 -> -1.22 (libopus -0.76/-0.85) — the two league
 losses are now near-parity. Piano 96k VBR audible band-frames 9.0 ->
 3.8%. CBR clip SNRs +-0.3 dB. Gate 11/11, ranges libopus-certified.
+
+# Opus O5 polish
+
+## O5.1 (2026-07-10): SILK in-band FEC decode — done
+
+OpusDecoder::decode_fec(data, len, pcm, frame_size): recover a LOST
+packet from the NEXT packet's LBRR copy (plain PLC when data is null /
+no usable FEC: CELT-only packet or mode, frame_size < packet duration).
+SilkDecoder::decode(..., fec): reference FLAG_DECODE_LBRR semantics —
+header flags read as usual, LBRR skip loop bypassed, stereo predictors
+only when this frame HAS an LBRR copy (else pred_prev), has_side from
+prev_decode_only_middle OR the side channel's LBRR flag, condCoding
+from the PREVIOUS frame's LBRR flag, per-frame "LBRR flag 0 => PLC"
+fallback inside decode_frame (which now threads lbrr into
+decode_indices). LastGainIndex=10 clamp stays PLAIN-loss-only.
+
+Gate: tools/crosscheck_opus_fec.py (dual-compiled driver, deterministic
+20% xorshift loss, FEC+PLC+normal interleaving): **BYTE-IDENTICAL PCM +
+ranges vs libopus on SILK-only WB streams, mono and stereo (301
+packets, 50 FEC recoveries each)**; mode-switching (hybrid) stream:
+ranges identical, PCM within 256 (worst 217 ~ -44 dBFS concealment
+noise; the CELT half is float and never byte-exact). 12/12 RFC vectors
+and E2E still pass.
+
+**The hard-won bug — CELT PLC needs the band range EVERY call.** The
+reference issues CELT_SET_START_BAND/END_BAND ctls before every celt
+call INCLUDING loss concealment; glint's CeltDecoder::decode_lost used
+the band range of the last DECODED frame. First hybrid FEC after a
+SILK-only run resets the CELT state (mode switch) and then concealed
+with the default range [0,21) — the noise-based PLC floor
+(max(backgroundLogE=0, oldE-decay) = 0 in the eMeans log domain, NOT
+silence!) sprayed band-0..21 noise at -30 dBFS over the SILK output.
+decode_lost now takes start/end (hybrid 17, CELT 0) like the ctls.
+Debug signature: FEC output plausible-but-loud, ranges fine, plain PLC
+byte-exact. Driver lesson: match FLOAT2INT16 exactly (float multiply +
+lrintf; double lrint rounds differently at half-LSB points).

@@ -36,9 +36,11 @@ struct SilkDecoder {
     // PCM at api_hz. payload_ms is the TOC audio size (10/20/40/60);
     // frames beyond the first are decoded by repeated calls with
     // new_packet = false. Returns samples per channel, or negative error.
+    // fec == true decodes the packet's LBRR (redundancy) copies instead
+    // of the normal frames (reference silk_Decode FLAG_DECODE_LBRR).
     int decode(RangeDecoder& dec, int16_t* samples_out, int channels_api,
                int channels_internal, int internal_khz, int32_t api_hz,
-               int payload_ms, bool new_packet);
+               int payload_ms, bool new_packet, bool fec = false);
 
     // Conceal one frame set (lost packet / DTX / transition source) using
     // the previous configuration; no bitstream reads

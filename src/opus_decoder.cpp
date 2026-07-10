@@ -4,6 +4,8 @@
 #include "opus_decoder.hpp"
 
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "opus_mdct.hpp"
@@ -238,7 +240,7 @@ void smooth_fade(const float* in1, const float* in2, float* out,
 
 int OpusDecoder::decode_frame_impl(const uint8_t* data, int32_t size,
                                    float* pcm, int frame_size, int config,
-                                   int stereo_flag) {
+                                   int stereo_flag, int fec) {
     const int stream_channels = stereo_flag ? 2 : 1;
     int mode, audiosize, end_band = 21;
     constexpr int kF20 = 960, kF10 = 480, kF5 = 240, kF2_5 = 120;
@@ -322,7 +324,7 @@ int OpusDecoder::decode_frame_impl(const uint8_t* data, int32_t size,
                 ret = silk_.decode(dec, pcm_silk + n_silk * channels_,
                                    channels_, stream_channels,
                                    internal_khz, 48000, payload_ms,
-                                   n_silk == 0);
+                                   n_silk == 0, fec != 0);
             else
                 ret = silk_.decode_lost(pcm_silk + n_silk * channels_,
                                         channels_, payload_ms,
@@ -334,7 +336,7 @@ int OpusDecoder::decode_frame_impl(const uint8_t* data, int32_t size,
 
     int redundancy = 0, celt_to_silk = 0;
     int32_t redundancy_bytes = 0;
-    if (data != nullptr && mode != 3 &&
+    if (data != nullptr && !fec && mode != 3 &&
         static_cast<int32_t>(dec.tell()) + 17 + 20 * (mode == 2) <=
             8 * len) {
         redundancy = mode == 2 ? dec.dec_bit_logp(12) : 1;
@@ -385,12 +387,12 @@ int OpusDecoder::decode_frame_impl(const uint8_t* data, int32_t size,
         if (mode != prev_mode_ && prev_mode_ > 0 && !prev_redundancy_)
             celt_.init(channels_);
         int ret;
-        if (data != nullptr)
+        if (data != nullptr && !fec)
             ret = celt_.decode_frame(dec, static_cast<uint32_t>(len), pcm,
                                      celt_frame, stream_channels, end_band,
                                      start_band);
         else
-            ret = celt_.decode_lost(pcm, celt_frame);
+            ret = celt_.decode_lost(pcm, celt_frame, start_band, end_band);
         if (ret < 0) return ret;
     } else {
         std::memset(pcm, 0, static_cast<size_t>(frame_size) * channels_ *
@@ -411,6 +413,7 @@ int OpusDecoder::decode_frame_impl(const uint8_t* data, int32_t size,
         for (int i = 0; i < frame_size * channels_; i++)
             pcm[i] += pcm_silk[i] * (1.0f / 32768.0f);
     }
+
 
     if (redundancy && !celt_to_silk) {
         // SILK->CELT: prime a fresh CELT state, fade the tail into it.
@@ -454,6 +457,36 @@ int OpusDecoder::decode_frame_impl(const uint8_t* data, int32_t size,
     prev_mode_ = mode;
     prev_redundancy_ = redundancy && !celt_to_silk;
     final_range_ = data != nullptr ? dec.range() ^ redundant_rng : 0;
+    return frame_size;
+}
+
+int OpusDecoder::decode_fec(const uint8_t* data, int32_t len, float* pcm,
+                            int frame_size) {
+    OpusPacket pkt;
+    bool have = data != nullptr && len > 0 &&
+                opus_packet_parse(data, len, &pkt) == 0;
+    int packet_mode =
+        have ? (pkt.config < 12 ? 1 : (pkt.config < 16 ? 2 : 3)) : 0;
+    if (!have || frame_size < pkt.frame_size || packet_mode == 3 ||
+        prev_mode_ == 3) {
+        // No usable FEC: plain concealment for the whole gap.
+        return decode_frame_impl(nullptr, 0, pcm, frame_size, 0,
+                                 channels_ == 2);
+    }
+    // Conceal everything the redundant copy doesn't cover, then decode
+    // the FIRST frame's LBRR data for the tail (reference
+    // opus_decode_native decode_fec path).
+    int plc = frame_size - pkt.frame_size;
+    if (plc > 0) {
+        int ret = decode_frame_impl(nullptr, 0, pcm, plc, pkt.config,
+                                    pkt.stereo);
+        if (ret < 0) return ret;
+    }
+    int ret =
+        decode_frame_impl(pkt.frames[0], pkt.sizes[0],
+                          pcm + plc * channels_, pkt.frame_size,
+                          pkt.config, pkt.stereo, /*fec=*/1);
+    if (ret < 0) return ret;
     return frame_size;
 }
 

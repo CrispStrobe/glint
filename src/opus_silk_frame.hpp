@@ -53,14 +53,16 @@ void bwexpander(int16_t* ar, int order, int32_t chirp_q16);
 
 // Decode one frame into xq (returns frame_length samples). lost == true
 // conceals from decoder state alone — dec may be null and is never read
-// (reference silk_decode_frame with FLAG_PACKET_LOST).
+// (reference silk_decode_frame with FLAG_PACKET_LOST). lbrr == true
+// decodes the frame's LBRR (redundancy) copy; if this frame carries no
+// LBRR data, it falls back to concealment, exactly like the reference.
 int decode_frame(DecoderState* st, RangeDecoder* dec, int16_t* xq,
-                 int cond_coding, bool lost);
+                 int cond_coding, bool lost, bool lbrr = false);
 // Clean-frame convenience (the pre-PLC signature; other decode layers use
 // this form).
 inline int decode_frame(DecoderState* st, RangeDecoder& dec, int16_t* xq,
-                        int cond_coding) {
-    return decode_frame(st, &dec, xq, cond_coding, false);
+                        int cond_coding, bool lbrr = false) {
+    return decode_frame(st, &dec, xq, cond_coding, false, lbrr);
 }
 
 }  // namespace silk
