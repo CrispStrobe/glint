@@ -1578,3 +1578,26 @@ Build order:
 8. Quality iteration: transients+TF, pitch prefilter (search ported in
    PLC already), dynalloc, trim/spread analysis, VBR. League target:
    beat ffmpeg's native CELT encoder (realistic), approach libopus.
+
+## O4 progress (2026-07-10): energy encoder + Ogg writer + allocator twin
+
+- opus_celt_enc_energy.{hpp,cpp} (agent, byte-identical over 300
+  scenarios/617 frames): band energies/amp2Log2/normalise + the full
+  two-pass quant_coarse_energy (intra-vs-inter with badness metric +
+  biased tell tiebreak, encoder-state snapshot + front-byte restore via
+  the new RangeEncoder::buffer()), fine + finalise with error feedback.
+- **CRITICAL BUILD INSIGHT: the prebuilt libopus.a is NOT
+  float-reproducible** (FLOAT_APPROX celt_log2, NEON inner products, and
+  clang FMA contraction inside quant_coarse_energy_impl). Encoder float-
+  exactness gates must recompile the reference decision files with
+  -ffp-contract=off and pin the glint side the same way. Corollary:
+  glint's encoder under default flags is a VALID encoder that is not
+  byte-identical to any particular libopus binary — validity (decodes
+  correctly everywhere) never depends on flags; only the GATES do.
+- Reference subtleties recorded: badness = sum|qi_ideal - qi_coded|,
+  intra bias (budget*delayedIntra*loss_rate)/(C*512); max_decay =
+  min(16, nbAvailableBytes/8) only when end-start>10 (3.0 for lfe),
+  decay bound reads UNCLAMPED oldEBands while prediction uses the
+  -9-clamped copy; error[] undefined outside [start,end); encoder budget
+  must equal len*8 exactly or fallback thresholds desync.
+- Ogg Opus WRITER (opus_ogg.cpp) + allocator encode twin: see commits.

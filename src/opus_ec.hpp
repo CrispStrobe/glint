@@ -89,6 +89,10 @@ public:
     // Bytes written at the front (valid after done(); back bytes fill the
     // remainder of the buffer).
     uint32_t range_bytes() const { return offs_; }
+    // The buffer passed to init(). CELT's two-pass coarse-energy encoder
+    // snapshots the encoder state, and saves/restores the front bytes the
+    // discarded pass wrote (the reference's ec_get_buffer usage).
+    uint8_t* buffer() const { return buf_; }
     // Shrink the buffer to `size` bytes (CBR/VBR final sizing): moves any
     // raw-bit tail bytes up against the new end. Requires
     // offs + end_offs <= size.
