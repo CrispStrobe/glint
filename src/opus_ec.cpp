@@ -171,6 +171,33 @@ void RangeEncoder::enc_bits(uint32_t fl, unsigned bits) {
     nbits_total_ += bits;
 }
 
+void RangeEncoder::shrink(uint32_t size) {
+    // Raw bits live at the buffer end; carry them to the new end.
+    std::memmove(buf_ + size - end_offs_, buf_ + storage_ - end_offs_,
+                 end_offs_);
+    storage_ = size;
+}
+
+void RangeEncoder::patch_initial_bits(unsigned value, unsigned nbits) {
+    unsigned shift = kSymBits - nbits;
+    unsigned mask = ((1u << nbits) - 1) << shift;
+    if (offs_ > 0) {
+        // First byte already finalized.
+        buf_[0] = static_cast<uint8_t>((buf_[0] & ~mask) | (value << shift));
+    } else if (rem_ >= 0) {
+        // First byte still awaiting carry propagation.
+        rem_ = static_cast<int>((static_cast<unsigned>(rem_) & ~mask) |
+                                (value << shift));
+    } else if (rng_ <= (kCodeTop >> nbits)) {
+        // Renormalization has not run yet; patch inside val.
+        val_ = (val_ & ~(static_cast<uint32_t>(mask) << kCodeShift)) |
+               (static_cast<uint32_t>(value) << (kCodeShift + shift));
+    } else {
+        // Fewer than nbits encoded so far.
+        error_ = -1;
+    }
+}
+
 void RangeEncoder::done() {
     // Find the shortest bit string that, zero-extended, still lands inside
     // [val, val + rng): round val up at each precision until the rounded

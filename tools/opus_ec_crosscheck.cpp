@@ -29,6 +29,8 @@ struct EncA {
     void uint_(uint32_t v, uint32_t ft) { ec_enc_uint(&e, v, ft); }
     void bits(uint32_t v, unsigned n) { ec_enc_bits(&e, v, n); }
     void done() { ec_enc_done(&e); }
+    void shrink(uint32_t n) { ec_enc_shrink(&e, n); }
+    void patch(unsigned v, unsigned n) { ec_enc_patch_initial_bits(&e, v, n); }
     uint32_t tell() { return (uint32_t)ec_tell(&e); }
     uint32_t tellf() { return ec_tell_frac(&e); }
     int error() { return e.error; }
@@ -60,6 +62,8 @@ struct EncA {
     void uint_(uint32_t v, uint32_t ft) { e.enc_uint(v, ft); }
     void bits(uint32_t v, unsigned n) { e.enc_bits(v, n); }
     void done() { e.done(); }
+    void shrink(uint32_t n) { e.shrink(n); }
+    void patch(unsigned v, unsigned n) { e.patch_initial_bits(v, n); }
     uint32_t tell() { return e.tell(); }
     uint32_t tellf() { return e.tell_frac(); }
     int error() { return e.error(); }
@@ -216,6 +220,30 @@ int main() {
         dec2.init(buf, nbytes);
         run_decode(seed, dec2, true);
         std::printf("decerr %d\n", dec2.error());
+
+        // Third pass: patch_initial_bits after a few symbols, encode the
+        // rest, then shrink to the exact size before done() (the Opus
+        // encoder's TOC-fixup + CBR-sizing usage).
+        EncA enc3;
+        enc3.init(buf, kBufSize);
+        rng_state = seed ^ 0x5a5a5a5a;
+        for (int i = 0; i < 3; i++) {
+            uint32_t ft = 2 + xrand() % 200;
+            uint32_t fl = xrand() % ft;
+            enc3.encode(fl, fl + 1, ft);
+        }
+        enc3.patch(seed & 3, 2);
+        for (int i = 0; i < 200; i++) {
+            unsigned b = 1 + xrand() % 12;
+            uint32_t fl = xrand() & ((1u << b) - 1);
+            enc3.encode_bin(fl, fl + 1, b);
+            if (i % 7 == 0) enc3.bits(xrand() & 0x3F, 6);
+        }
+        uint32_t need = (enc3.tell() + 7) / 8;
+        enc3.shrink(need + 2);
+        enc3.done();
+        std::printf("patched encerr %d\n", enc3.error());
+        dump(buf, need + 2);
     }
     return 0;
 }

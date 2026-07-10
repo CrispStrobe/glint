@@ -89,6 +89,14 @@ public:
     // Bytes written at the front (valid after done(); back bytes fill the
     // remainder of the buffer).
     uint32_t range_bytes() const { return offs_; }
+    // Shrink the buffer to `size` bytes (CBR/VBR final sizing): moves any
+    // raw-bit tail bytes up against the new end. Requires
+    // offs + end_offs <= size.
+    void shrink(uint32_t size);
+    // Rewrite the first `nbits` (<= 8) bits already emitted (Opus patches
+    // mode/flag bits after rate decisions). Sets error() if more than a
+    // renormalization's worth of data was already produced.
+    void patch_initial_bits(unsigned value, unsigned nbits);
 
 private:
     int write_byte(unsigned value);
