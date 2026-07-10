@@ -1655,3 +1655,24 @@ already ported for PLC) + transient/TF analysis are the first two
 campaign items.** Then: dynalloc, trim/spread analysis, intensity
 stereo, VBR, and wiring `tests/compare_encoders.py --codec opus`
 (ODG/PEAQ) for the league.
+
+## O4 quality item 1 (2026-07-10): pitch PREFILTER — done
+
+opus_celt_pitch.{hpp,cpp}: pitch chain shared out of the decoder's
+PLC section (verbatim bodies, decoder keeps its verified local copies)
++ remove_doubling (sub-multiple disambiguation, fresh port) +
+comb_filter_shared. Encoder: run_prefilter equivalent (unfiltered
+prefilter_mem history, downsampled pitch search over 1024-45 lags,
+remove_doubling with continuity, 0.7x gain, rate/continuity thresholds,
+qg 3-bit quantization, comb with NEGATED gains + old->new fade), header
+signaling with the reference's pitch_index+1 octave trick, state
+rotation mirroring the decoder's postfilter.
+
+Measured: gate tones +2..+2.6 dB; piano 18.5->19.1 (96k), 24.0->24.6
+(192k); quartet/electronic unchanged (prefilter mostly off there). All
+streams remain libopus-range-certified. Piano's remaining -3.8 dB gap
+vs libopus = note-onset PRE-ECHO -> item 2 is transient analysis +
+short blocks (the band encoder already passes its byte-exact gate WITH
+transients; only the top-level analysis + short-MDCT + anti-collapse
+bit are missing). Note: enc prefilter and dec postfilter fades are
+offset by one short-MDCT by design — the synthesis delay aligns them.

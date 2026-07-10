@@ -1,10 +1,10 @@
 // CELT frame encoder — RFC 6716 section 4.3 (encoder side)
 // MIT License - Clean-room implementation
 //
-// A deliberately SIMPLE first encoder (PLAN § O4): long blocks only, no
-// transient/TF analysis (tf_res all zero), spread normal, no dynalloc
-// boosts, neutral trim, no pitch prefilter, no intensity/dual stereo,
-// pure CBR. Every symbol layer underneath is byte-exact with libopus
+// A SIMPLE-first encoder (PLAN § O4): long blocks only, no transient/TF
+// analysis (tf_res all zero), spread normal, no dynalloc boosts, neutral
+// trim, no intensity/dual stereo, pure CBR — but WITH the pitch
+// prefilter (quality campaign item 1: tonal content). Every symbol layer underneath is byte-exact with libopus
 // (energy, allocator, theta/PVQ), so streams are valid by construction;
 // the top-level DECISIONS are the quality knobs to iterate on later.
 //
@@ -40,11 +40,18 @@ private:
     static constexpr int kOverlap = 120;
     static constexpr int kMaxFrame = 960;
 
+    static constexpr int kCombMaxPeriod = 1024;
+
     int channels_ = 0;
     uint32_t final_range_ = 0;
     float preemph_mem_[2] = {};
-    // Overlap history + current frame, per channel (MDCT input layout).
-    float in_mem_[2][kOverlap + kMaxFrame] = {};
+    // FILTERED overlap history per channel (MDCT input head).
+    double in_mem_[2][kOverlap] = {};
+    // UNFILTERED pre-emphasized input history (prefilter comb source).
+    double prefilter_mem_[2][kCombMaxPeriod] = {};
+    int prefilter_period_ = 0;
+    double prefilter_gain_ = 0;
+    int prefilter_tapset_ = 0;
     float old_ebands_[2 * 21] = {};
     float energy_error_[2 * 21] = {};
     float delayed_intra_ = 1.0f;
