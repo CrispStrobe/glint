@@ -1361,3 +1361,21 @@ gains_dequant (chain-limited, double-step escape, log2lin), decode_pitch
 — 400 fuzzed sequences x 3 chained frames (cond coding, prev lag/type
 carry), byte-identical incl. tells. NLSF chain (dequant/stabilize/NLSF2A)
 in flight with its own gate.
+
+## O2 progress 4 (2026-07-10): NLSF -> LPC chain DONE
+
+opus_silk_nlsf.{hpp,cpp}: residual dequant (backwards prediction, Q10
+dead-zone 102), stage-1 combination, nlsf_stabilize (20-round min-delta
+repair + sort/clamp fallback), nlsf2a (cos-table interp, P/Q convolution
+QA=16, lpc_fit Q17->Q12 with up-to-16-round chirp repair), bwexpander_32,
+lpc_inverse_pred_gain (QA=24). Gate:
+tools/crosscheck_opus_silk_nlsf.py — 2400 index vectors per path,
+byte-identical, with instrumented proof the repair paths actually ran
+(stabilize fallback 2080x, LPC_fit expansion 9108x, chirp rounds 19496x).
+Math kit gained add_sat16 (gate re-run PASS).
+Constants worth knowing: LPC_fit chirp = 65470 (0.999 Q16, NOT 65471);
+lpc_inverse_pred_gain thresholds 16773022 (0.99975 Q24) / 107374
+(1e-4 Q30) — float-rounded reference expressions.
+
+Remaining in O2: decode_parameters + decode_core (synthesis loop),
+decode_frame/silk_Decode + stereo + resamplers, hybrid, PLC, RFC vectors.

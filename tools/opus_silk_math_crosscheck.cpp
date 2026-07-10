@@ -11,6 +11,7 @@ extern "C" {
 #include "SigProc_FIX.h"
 }
 #define F_SAT16(a) silk_SAT16(a)
+#define F_ADD_SAT16(a, b) silk_ADD_SAT16(a, b)
 #define F_ADD_SAT32(a, b) silk_ADD_SAT32(a, b)
 #define F_SUB_SAT32(a, b) silk_SUB_SAT32(a, b)
 #define F_LSHIFT_SAT32(a, s) silk_LSHIFT_SAT32(a, s)
@@ -35,6 +36,7 @@ extern "C" {
 #include "opus_silk_math.hpp"
 using namespace glint::opus::silk;
 #define F_SAT16(a) sat16(a)
+#define F_ADD_SAT16(a, b) add_sat16(a, b)
 #define F_ADD_SAT32(a, b) add_sat32(a, b)
 #define F_SUB_SAT32(a, b) sub_sat32(a, b)
 #define F_LSHIFT_SAT32(a, s) lshift_sat32(a, s)
@@ -91,6 +93,7 @@ int main(int argc, char**) {
         int32_t a = rnd_op(), b = rnd_op(), c = rnd_op();
         int s = 1 + (int)(xrand() % 30);
         mix(F_SAT16(a));
+        mix(F_ADD_SAT16((int16_t)a, (int16_t)b));
         mix(F_ADD_SAT32(a, b));
         mix(F_SUB_SAT32(a, b));
         mix(F_LSHIFT_SAT32(a, s));

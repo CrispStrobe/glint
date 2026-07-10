@@ -21,6 +21,11 @@ inline int32_t sat16(int32_t a) {
     return a > 32767 ? 32767 : (a < -32768 ? -32768 : a);
 }
 
+// int16-saturated sum (inputs are int16-valued; the sum is exact in int32).
+inline int16_t add_sat16(int32_t a, int32_t b) {
+    return static_cast<int16_t>(sat16(a + b));
+}
+
 inline int32_t add_sat32(int32_t a, int32_t b) {
     int64_t s = static_cast<int64_t>(a) + b;
     if (s > INT32_MAX) return INT32_MAX;

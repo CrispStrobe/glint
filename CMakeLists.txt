@@ -50,6 +50,7 @@ set(GLINT_SOURCES
     src/opus_mdct.cpp
     src/opus_silk_excitation.cpp
     src/opus_silk_indices.cpp
+    src/opus_silk_nlsf.cpp
 )
 
 # Static library
