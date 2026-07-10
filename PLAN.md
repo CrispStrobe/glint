@@ -1537,3 +1537,44 @@ decoder differs at more LSBs): sample counts exact, PCM within 1 LSB.
 MERGE CONDITION (user, 2026-07-10): decode + encode both proven correct
 => merge feature/opus to main. Decode side is done; O4 (CELT encoder)
 is the remaining gate.
+
+## O4 — CELT-only encoder (STARTED 2026-07-10): plan
+
+This is the MERGE GATE: once the encoder is proven correct (its streams
+decode with libopus AND glint's decoder, sane quality), feature/opus
+merges to main.
+
+Strategy (mirrors the MP3/AAC history: wire-correct first, quality
+iterated later). CELT's implicit allocation means the encoder REUSES the
+verified decoder machinery — the wire-coupled integer parts are already
+byte-exact: RangeEncoder (O0), laplace_encode, encode_pulses/CWRS,
+compute_allocation (needs an encode twin of the skip/intensity/dual
+symbol I/O), tables, bits2pulses/caps.
+
+Build order:
+1. Forward MDCT (agent in flight): CeltImdct::forward vs
+   clt_mdct_forward + TDAC round-trip gate.
+2. EC-ref refactor: rate/bands take {RangeEncoder*, RangeDecoder*} so
+   the same integer logic reads OR writes the skip/intensity/dual/theta
+   symbols (reference uses an `encode` flag on one ec_ctx). Decode gates
+   must stay green after the refactor.
+3. Encoder-side energy: quant_coarse_energy (two-pass intra/inter with
+   budget clamp), quant_fine_energy, quant_energy_finalise;
+   amp2Log2/compute_band_energies/normalise_bands (float side).
+4. Bands encode paths: alg_quant (op_pvq_search), stereo_split,
+   intensity_stereo, stereo_itheta + theta encode, haar/collapse on the
+   encode side of quant_band/partition/quant_all_bands.
+5. celt_encode_with_ec top level, SIMPLE first: long blocks only
+   (transient analysis later), spread normal, trim 5, no dynalloc, no
+   prefilter (gain 0), CBR via padding/ec_enc_shrink (needs the O0
+   leftovers ec_enc_shrink + ec_enc_patch_initial_bits). Output is a
+   VALID stream at any quality.
+6. Opus packetization (TOC + code 0) + Ogg mux (opus_ogg writer:
+   OpusHead/OpusTags, lacing, granule, CRC) -> glint writes .opus.
+7. Gates: (a) every stream decodes with libopus with zero errors +
+   glint-decoder/libopus PCM agreement; (b) SNR/quality floor vs source;
+   (c) league entry vs libopus/ffmpeg-native via tests/compare_encoders
+   once quality work starts.
+8. Quality iteration: transients+TF, pitch prefilter (search ported in
+   PLC already), dynalloc, trim/spread analysis, VBR. League target:
+   beat ffmpeg's native CELT encoder (realistic), approach libopus.
