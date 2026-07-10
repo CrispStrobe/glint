@@ -84,6 +84,8 @@ def have(binary):
 def contenders(args):
     if args.codec == "aac":
         return aac_contenders(args)
+    if args.codec == "opus":
+        return opus_contenders(args)
     out = []
     g = args.glint
     ch = args.mode  # "joint" or "mono"
@@ -103,6 +105,40 @@ def contenders(args):
     if have(sh):
         sm = ["-m"] if ch == "mono" else []
         out.append(("shine", lambda i, o, k: [sh, "-b", str(k)] + sm + [i, o]))
+    return out
+
+
+def opus_contenders(args):
+    """Opus league (all Ogg .opus output, 48 kHz stereo, 20 ms frames):
+    glint CELT-only CBR + VBR (opus_enc_cli + opus_mux_cli chain via a
+    shell pipeline), libopus (via ffmpeg -c:a libopus, VBR default and
+    CBR), and lame-q2 as a cross-format MP3 anchor. ODG/MOS judge; raw
+    SNR across codecs at different true rates is only indicative."""
+    out = []
+    enc = os.path.expanduser(args.opus_enc)
+    mux = os.path.expanduser(args.opus_mux)
+    ff = shutil.which("ffmpeg")
+    if have(enc) and have(mux) and ff:
+        def glint_cmd(i, o, k, extra):
+            raw = o + ".raw"
+            bit = o + ".bit"
+            return ["sh", "-c",
+                    f"{ff} -y -v error -i '{i}' -ar 48000 -ac 2 -f s16le "
+                    f"'{raw}' && '{enc}' '{raw}' 2 {k * 1000} 200 '{bit}'"
+                    f"{extra} && '{mux}' '{bit}' '{o}' 120"]
+        out.append(("glint-cbr", lambda i, o, k: glint_cmd(i, o, k, "")))
+        out.append(("glint-vbr", lambda i, o, k: glint_cmd(i, o, k, " vbr")))
+    if ff:
+        out.append(("libopus-vbr", lambda i, o, k: [
+            ff, "-y", "-v", "error", "-i", i, "-c:a", "libopus",
+            "-b:a", f"{k}k", "-application", "audio", o]))
+        out.append(("libopus-cbr", lambda i, o, k: [
+            ff, "-y", "-v", "error", "-i", i, "-c:a", "libopus",
+            "-b:a", f"{k}k", "-vbr", "off", "-application", "audio", o]))
+    lame = shutil.which("lame")
+    if lame:
+        out.append(("lame-q2*mp3", lambda i, o, k: [
+            lame, "--quiet", "-b", str(k), "-q", "2", i, o]))
     return out
 
 
@@ -288,8 +324,11 @@ def main():
     ap.add_argument("--shine",
                     default=os.path.expanduser("~/code/glint-tools/shine/shineenc"))
     ap.add_argument("--bitrates", type=int, nargs="+", default=[128, 256])
-    ap.add_argument("--codec", choices=["mp3", "aac"], default="mp3",
-                    help="aac: glint-aac vs apple/fdk/ffmpeg/vo-aacenc (ADTS)")
+    ap.add_argument("--codec", choices=["mp3", "aac", "opus"], default="mp3",
+                    help="aac: glint-aac vs apple/fdk/ffmpeg/vo-aacenc (ADTS); "
+                         "opus: glint CELT vs libopus (Ogg .opus)")
+    ap.add_argument("--opus-enc", default="build/opus_enc_cli")
+    ap.add_argument("--opus-mux", default="build/opus_mux_cli")
     ap.add_argument("--mode", choices=["joint", "mono"], default="joint")
     ap.add_argument("--clips", nargs="*", default=None,
                     help="name=path[:speech] entries; default = canonical set")
@@ -346,7 +385,7 @@ def main():
         dur = wav_duration(cpath)
         for kbps in args.bitrates:
             rows = []
-            ext = ".aac" if args.codec == "aac" else ".mp3"
+            ext = {"aac": ".aac", "opus": ".opus"}.get(args.codec, ".mp3")
             for ename, argv_fn in encs:
                 mp3 = os.path.join(tmpdir, f"{cname}_{kbps}_{ename}{ext}")
                 t0 = time.time()

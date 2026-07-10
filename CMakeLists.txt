@@ -87,6 +87,15 @@ add_executable(glint_cli cli/main.cpp)
 target_link_libraries(glint_cli PRIVATE glint_static)
 target_include_directories(glint_cli PRIVATE src)
 
+# Opus tools: raw-PCM -> opus_demo .bit encoder and .bit -> Ogg .opus
+# muxer (used by the encoder league and ad-hoc listening tests).
+add_executable(opus_enc_cli tools/opus_enc_cli.cpp)
+target_link_libraries(opus_enc_cli PRIVATE glint_static)
+target_include_directories(opus_enc_cli PRIVATE src)
+add_executable(opus_mux_cli tools/opusfile_mux_cli.cpp)
+target_link_libraries(opus_mux_cli PRIVATE glint_static)
+target_include_directories(opus_mux_cli PRIVATE src)
+
 # Unit tests
 enable_testing()
 add_executable(glint_test tests/test_unit.cpp)

@@ -1848,3 +1848,24 @@ CBR path byte-unchanged (gate values identical).
 O4 remaining: ODG league (compare_encoders --codec opus), listening
 pack refresh. Then O5 polish (FEC encode, multistream, 24k out,
 OPUS_SET_GAIN, Ogg VBR mux uses actual packet sizes already).
+
+## O4 ODG league (2026-07-10) — DONE (tests/opus_league_2026-07-10.txt)
+
+`tests/compare_encoders.py --codec opus`: glint CBR+VBR (opus_enc_cli +
+opus_mux_cli chain, now CMake targets `opus_enc_cli`/`opus_mux_cli`) vs
+libopus VBR+CBR (ffmpeg -c:a libopus) + lame-q2 MP3 anchor, Ogg .opus
+wire, 10 clips x {96, 192} kbps, ODG/MOS/NMR/PESQ/STOI.
+
+Best-glint vs best-libopus ODG at 96k: WIN castanets (-0.06 vs -0.15,
+best in table), quartet (-0.55 vs -0.58), drums (-0.86 vs -0.91);
+TIE speech (-0.61 =), electronic (-0.00 vs +0.05), industrial,
+orchestral (-0.74 vs -0.72); LOSE piano (-1.23 vs -0.58) and torture
+(-1.84 vs -0.76) — both are the tonality-analyzer VBR boosts we don't
+have. choir: libopus MISBEHAVES (SNR 13 dB, MOS 4.30 vs glint 4.63 —
+its mode machinery, not ours). At 192k every opus entry is
+ODG-transparent (+-0.1) except torture (libopus edges); glint holds
+the highest raw SNR on most clips and is often ~1.5-2x faster.
+
+Remaining gap = tonality analysis (piano/torture 96k VBR boosts).
+Listening pack refreshed with the tuned encoder + VBR variants
+(listening_opus/*_glint_vbr96k.opus).
