@@ -53,6 +53,11 @@ private:
     double prefilter_gain_ = 0;
     int prefilter_tapset_ = 0;
     int consec_transient_ = 0;
+    // Spread/tapset analysis state (recursive averages + hysteresis).
+    int tonal_average_ = 256;
+    int hf_average_ = 0;
+    int tapset_decision_ = 0;
+    int spread_decision_ = 2;  // SPREAD_NORMAL
     float old_ebands_[2 * 21] = {};
     float energy_error_[2 * 21] = {};
     float delayed_intra_ = 1.0f;

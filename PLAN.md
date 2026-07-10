@@ -1775,3 +1775,21 @@ now -1.2 dB, was -4.4 at baseline), electronic +0.2/+0.3, quartet
 6.0 -> 5.8%; still ahead of libopus 3.8 mean / 3.7 p95). NMR flat
 elsewhere. Gate 8/8, ranges libopus-certified. spread_weight[] is
 computed and ready for the spread-analysis item.
+
+## O4 quality item 6 (2026-07-10): spread + tapset analysis — done
+
+spreading_decision port (bands.c): per-band |x|^2*N sparsity CDF
+weighted by dynalloc's spread_weight, recursive tonal_average,
+hysteresis vs last decision -> SPREAD_{NONE,LIGHT,NORMAL,AGGRESSIVE};
+HF sparsity average drives tapset_decision (0/1/2), consumed by the
+PREFILTER one frame later (reference lag). Transient/tiny frames force
+NORMAL. Encoder-side spread mirrors the decoder default (NORMAL) when
+the 4-bit symbol doesn't fit — the reference itself can desync there.
+State: tonal_average_=256, hf_average_=0, tapset_decision_=0.
+
+Measured: metrics FLAT on all 4 clips at both rates (<=0.06 dB NMR) —
+the decision is genuinely active (quartet 60% AGGRESSIVE, electronic
+48%; tapset stays 0 on these dark clips) but rotation choice barely
+moves our metrics; it should matter for ODG/listening on sparse tonal
+content. Gate 8/8. Remaining O4: intensity stereo, VBR, ODG league
+(compare_encoders --codec opus), listening-pack refresh.

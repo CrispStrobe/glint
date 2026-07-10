@@ -446,6 +446,63 @@ void dynalloc_analysis(const float* band_log_e, const float* band_log_e2,
     }
 }
 
+// Spreading (rotation) decision from band-coefficient sparsity: a rough
+// CDF of |x|^2*N per band, tonality-weighted by spread_weight, with a
+// recursive average and hysteresis vs the previous decision. Also
+// tracks the HF sparsity average that drives the prefilter's tapset.
+// Reference bands.c spreading_decision; policy-only.
+int spreading_decision(const float* X, int* average, int last_decision,
+                       int* hf_average, int* tapset_decision, int update_hf,
+                       int end, int C, int m, const int* spread_weight,
+                       int n0) {
+    int sum = 0, nb_bands = 0, hf_sum = 0;
+    if (m * (kEBands[end] - kEBands[end - 1]) <= 8) return 0;  // NONE
+    for (int c = 0; c < C; c++) {
+        for (int i = 0; i < end; i++) {
+            const float* x = X + m * kEBands[i] + c * n0;
+            int N = m * (kEBands[i + 1] - kEBands[i]);
+            if (N <= 8) continue;
+            int tcount[3] = { 0, 0, 0 };
+            for (int j = 0; j < N; j++) {
+                float x2N = x[j] * x[j] * N;
+                if (x2N < 0.25f) tcount[0]++;
+                if (x2N < 0.0625f) tcount[1]++;
+                if (x2N < 0.015625f) tcount[2]++;
+            }
+            // Only the last four bands (8 kHz up) feed the HF average.
+            if (i > kNbEBands - 4)
+                hf_sum += 32 * (tcount[1] + tcount[0]) / N;
+            int tmp = (2 * tcount[2] >= N) + (2 * tcount[1] >= N) +
+                      (2 * tcount[0] >= N);
+            sum += tmp * spread_weight[i];
+            nb_bands += spread_weight[i];
+        }
+    }
+    if (update_hf) {
+        if (hf_sum) hf_sum /= C * (4 - kNbEBands + end);
+        *hf_average = (*hf_average + hf_sum) >> 1;
+        hf_sum = *hf_average;
+        if (*tapset_decision == 2)
+            hf_sum += 4;
+        else if (*tapset_decision == 0)
+            hf_sum -= 4;
+        if (hf_sum > 22)
+            *tapset_decision = 2;
+        else if (hf_sum > 18)
+            *tapset_decision = 1;
+        else
+            *tapset_decision = 0;
+    }
+    sum = (sum << 8) / nb_bands;
+    sum = (sum + *average) >> 1;
+    *average = sum;
+    sum = (3 * sum + (((3 - last_decision) << 7) + 64) + 2) >> 2;
+    if (sum < 80) return 3;   // AGGRESSIVE
+    if (sum < 256) return 2;  // NORMAL
+    if (sum < 384) return 1;  // LIGHT
+    return 0;                 // NONE
+}
+
 // Allocation-trim analysis (reference float path, no surround / no
 // tonality analyzer): base 5 shaded by the low-band stereo correlation
 // (correlated stereo -> spend low), the spectral tilt of the band log
@@ -508,6 +565,11 @@ void CeltEncoder::init(int channels) {
     prefilter_period_ = 0;
     prefilter_gain_ = 0;
     prefilter_tapset_ = 0;
+    consec_transient_ = 0;
+    tonal_average_ = 256;
+    hf_average_ = 0;
+    tapset_decision_ = 0;
+    spread_decision_ = kSpreadNormal;
     mdct_window_fill(window_, kOverlap);
 }
 
@@ -544,7 +606,9 @@ int CeltEncoder::encode_frame(const float* pcm, int frame_size,
     // ---- Pitch prefilter (the decoder re-adds it as the postfilter) ----
     int pf_on = 0, pitch_index = kCombFilterMinPeriodEnc, qg = 0;
     double gain1 = 0;
-    const int new_tapset = 0;
+    // Tapset from last frame's HF sparsity analysis (one-frame lag by
+    // design — the analysis runs after the prefilter).
+    const int new_tapset = tapset_decision_;
     {
         // Unfiltered history + this frame's raw samples.
         static thread_local double pre[2][kCombMaxPeriod + kMaxFrame];
@@ -772,8 +836,21 @@ int CeltEncoder::encode_frame(const float* pcm, int frame_size,
     }
 
     tell = static_cast<int32_t>(enc.tell());
-    int spread = kSpreadNormal;
-    if (tell + 4 <= total_bits) enc.enc_icdf(spread, celt::kSpreadIcdf, 5);
+    if (tell + 4 <= total_bits) {
+        if (short_blocks || nbytes < 10 * C) {
+            spread_decision_ = kSpreadNormal;
+        } else {
+            spread_decision_ = spreading_decision(
+                x_norm, &tonal_average_, spread_decision_, &hf_average_,
+                &tapset_decision_, pf_on && !short_blocks, end, C, m,
+                spread_weight, n);
+        }
+        enc.enc_icdf(spread_decision_, celt::kSpreadIcdf, 5);
+    }
+    // If the symbol wasn't coded, the decoder assumes NORMAL — the
+    // bands must be rotated with what the decoder will derotate with.
+    int spread =
+        tell + 4 <= total_bits ? spread_decision_ : kSpreadNormal;
 
     int cap[kNbEBands];
     init_caps(cap, lm, C);
