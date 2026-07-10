@@ -227,10 +227,12 @@ const double* celt_window() {
 
 // Crossfade in1 -> in2 with the squared CELT overlap window (2.5 ms).
 void smooth_fade(const float* in1, const float* in2, float* out,
-                 int overlap, int channels, const double* window) {
+                 int overlap, int channels, const double* window,
+                 int inc = 1) {
+    // inc = 48000/Fs: the 48k CELT window sampled at the output rate.
     for (int c = 0; c < channels; c++) {
         for (int i = 0; i < overlap; i++) {
-            float w = static_cast<float>(window[i] * window[i]);
+            float w = static_cast<float>(window[i * inc] * window[i * inc]);
             out[i * channels + c] = w * in2[i * channels + c] +
                                     (1.0f - w) * in1[i * channels + c];
         }
@@ -244,6 +246,9 @@ int OpusDecoder::decode_frame_impl(const uint8_t* data, int32_t size,
     const int stream_channels = stereo_flag ? 2 : 1;
     int mode, audiosize, end_band = 21;
     constexpr int kF20 = 960, kF10 = 480, kF5 = 240, kF2_5 = 120;
+    // Control flow runs in 48 kHz units; pcm positions in output units.
+    const int ds = 48000 / fs_;
+    const int f2_5 = kF2_5 / ds, f5 = kF5 / ds;
 
     if (data != nullptr) {
         audiosize = frame_size;
@@ -266,7 +271,7 @@ int OpusDecoder::decode_frame_impl(const uint8_t* data, int32_t size,
         end_band = 21;
         if (mode == 0) {
             // Nothing decoded yet: silence.
-            std::memset(pcm, 0, static_cast<size_t>(audiosize) *
+            std::memset(pcm, 0, static_cast<size_t>(audiosize / ds) *
                                     channels_ * sizeof(float));
             return audiosize;
         }
@@ -276,7 +281,7 @@ int OpusDecoder::decode_frame_impl(const uint8_t* data, int32_t size,
                     nullptr, 0, pcm, audiosize < kF20 ? audiosize : kF20,
                     config, stereo_flag);
                 if (ret < 0) return ret;
-                pcm += ret * channels_;
+                pcm += (ret / ds) * channels_;
                 audiosize -= ret;
             } while (audiosize > 0);
             return frame_size;
@@ -318,12 +323,15 @@ int OpusDecoder::decode_frame_impl(const uint8_t* data, int32_t size,
         int internal_khz = 16;
         if (data != nullptr && mode == 1)
             internal_khz = 8 + 4 * ((config >> 2) & 3);  // NB/MB/WB
-        while (n_silk < frame_size) {
+        // n_silk counts OUTPUT-rate samples (SILK resamples to fs_
+        // directly — at a matching internal rate that's no resampling
+        // at all).
+        while (n_silk < frame_size / ds) {
             int ret;
             if (data != nullptr)
                 ret = silk_.decode(dec, pcm_silk + n_silk * channels_,
                                    channels_, stream_channels,
-                                   internal_khz, 48000, payload_ms,
+                                   internal_khz, fs_, payload_ms,
                                    n_silk == 0, fec != 0);
             else
                 ret = silk_.decode_lost(pcm_silk + n_silk * channels_,
@@ -385,7 +393,7 @@ int OpusDecoder::decode_frame_impl(const uint8_t* data, int32_t size,
         int start_band = mode == 2 ? 17 : 0;
         int celt_frame = frame_size < kF20 ? frame_size : kF20;
         if (mode != prev_mode_ && prev_mode_ > 0 && !prev_redundancy_)
-            celt_.init(channels_);
+            celt_.init(channels_, fs_);
         int ret;
         if (data != nullptr && !fec)
             ret = celt_.decode_frame(dec, static_cast<uint32_t>(len), pcm,
@@ -395,8 +403,8 @@ int OpusDecoder::decode_frame_impl(const uint8_t* data, int32_t size,
             ret = celt_.decode_lost(pcm, celt_frame, start_band, end_band);
         if (ret < 0) return ret;
     } else {
-        std::memset(pcm, 0, static_cast<size_t>(frame_size) * channels_ *
-                                sizeof(float));
+        std::memset(pcm, 0, static_cast<size_t>(frame_size / ds) *
+                                channels_ * sizeof(float));
         // Hybrid -> SILK: decode a silence frame so the CELT MDCT fades
         // itself out.
         if (prev_mode_ == 2 &&
@@ -410,14 +418,14 @@ int OpusDecoder::decode_frame_impl(const uint8_t* data, int32_t size,
     }
 
     if (mode != 3) {
-        for (int i = 0; i < frame_size * channels_; i++)
+        for (int i = 0; i < (frame_size / ds) * channels_; i++)
             pcm[i] += pcm_silk[i] * (1.0f / 32768.0f);
     }
 
 
     if (redundancy && !celt_to_silk) {
         // SILK->CELT: prime a fresh CELT state, fade the tail into it.
-        celt_.init(channels_);
+        celt_.init(channels_, fs_);
         RangeDecoder rdec;
         rdec.init(data + len, static_cast<uint32_t>(redundancy_bytes));
         int ret = celt_.decode_frame(
@@ -425,34 +433,35 @@ int OpusDecoder::decode_frame_impl(const uint8_t* data, int32_t size,
             kF5, stream_channels, end_band, 0);
         if (ret < 0) return ret;
         redundant_rng = rdec.range();
-        smooth_fade(pcm + channels_ * (frame_size - kF2_5),
-                    redundant_audio + channels_ * kF2_5,
-                    pcm + channels_ * (frame_size - kF2_5), kF2_5,
-                    channels_, celt_window());
+        smooth_fade(pcm + channels_ * (frame_size / ds - f2_5),
+                    redundant_audio + channels_ * f2_5,
+                    pcm + channels_ * (frame_size / ds - f2_5), f2_5,
+                    channels_, celt_window(), ds);
     }
     if (redundancy && celt_to_silk &&
         (prev_mode_ != 1 || prev_redundancy_)) {
         // Apply only if the previous frame actually used CELT (its first
         // redundancy frame may have been lost).
         for (int c = 0; c < channels_; c++)
-            for (int i = 0; i < kF2_5; i++)
+            for (int i = 0; i < f2_5; i++)
                 pcm[channels_ * i + c] = redundant_audio[channels_ * i + c];
-        smooth_fade(redundant_audio + channels_ * kF2_5,
-                    pcm + channels_ * kF2_5, pcm + channels_ * kF2_5,
-                    kF2_5, channels_, celt_window());
+        smooth_fade(redundant_audio + channels_ * f2_5,
+                    pcm + channels_ * f2_5, pcm + channels_ * f2_5,
+                    f2_5, channels_, celt_window(), ds);
     }
     if (transition) {
         if (audiosize >= kF5) {
-            for (int i = 0; i < channels_ * kF2_5; i++)
+            for (int i = 0; i < channels_ * f2_5; i++)
                 pcm[i] = pcm_transition[i];
-            smooth_fade(pcm_transition + channels_ * kF2_5,
-                        pcm + channels_ * kF2_5, pcm + channels_ * kF2_5,
-                        kF2_5, channels_, celt_window());
+            smooth_fade(pcm_transition + channels_ * f2_5,
+                        pcm + channels_ * f2_5, pcm + channels_ * f2_5,
+                        f2_5, channels_, celt_window(), ds);
         } else {
-            smooth_fade(pcm_transition, pcm, pcm, kF2_5, channels_,
-                        celt_window());
+            smooth_fade(pcm_transition, pcm, pcm, f2_5, channels_,
+                        celt_window(), ds);
         }
     }
+    (void)f5;
 
     prev_mode_ = mode;
     prev_redundancy_ = redundancy && !celt_to_silk;
@@ -462,30 +471,34 @@ int OpusDecoder::decode_frame_impl(const uint8_t* data, int32_t size,
 
 int OpusDecoder::decode_fec(const uint8_t* data, int32_t len, float* pcm,
                             int frame_size) {
+    // frame_size is in OUTPUT-rate samples (like the reference API).
+    const int ds = 48000 / fs_;
+    const int frame48 = frame_size * ds;
     OpusPacket pkt;
     bool have = data != nullptr && len > 0 &&
                 opus_packet_parse(data, len, &pkt) == 0;
     int packet_mode =
         have ? (pkt.config < 12 ? 1 : (pkt.config < 16 ? 2 : 3)) : 0;
-    if (!have || frame_size < pkt.frame_size || packet_mode == 3 ||
+    if (!have || frame48 < pkt.frame_size || packet_mode == 3 ||
         prev_mode_ == 3) {
         // No usable FEC: plain concealment for the whole gap.
-        return decode_frame_impl(nullptr, 0, pcm, frame_size, 0,
-                                 channels_ == 2);
+        int ret = decode_frame_impl(nullptr, 0, pcm, frame48, 0,
+                                    channels_ == 2);
+        return ret < 0 ? ret : ret / ds;
     }
     // Conceal everything the redundant copy doesn't cover, then decode
     // the FIRST frame's LBRR data for the tail (reference
     // opus_decode_native decode_fec path).
-    int plc = frame_size - pkt.frame_size;
-    if (plc > 0) {
-        int ret = decode_frame_impl(nullptr, 0, pcm, plc, pkt.config,
+    int plc48 = frame48 - pkt.frame_size;
+    if (plc48 > 0) {
+        int ret = decode_frame_impl(nullptr, 0, pcm, plc48, pkt.config,
                                     pkt.stereo);
         if (ret < 0) return ret;
     }
-    int ret =
-        decode_frame_impl(pkt.frames[0], pkt.sizes[0],
-                          pcm + plc * channels_, pkt.frame_size,
-                          pkt.config, pkt.stereo, /*fec=*/1);
+    int ret = decode_frame_impl(pkt.frames[0], pkt.sizes[0],
+                                pcm + (plc48 / ds) * channels_,
+                                pkt.frame_size, pkt.config, pkt.stereo,
+                                /*fec=*/1);
     if (ret < 0) return ret;
     return frame_size;
 }
@@ -495,9 +508,10 @@ int OpusDecoder::decode(const uint8_t* data, int32_t len, float* pcm,
     OpusPacket pkt;
     int err = opus_packet_parse(data, len, &pkt);
     if (err) return err;
-    if (pkt.frame_count * pkt.frame_size > max_samples) return -2;
+    const int ds = 48000 / fs_;
+    if (pkt.frame_count * pkt.frame_size / ds > max_samples) return -2;
 
-    int total = 0;
+    int total = 0;  // output-rate samples
     for (int f = 0; f < pkt.frame_count; f++) {
         int ret;
         if (pkt.sizes[f] < 1)  // DTX: conceal in the previous mode
@@ -510,7 +524,7 @@ int OpusDecoder::decode(const uint8_t* data, int32_t len, float* pcm,
                                     pkt.frame_size, pkt.config,
                                     pkt.stereo);
         if (ret < 0) return ret;
-        total += ret;
+        total += ret / ds;
     }
     return total;
 }

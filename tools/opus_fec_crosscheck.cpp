@@ -6,7 +6,8 @@
 // the NEXT packet's LBRR data (PLC when that one is lost too). SILK is
 // exact integer, so int16 PCM and final ranges must be BYTE-IDENTICAL.
 //
-// usage: opus_fec_crosscheck <in.bit> <channels> <frame_size>
+// usage: opus_fec_crosscheck <in.bit> <channels> <frame_size> [fs]
+// frame_size and the output PCM are in fs-rate samples (default 48000).
 
 #include <cmath>
 #include <cstdint>
@@ -21,9 +22,9 @@ extern "C" {
 }
 struct Dec {
     OpusDecoder* d = nullptr;
-    void init(int ch) {
+    void init(int ch, int fs) {
         int err = 0;
-        d = opus_decoder_create(48000, ch, &err);
+        d = opus_decoder_create(fs, ch, &err);
     }
     int decode(const uint8_t* p, int len, int16_t* pcm, int frame,
                int fec) {
@@ -42,9 +43,9 @@ struct Dec {
     float buf[2 * 5760];
     float clip_mem[2] = { 0, 0 };
     int ch = 1;
-    void init(int channels) {
+    void init(int channels, int fs) {
         ch = channels;
-        d.init(channels);
+        d.init(channels, fs);
     }
     int decode(const uint8_t* p, int len, int16_t* pcm, int frame,
                int fec) {
@@ -80,11 +81,12 @@ static uint32_t be32(const uint8_t* p) {
 }
 
 int main(int argc, char** argv) {
-    if (argc != 4) return 2;
+    if (argc != 4 && argc != 5) return 2;
     FILE* in = std::fopen(argv[1], "rb");
     if (!in) return 2;
     int channels = std::atoi(argv[2]);
     int frame = std::atoi(argv[3]);
+    int fs = argc == 5 ? std::atoi(argv[4]) : 48000;
 
     std::vector<std::vector<uint8_t>> pkts;
     uint8_t hdr[8];
@@ -97,7 +99,7 @@ int main(int argc, char** argv) {
     std::fclose(in);
 
     Dec dec;
-    dec.init(channels);
+    dec.init(channels, fs);
     std::vector<int16_t> pcm(2 * 5760);
 
     int npkt = static_cast<int>(pkts.size());

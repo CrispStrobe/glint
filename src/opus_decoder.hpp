@@ -37,9 +37,17 @@ int opus_packet_parse(const uint8_t* data, int32_t len, OpusPacket* pkt);
 class OpusDecoder {
 public:
     // channels: 1 or 2 (must match the streams fed in for now).
-    void init(int channels) {
+    // fs: output rate — 48000 (default), 24000, 16000, 12000 or 8000.
+    // SILK resamples to fs directly; CELT synthesizes at 48 kHz and
+    // decimates in de-emphasis (band-limited before synthesis). Sample
+    // counts in decode()/decode_fec() are in fs units.
+    void init(int channels, int32_t fs = 48000) {
         channels_ = channels;
-        celt_.init(channels);
+        fs_ = (fs == 48000 || fs == 24000 || fs == 16000 || fs == 12000 ||
+               fs == 8000)
+                  ? fs
+                  : 48000;
+        celt_.init(channels, fs_);
         silk_ = silk::SilkDecoder();
         prev_mode_ = 0;
         final_range_ = 0;
@@ -74,6 +82,7 @@ private:
                           int fec = 0);
 
     int channels_ = 0;
+    int32_t fs_ = 48000;
     uint32_t final_range_ = 0;
     int prev_mode_ = 0;  // 1 SILK, 2 hybrid, 3 CELT; 0 = none yet
     int prev_redundancy_ = 0;

@@ -28,8 +28,11 @@ namespace opus {
 
 class CeltDecoder {
 public:
-    // channels: 1 or 2. start/end default to the CELT-only full band range.
-    void init(int channels);
+    // channels: 1 or 2; fs: output rate (48000/24000/16000/12000/8000 —
+    // the reference's downsample factors; synthesis always runs at 48k
+    // and the de-emphasis stage decimates). start/end default to the
+    // CELT-only full band range.
+    void init(int channels, int32_t fs = 48000);
 
     // Decode one frame of frame_size samples (120<<LM, LM in 0..3) into
     // interleaved float PCM (±1.0, channels() wide). dec must be freshly
@@ -77,6 +80,7 @@ private:
     int plc_pitch_search() const;
 
     int channels_ = 0;
+    int downsample_ = 1;  // 48000 / output rate
     uint32_t rng_ = 0;  // LCG seed, re-seeded from the range state per frame
     // Rolling synthesis memory: past output for MDCT overlap + postfilter
     // history (reference DECODE_BUFFER_SIZE + overlap per channel).

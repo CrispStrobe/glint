@@ -1955,3 +1955,33 @@ tracking libopus within ~0.5 kb/s); the committed full table
 port — its glint-vbr rows understate the current encoder on tonal
 content. Re-run `compare_encoders.py --codec opus --bitrates 96 192`
 on an idle machine to refresh the record.
+
+## O5.3 (2026-07-10): non-48k decoder output rates — done
+
+OpusDecoder::init(channels, fs) with fs in {8,12,16,24,48} kHz
+(reference downsample factors 6/4/3/2/1). SILK resamples straight to
+fs (a matching internal rate means NO resampling — and the whole SILK
+chain stays exact integer at every api rate). CELT synthesizes at
+48 kHz as always; denormalise_bands clamps its spectral bound to
+n/downsample (band-limit BEFORE synthesis so decimation cannot alias,
+reference semantics) and the de-emphasis stage keeps every
+downsample-th sample. The opus layer runs control flow in 48k units
+and pcm positions in output units; smooth_fade samples the 48k CELT
+window with stride ds (reference window[i*inc]). decode()/decode_fec()
+sample counts are output-rate units, like the reference API.
+
+Gate: tools/crosscheck_opus_rates.py (reuses the FEC driver, which now
+takes an fs argument, 20% loss pattern still active): **SILK-only WB
+streams BYTE-IDENTICAL to libopus at all five rates (301 packets each,
+including PLC and FEC recoveries)**; CELT-only streams: ranges
+identical, steady-state decoded frames within 3-4 LSB at every rate.
+Two measured non-bugs worth remembering: (1) the CELT pitch-PLC runs
+an LPC feedback loop on band-limited history at ds>1, where our
+double vs the reference's float drifts up to ~118 LSB on CONCEALED
+frames (decoded frames unaffected; the RFC vectors themselves gate
+PLC by quality metric, not bits); (2) the first good frame after a
+loss overlaps the concealment's synthesis memory and inherits its
+divergence — the gate bounds it with the concealment tolerance.
+12/12 vectors, e2e and the FEC gate all still pass at 48 kHz.
+
+O5 remaining: multistream/surround (mapping family 1).

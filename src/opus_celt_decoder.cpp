@@ -67,8 +67,12 @@ void tf_decode(int start, int end, int is_transient, int* tf_res, int lm,
 
 // Expand normalized bands back to signal scale: gain = 2^(logE + eMeans).
 void denormalise_bands(const double* X, double* freq, const double* band_log_e,
-                       int start, int end, int m, int n, int silence) {
+                       int start, int end, int m, int n, int silence,
+                       int downsample) {
     int bound = m * kEBands[end];
+    // Non-48k output: everything above the output Nyquist is dropped
+    // BEFORE synthesis, so the decimation in deemphasis cannot alias.
+    if (downsample != 1 && bound > n / downsample) bound = n / downsample;
     if (silence) {
         bound = 0;
         start = end = 0;
@@ -375,8 +379,16 @@ void plc_renormalise(double* x, int n) {
 
 }  // namespace
 
-void CeltDecoder::init(int channels) {
+void CeltDecoder::init(int channels, int32_t fs) {
     channels_ = channels;
+    switch (fs) {
+    case 48000: downsample_ = 1; break;
+    case 24000: downsample_ = 2; break;
+    case 16000: downsample_ = 3; break;
+    case 12000: downsample_ = 4; break;
+    case 8000: downsample_ = 6; break;
+    default: downsample_ = 1; break;
+    }
     rng_ = 0;
     std::memset(decode_mem_, 0, sizeof(decode_mem_));
     std::memset(old_ebands_, 0, sizeof(old_ebands_));
@@ -400,13 +412,18 @@ void CeltDecoder::init(int channels) {
 }
 
 void CeltDecoder::deemphasis(float* pcm, int n) {
+    // The de-emphasis filter always runs at 48 kHz; non-48k output keeps
+    // every downsample-th sample (band-limited in denormalise_bands).
+    const int ds = downsample_;
     for (int c = 0; c < channels_; c++) {
         double* x = decode_mem_[c] + kDecodeBufferSize - n;
         double mem = preemph_mem_[c];
         for (int j = 0; j < n; j++) {
             double tmp = x[j] + kVerySmall + mem;
             mem = kPreemphCoef * tmp;
-            pcm[j * channels_ + c] = static_cast<float>(tmp * (1.0 / 32768.0));
+            if (j % ds == 0)
+                pcm[(j / ds) * channels_ + c] =
+                    static_cast<float>(tmp * (1.0 / 32768.0));
         }
         preemph_mem_[c] = mem;
     }
@@ -639,7 +656,7 @@ void CeltDecoder::synthesis(const double* X, int CC, int C,
         // The IMDCT destroys its input, so stage a copy inside channel 1's
         // output region (in-place safe: input == output + overlap/2).
         denormalise_bands(X, freq, old_ebands_, start, effend, 1 << lm, n,
-                          silence);
+                          silence, downsample_);
         double* out0 = decode_mem_[0] + kDecodeBufferSize - n;
         double* out1 = decode_mem_[1] + kDecodeBufferSize - n;
         double* freq2 = out1 + kOverlap / 2;
@@ -655,9 +672,9 @@ void CeltDecoder::synthesis(const double* X, int CC, int C,
         double* out0 = decode_mem_[0] + kDecodeBufferSize - n;
         double* freq2 = out0 + kOverlap / 2;
         denormalise_bands(X, freq, old_ebands_, start, effend, 1 << lm, n,
-                          silence);
+                          silence, downsample_);
         denormalise_bands(X + n, freq2, old_ebands_ + kNbEBands, start,
-                          effend, 1 << lm, n, silence);
+                          effend, 1 << lm, n, silence, downsample_);
         for (int i = 0; i < n; i++) freq[i] = 0.5 * freq[i] + 0.5 * freq2[i];
         for (int blk = 0; blk < b; blk++)
             imdct_.backward(&freq[blk], out0 + nb * blk, window_, kOverlap,
@@ -666,7 +683,8 @@ void CeltDecoder::synthesis(const double* X, int CC, int C,
         for (int c = 0; c < CC; c++) {
             double* out_syn = decode_mem_[c] + kDecodeBufferSize - n;
             denormalise_bands(X + c * n, freq, old_ebands_ + c * kNbEBands,
-                              start, effend, 1 << lm, n, silence);
+                              start, effend, 1 << lm, n, silence,
+                              downsample_);
             for (int blk = 0; blk < b; blk++)
                 imdct_.backward(&freq[blk], out_syn + nb * blk, window_,
                                 kOverlap, shift, b);
