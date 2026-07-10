@@ -1,12 +1,13 @@
 // CELT frame encoder — RFC 6716 section 4.3 (encoder side)
 // MIT License - Clean-room implementation
 //
-// A SIMPLE-first encoder (PLAN § O4): spread normal, no dynalloc boosts,
-// neutral trim, no intensity/dual stereo, pure CBR — WITH the pitch
-// prefilter (item 1: tonal content) and transient detection + short
-// blocks + anti-collapse (item 2: pre-echo). tf_res stays all-zero. Every symbol layer underneath is byte-exact with libopus
-// (energy, allocator, theta/PVQ), so streams are valid by construction;
-// the top-level DECISIONS are the quality knobs to iterate on later.
+// Analysis-complete encoder (PLAN § O4): pitch prefilter, transient
+// detection + short blocks + anti-collapse, per-band TF resolution,
+// dynalloc boosts, spread/tapset analysis, intensity + dual stereo,
+// trim analysis, CBR or unconstrained VBR. Every symbol layer
+// underneath is byte-exact with libopus (energy, allocator,
+// theta/PVQ), so streams are valid by construction; the top-level
+// DECISIONS are policy and only affect quality.
 //
 // Wire spec: the symbol sequence mirrors glint's own conformant decoder
 // (opus_celt_decoder.cpp) — silence flag, postfilter bit, transient bit,
@@ -27,10 +28,15 @@ class CeltEncoder {
 public:
     void init(int channels);
 
+    // 0 = CBR (default): encode_frame emits exactly nbytes.
+    // >0 = unconstrained VBR at ~bitrate_bps: encode_frame treats nbytes
+    // as the packet-size CAP and returns the actual size.
+    void set_vbr(int bitrate_bps) { vbr_bitrate_ = bitrate_bps; }
+
     // Encode frame_size (120<<LM, LM 0..3) samples per channel of float
-    // PCM (±1.0, interleaved) into exactly nbytes (CBR). Returns nbytes,
-    // or a negative error. final_range() afterwards gives the range-coder
-    // state for conformance checks.
+    // PCM (±1.0, interleaved) into at most nbytes. Returns the bytes
+    // written (== nbytes in CBR), or a negative error. final_range()
+    // afterwards gives the range-coder state for conformance checks.
     int encode_frame(const float* pcm, int frame_size, uint8_t* out,
                      int nbytes);
 
@@ -59,6 +65,11 @@ private:
     int tapset_decision_ = 0;
     int spread_decision_ = 2;  // SPREAD_NORMAL
     int intensity_ = 0;
+    // VBR state: target bps (0 = CBR), stereo-saving estimate from the
+    // trim analysis, band-energy running average for temporal VBR.
+    int vbr_bitrate_ = 0;
+    double stereo_saving_ = 0;
+    float spec_avg_ = 0;
     float old_ebands_[2 * 21] = {};
     float energy_error_[2 * 21] = {};
     float delayed_intra_ = 1.0f;

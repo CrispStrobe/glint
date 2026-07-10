@@ -91,15 +91,21 @@ def main():
             sys.exit("dec build failed:\n" + r.stderr.decode()[:1200])
 
         failures = 0
-        cases = ((1, 64000, 200), (1, 96000, 100), (1, 128000, 200),
-                 (2, 96000, 200), (2, 128000, 100), (2, 192000, 200),
-                 (1, 128000, 50), (2, 128000, 25))
-        for channels, rate, msx10 in cases:
+        cases = ((1, 64000, 200, False), (1, 96000, 100, False),
+                 (1, 128000, 200, False), (2, 96000, 200, False),
+                 (2, 128000, 100, False), (2, 192000, 200, False),
+                 (1, 128000, 50, False), (2, 128000, 25, False),
+                 (1, 96000, 200, True), (2, 96000, 200, True),
+                 (2, 192000, 100, True))
+        for channels, rate, msx10, vbr in cases:
             sig = os.path.join(tmp, f"sig{channels}.raw")
             if not os.path.exists(sig):
                 gen_signal(sig, channels)
             bit = os.path.join(tmp, "g.bit")
-            r = run([enc, sig, str(channels), str(rate), str(msx10), bit])
+            cmd = [enc, sig, str(channels), str(rate), str(msx10), bit]
+            if vbr:
+                cmd.append("vbr")
+            r = run(cmd)
             if r.returncode:
                 print(f"FAIL ch={channels} {rate} {msx10}: encoder "
                       f"error: {r.stderr.decode()[:200]}")
@@ -129,7 +135,8 @@ def main():
             ok = (not range_fail) and decoders_agree and q > 12.0
             failures += 0 if ok else 1
             print(f"{'OK' if ok else 'FAIL'} ch={channels} rate={rate} "
-                  f"frame={msx10/10}ms: libopus-ranges="
+                  f"frame={msx10/10}ms{' vbr' if vbr else ''}: "
+                  f"libopus-ranges="
                   f"{'ok' if not range_fail else 'MISMATCH'}, "
                   f"decoders-agree={worst} LSB, snr={q:.1f} dB")
         if failures:

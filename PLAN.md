@@ -1816,3 +1816,35 @@ intensity-coded); 192k -> 21 = off.
 O4 remaining: VBR, ODG league (compare_encoders --codec opus),
 listening-pack refresh. Then O5 polish (FEC, multistream, 24k out,
 OPUS_SET_GAIN).
+
+## O4 quality item 8 (2026-07-10): unconstrained VBR — done
+
+compute_vbr port (float path, no tonality analyzer/surround/lfe —
+their boosts don't apply, incl. pitch_change which only lives inside
+the analyzer branch): base = vbr_rate - (40C+20)<<3; stereo-savings
+rebate (max_frac=0.8*dof/bins, saving from trim analysis' logXC2,
+persistent stereo_saving_ member); dynalloc boost (analysis-side
+tot_boost, NOT the wire loop's) - 19<<lm calibration; transient boost
+(tf_estimate-0.044)*target; depth floor min(target, (C*bins<<3)*
+maxDepth) with maxDepth from dynalloc_analysis; temporal VBR below
+96k for tf_estimate<0.2 (band-envelope follower vs persistent
+spec_avg_, clamp [-1.5,3]); cap 2*base. Packet size = clamp(target+
+tell_frac rounded, [min_allowed = written+wire_boost+2B, cap]);
+ec shrink() moves raw bits to the new end. effective_bytes (=vbr_rate
+>>6) drives the analysis budgets (dynalloc floor, tf lambda, prefilter
+enable) instead of the cap. API: CeltEncoder::set_vbr(bps), CLI
+`opus_enc_cli ... out.bit vbr`; gate has 3 VBR cases (11/11 PASS).
+
+Measured (avg rates: piano 95.9/191.2, quartet 93.1, castanets 89.1,
+electronic 81.9 at 96k target — libopus's own VBR does 73.9 on
+electronic, 101-106 on quartet/castanets, so the undershoot is
+reference depth-floor behavior, not a bug): **castanets 96k SNR 5.0 ->
+12.8 (+7.8 dB at FEWER bits than CBR), NMR mean 3.7 -> 1.7 / p95 1.9
+-> -1.6, audible 5.8 -> 4.1%; 192k NMR -5.2 -> -11.1, audible 2.0 ->
+0.1%.** Piano flat at on-target rate. Electronic/quartet NMR softer at
+their lower spent rates (equal-bits comparisons need matched targets).
+CBR path byte-unchanged (gate values identical).
+
+O4 remaining: ODG league (compare_encoders --codec opus), listening
+pack refresh. Then O5 polish (FEC encode, multistream, 24k out,
+OPUS_SET_GAIN, Ogg VBR mux uses actual packet sizes already).
