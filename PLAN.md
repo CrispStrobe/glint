@@ -1214,3 +1214,41 @@ Learnings:
 NEXT: celt_decoder.c top level (flags, dynalloc, tf_decode, postfilter,
 denormalise + IMDCT + deemphasis, PLC stub, energy state rotation), then
 TOC/packet framing, then decode real CELT-only packets vs opus_demo.
+
+## O1 MILESTONE (2026-07-10): CELT-only Opus decoding WORKS end-to-end
+
+glint now decodes REAL Opus streams (CELT-only / restricted-lowdelay,
+fullband 48 kHz) identically to libopus:
+
+- **opus_celt_decoder.{hpp,cpp}**: full frame decode — silence/postfilter/
+  transient/intra flags, tf_decode, spread, dynalloc, trim, allocation,
+  energy layers, quant_all_bands, anti-collapse, denormalise, IMDCT
+  overlap chain, comb-filter postfilter (5-tap, cross-faded), de-emphasis,
+  energy/state rotation. Mono decoders set disable_inv=1 (celt_decoder_init
+  policy — easy to miss).
+- **opus_decoder.{hpp,cpp}**: TOC + framing codes 0-3 (padding, VBR),
+  pcm_soft_clip (the int16 API's ±1 overshoot parabola).
+- Gates:
+  - tools/crosscheck_opus_celt_dec.py — frame-level fuzz vs
+    opus_custom_decode_float with state carryover; PASS. NOTE: garbage
+    streams drive gains to ~2^32, so the float oracle's rounding noise
+    scales with the sequence's PEAK sample (persists via overlap memory);
+    tolerance must be peak-scaled or it false-fails.
+  - **tools/test_opus_e2e.py — the real-stream gate**: opus_demo
+    (restricted-lowdelay) encodes sweep+noise+bursts at 2.5/5/10/20 ms,
+    mono+stereo, VBR+CBR; glint decodes every packet with the decoder
+    final range EQUAL to the encoder's (Opus conformance identity, exact,
+    2206/2206 packets) and PCM within 3 int16 LSB of opus_demo's decode.
+- Debug war story: 4 configs showed up-to-646-LSB PCM diffs while ALL
+  final ranges matched -> integer path proven right, suspicion on floats;
+  frame-level A/B on the same stream showed ZERO diffs -> the difference
+  was opus_demo's int16 API applying opus_pcm_soft_clip (codec overshoot
+  beyond ±1 on low-rate bursty content). Ported pcm_soft_clip; all green.
+  Lesson: "final range equal + PCM off" means look OUTSIDE the decoder.
+- opus_demo lives at ~/code/glint-tools/opus_demo (built from the custom
+  tree; needs -I silk for debug.h). .bit format: per packet 4B BE length +
+  4B BE encoder final range + payload.
+
+O1 remainder (small): CELT-only narrower bandwidths (end<21 — NB/WB/SWB
+TOC configs 16..27), stream-channels != decoder-channels up/downmix paths,
+PLC (celt_decode_lost). Then O2 (SILK), O3 (Ogg).

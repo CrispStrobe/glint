@@ -137,6 +137,11 @@ public:
     int error() const { return error_; }
     // Frame size in bytes (CELT computes bit budgets as storage * 8).
     uint32_t storage_bytes() const { return storage_; }
+    // Current range width; CELT reuses it as the next frame's noise seed.
+    uint32_t range() const { return rng_; }
+    // Pretend `bits` total bits have been consumed (CELT silence frames
+    // mark the whole frame as read).
+    void set_tell(uint32_t bits) { nbits_total_ += bits - tell(); }
 
 private:
     int read_byte();
