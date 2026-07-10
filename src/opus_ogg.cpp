@@ -171,3 +171,106 @@ int OggOpusReader::parse(const uint8_t* data, size_t len) {
 
 }  // namespace opus
 }  // namespace glint
+
+namespace glint {
+namespace opus {
+
+// (definitions appended below the reader; see header for the contract)
+
+void OggOpusWriter::write_page(const uint8_t* body, size_t len, int htype,
+                               uint64_t granule) {
+    // Segment table: 255-lacing chain; a multiple-of-255 packet gets a
+    // terminating 0 lacing value.
+    uint8_t segs[255];
+    int nsegs = 0;
+    size_t left = len;
+    for (;;) {
+        uint8_t v = left >= 255 ? 255 : static_cast<uint8_t>(left);
+        segs[nsegs++] = v;
+        left -= v;
+        if (v < 255) break;
+        if (nsegs == 255) break;  // callers keep packets under one page
+    }
+    uint8_t hdr[27];
+    std::memcpy(hdr, "OggS", 4);
+    hdr[4] = 0;
+    hdr[5] = static_cast<uint8_t>(htype);
+    for (int i = 0; i < 8; i++)
+        hdr[6 + i] = static_cast<uint8_t>(granule >> (8 * i));
+    for (int i = 0; i < 4; i++)
+        hdr[14 + i] = static_cast<uint8_t>(serial_ >> (8 * i));
+    for (int i = 0; i < 4; i++)
+        hdr[18 + i] = static_cast<uint8_t>(pageno_ >> (8 * i));
+    hdr[22] = hdr[23] = hdr[24] = hdr[25] = 0;  // CRC placeholder
+    hdr[26] = static_cast<uint8_t>(nsegs);
+    pageno_++;
+
+    size_t page_off = out_.size();
+    out_.insert(out_.end(), hdr, hdr + 27);
+    out_.insert(out_.end(), segs, segs + nsegs);
+    out_.insert(out_.end(), body, body + len);
+    uint32_t crc = ogg_crc(out_.data() + page_off,
+                           27 + nsegs + len);
+    for (int i = 0; i < 4; i++)
+        out_[page_off + 22 + i] = static_cast<uint8_t>(crc >> (8 * i));
+}
+
+void OggOpusWriter::begin(int channels, int pre_skip,
+                          uint32_t input_sample_rate) {
+    out_.clear();
+    pageno_ = 0;
+    granule_ = 0;
+    pre_skip_ = pre_skip;
+    open_ = true;
+
+    uint8_t head[19];
+    std::memcpy(head, "OpusHead", 8);
+    head[8] = 1;  // version
+    head[9] = static_cast<uint8_t>(channels);
+    head[10] = static_cast<uint8_t>(pre_skip);
+    head[11] = static_cast<uint8_t>(pre_skip >> 8);
+    for (int i = 0; i < 4; i++)
+        head[12 + i] = static_cast<uint8_t>(input_sample_rate >> (8 * i));
+    head[16] = head[17] = 0;  // output gain 0 dB
+    head[18] = 0;             // mapping family 0
+    write_page(head, sizeof(head), 0x02 /*BOS*/, 0);
+
+    static const char kVendor[] = "glint";
+    uint8_t tags[8 + 4 + sizeof(kVendor) - 1 + 4];
+    std::memcpy(tags, "OpusTags", 8);
+    uint32_t vlen = sizeof(kVendor) - 1;
+    for (int i = 0; i < 4; i++)
+        tags[8 + i] = static_cast<uint8_t>(vlen >> (8 * i));
+    std::memcpy(tags + 12, kVendor, vlen);
+    std::memset(tags + 12 + vlen, 0, 4);  // zero user comments
+    write_page(tags, sizeof(tags), 0, 0);
+}
+
+void OggOpusWriter::add_packet(const uint8_t* data, size_t len,
+                               int samples48) {
+    // One packet per page (trivial lacing, exact per-page granules); each
+    // page is written when the NEXT packet arrives so the final one can
+    // carry the EOS flag. Granule = decoded samples INCLUDING pre-skip
+    // (RFC 7845 section 4).
+    if (!pending_.empty()) {
+        write_page(pending_.data(), pending_.size(), 0,
+                   granule_ + pre_skip_);
+    }
+    pending_.assign(data, data + len);
+    granule_ += static_cast<uint64_t>(samples48);
+    pending_samples_ = samples48;
+}
+
+const std::vector<uint8_t>& OggOpusWriter::finish() {
+    if (open_) {
+        if (!pending_.empty())
+            write_page(pending_.data(), pending_.size(), 0x04 /*EOS*/,
+                       granule_ + pre_skip_);
+        pending_.clear();
+        open_ = false;
+    }
+    return out_;
+}
+
+}  // namespace opus
+}  // namespace glint

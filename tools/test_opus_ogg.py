@@ -104,9 +104,50 @@ def main():
             failures += 0 if ok else 1
             print(f"{'OK' if ok else 'FAIL'} ch={channels} "
                   f"{' '.join(extra)}: {msg}, max |pcm diff| = {worst} LSB")
+        # ---- Writer round-trip: real opus_demo packets -> glint .opus ->
+        # decoded by our file CLI AND by ffmpeg/libopus; both must match
+        # the direct .bit decode exactly (containers are lossless).
+        opus_demo = os.path.expanduser("~/code/glint-tools/opus_demo")
+        mux = os.path.join(tmp, "opusfile_mux_cli")
+        run([cxx, "-std=c++17", "-O2", "-I", os.path.join(REPO, "src"),
+             os.path.join(REPO, "tools", "opusfile_mux_cli.cpp")] +
+            [os.path.join(REPO, "src", s) for s in SRCS] + ["-o", mux])
+        for channels in (1, 2):
+            sig = os.path.join(tmp, f"sig{channels}.raw")  # from gen_wav? raw
+            # reuse the wav generator: extract raw pcm from the wav
+            wav = os.path.join(tmp, f"in{channels}.wav")
+            raw = os.path.join(tmp, f"in{channels}.raw")
+            open(raw, "wb").write(open(wav, "rb").read()[44:])
+            bit = os.path.join(tmp, "w.bit")
+            run([opus_demo, "-e", "restricted-lowdelay", "48000",
+                 str(channels), "96000", raw, bit])
+            opus = os.path.join(tmp, "w.opus")
+            r = subprocess.run([mux, bit, opus, "0"], check=True,
+                               capture_output=True)
+            # ffmpeg must accept and decode our container via libopus.
+            ffout = os.path.join(tmp, "w_ff.raw")
+            run([ffmpeg, "-y", "-v", "error", "-c:a", "libopus", "-i",
+                 opus, "-f", "s16le", ffout])
+            # our file CLI decode of the muxed file
+            mine = os.path.join(tmp, "w_mine.raw")
+            run([cli, opus, mine])
+            a = open(ffout, "rb").read()
+            b = open(mine, "rb").read()
+            worst = -1
+            if len(a) == len(b):
+                worst = max(abs(struct.unpack_from("<h", a, i)[0] -
+                                struct.unpack_from("<h", b, i)[0])
+                            for i in range(0, len(a), 2))
+            ok = len(a) == len(b) and worst <= MAX_LSB
+            failures += 0 if ok else 1
+            print(f"{'OK' if ok else 'FAIL'} mux ch={channels}: "
+                  f"{r.stdout.decode().strip()}, ffmpeg-vs-glint "
+                  f"len {len(a)//2}/{len(b)//2}, max diff {worst} LSB")
+
         if failures:
             sys.exit(f"FAIL: {failures} cases")
-        print("PASS: .opus file decoding matches libopus (via ffmpeg)")
+        print("PASS: .opus file decoding matches libopus (via ffmpeg), "
+              "incl. glint-muxed files")
 
 
 if __name__ == "__main__":

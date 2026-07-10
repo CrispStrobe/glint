@@ -53,5 +53,32 @@ private:
 // for tests.
 uint32_t ogg_crc(const uint8_t* data, size_t len);
 
+// Ogg Opus writer (RFC 7845 muxing): OpusHead/OpusTags header pages, then
+// audio packets with 48 kHz granule positions (pre-skip included per the
+// spec). Packets up to one page (255 segments) each; one packet per page
+// for simplicity (valid, just slightly less compact).
+class OggOpusWriter {
+public:
+    // pre_skip: decoder samples to discard (the encoder's delay).
+    void begin(int channels, int pre_skip, uint32_t input_sample_rate);
+    // samples48: duration of this packet per channel at 48 kHz.
+    void add_packet(const uint8_t* data, size_t len, int samples48);
+    // Marks the final page (EOS) and returns the file bytes.
+    const std::vector<uint8_t>& finish();
+
+private:
+    void write_page(const uint8_t* body, size_t len, int htype,
+                    uint64_t granule);
+
+    std::vector<uint8_t> out_;
+    std::vector<uint8_t> pending_;
+    int pending_samples_ = 0;
+    uint32_t serial_ = 0x676c6e74;  // 'glnt'
+    uint32_t pageno_ = 0;
+    uint64_t granule_ = 0;
+    int pre_skip_ = 0;
+    bool open_ = false;
+};
+
 }  // namespace opus
 }  // namespace glint
