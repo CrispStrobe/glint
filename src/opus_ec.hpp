@@ -89,6 +89,9 @@ public:
     // Bytes written at the front (valid after done(); back bytes fill the
     // remainder of the buffer).
     uint32_t range_bytes() const { return offs_; }
+    // Range width — the Opus conformance "final range" value (must equal
+    // the decoder's after the same symbols).
+    uint32_t range() const { return rng_; }
     // The buffer passed to init(). CELT's two-pass coarse-energy encoder
     // snapshots the encoder state, and saves/restores the front bytes the
     // discarded pass wrote (the reference's ec_get_buffer usage).

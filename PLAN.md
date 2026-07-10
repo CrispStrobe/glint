@@ -1601,3 +1601,28 @@ Build order:
   -9-clamped copy; error[] undefined outside [start,end); encoder budget
   must equal len*8 exactly or fallback thresholds desync.
 - Ogg Opus WRITER (opus_ogg.cpp) + allocator encode twin: see commits.
+
+## O4 MILESTONE (2026-07-10): glint ENCODES conformant Opus — MERGE GATE MET
+
+- opus_celt_enc_bands.{hpp,cpp}: encoder-only float32 band coder
+  (resynth=0 semantics: masks untransformed, no folding) —
+  BYTE-IDENTICAL with libopus quant_all_bands(encode=1) over 150 fuzzed
+  frames incl. transients/TF/stereo/hybrid.
+- opus_celt_encoder.{hpp,cpp}: the simple-first top level (long blocks,
+  no transient/tf/dynalloc/prefilter/intensity, trim 5, CBR), symbol
+  sequence mirroring glint's own conformant decoder; preemphasis +
+  forward MDCT (double, narrowed to float spectra — validity never
+  depends on transform rounding) + the byte-exact layer stack.
+- tools/opus_enc_cli.cpp writes opus_demo .bit with TOC + final ranges.
+- **Gate (tools/test_opus_encoder.py): 8 configs (mono/stereo, 64-192k,
+  2.5-20 ms) — libopus's own decoder VERIFIES our final ranges on every
+  stream (the reference certifying our conformance), glint's decoder
+  matches libopus within 3 LSB, SNR 20-29 dB.** Gotcha: the SNR must
+  align for the 120-sample codec delay (a flat -4.5 dB smells like
+  misalignment, not coding).
+- Quality is intentionally untuned (analysis decisions are the knobs:
+  transients+TF, dynalloc, trim/spread analysis, prefilter, intensity,
+  VBR) — the league work comes after the merge.
+
+**MERGE CONDITION SATISFIED: decode (12/12 RFC vectors) + encode
+(libopus-certified streams) both correct.**
