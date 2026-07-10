@@ -1,9 +1,8 @@
 # glint
 
-A clean-room **MP3 + AAC-LC encoder** — plus an **Opus decoder in
-progress** — in C++17, MIT licensed. The name nods to integers
-(*g-lint*) and the [Shine](https://github.com/toots/shine) encoder
-lineage.
+A clean-room **MP3 + AAC-LC encoder** and **RFC-conformant Opus
+decoder** in C++17, MIT licensed. The name nods to integers (*g-lint*)
+and the [Shine](https://github.com/toots/shine) encoder lineage.
 
 Both codecs are implemented from the ISO specs (11172-3 / 13818-3 for
 MP3, 13818-7 / 14496-3 for AAC) with no third-party encoder code
@@ -33,15 +32,15 @@ vo-aacenc (Apache-2.0) is unmaintained and last on quality.
 - **Verified wire format**: every configuration decodes with zero
   errors in both ffmpeg and Apple CoreAudio, which produce metrically
   identical output; decode-based gates run in CI.
-- **Opus track (new, this branch)**: a clean-room Opus **decoder**
-  built from RFC 6716. CELT-only streams (the music/low-latency modes)
-  already decode end-to-end identically to libopus: on 2200+ real
-  packets the decoder's final range equals the encoder's — the Opus
-  conformance identity — and PCM matches libopus within 3 int16 LSB.
-  Every layer (range coder, Laplace, PVQ enumeration, allocator, band
-  decoder, IMDCT) is cross-checked against libopus by a dedicated
-  harness in `tools/`. SILK (speech modes) is next; see PLAN.md
-  O-track.
+- **Opus decoder (new, this branch): RFC-conformant.** A clean-room
+  Opus decoder built from RFC 6716 — SILK, CELT, and hybrid modes,
+  packet-loss concealment, and mode-transition handling. **All 12
+  official RFC 6716/8251 test vectors pass** the normative
+  `opus_compare` procedure (97-100% quality) with zero final-range
+  mismatches across ~20,000 packets. SILK decodes bit-identically to
+  libopus; every layer is cross-checked by a dedicated oracle harness
+  in `tools/` (byte-exact for the integer layers, peak-scaled float
+  tolerances for the transforms). See PLAN.md O-track.
 
 ## Quick start
 
@@ -252,8 +251,8 @@ the exact invocations used in CI.
 
 ## Roadmap
 
-- **Opus** (PLAN.md O-track): SILK decoder + hybrid mode → full RFC
-  test-vector conformance → Ogg Opus container → CELT-only encoder.
+- **Opus** (PLAN.md O-track): decoder DONE (12/12 RFC vectors). Next:
+  Ogg Opus container (decode .opus files) → CELT-only encoder → FEC.
 - On-target RP2040/ESP32 throughput measurements (harness ships, needs
   silicon).
 - The last ~0.5 PEAQ ODG to Apple on speech/electronic at 128 kbps
