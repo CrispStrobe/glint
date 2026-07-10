@@ -1330,3 +1330,19 @@ NLSF_QUANT_MAX_AMPLITUDE 4, silk_dec_map(a) = 2a-1.
   bugs the gate caught immediately: the varQ Newton steps use SMMUL
   (>>32) + a (1<<29)-residual, and LSHIFT_SAT32 is clamp-THEN-shift
   (low bits zeroed), not saturate-to-MAX.
+
+## O2 progress 2 (2026-07-10): excitation decoder DONE
+
+opus_silk_excitation.{hpp,cpp}: rate level, per-block pulse counts with
+LSB-extension chains, the fixed binary-split shell tree, LSB refinement,
+signs (PDF by 7*(2*type+offset)+min(p,6), map 2a-1). Gate:
+tools/crosscheck_opus_silk_exc.py — 300 fuzzed frames across all frame
+lengths (80..320 incl. the 10ms@12k partial block) and signal/offset
+types, pulses[] and tells BYTE-IDENTICAL. Note the tables agent's extra
+gate: every generated table memcmp'd against libopus.a symbols (76/76).
+
+NEXT in O2: decode_indices (needs SideInfoIndices + state struct),
+NLSF_decode + NLSF2A chain (agent-suitable, isolated), gains dequant,
+decode_parameters, decode_core (LPC/LTP synthesis — studied, see survey),
+decode_frame + silk_Decode + stereo + resamplers, then hybrid + PLC +
+RFC test vectors.
