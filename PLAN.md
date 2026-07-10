@@ -1732,3 +1732,22 @@ SNR also up: 4.3 -> 4.9 / 12.4 -> 13.0 (libopus 5.0/13.0). Piano
 next); electronic +0.2/+0.4 dB; quartet hold. Gate 8/8, all streams
 libopus-range-certified. TF was the missing half of transient coding:
 short blocks alone bought ~3 dB NMR, TF bought the next ~18.
+
+## O4 quality item 4 (2026-07-10): alloc_trim analysis — done
+
+alloc_trim_analysis (reference float path, no surround/tonality
+analyzer): base 5 (4 below 64k equiv_rate, ramp to 5 by 80k), stereo
+low-band correlation term (+max(-4, .75*log2(1.001-sum^2))), spectral
+tilt of band log energies (-clamp((diff+1)/6, +-2)), -2*tf_estimate.
+equiv_rate = (nbytes*8*50 >> (3-lm)) - (40C+20)*((400>>lm)-50).
+Computed only when the 6-bit symbol fits, else the decoder default 5.
+
+Measured: piano SNR 19.1 -> 21.1 (96k) / 24.6 -> 27.1 (192k) — the
+libopus gap shrinks from -4.4 (baseline) to -1.8 dB — with NMR better
+across the board (96k mean -3.3 -> -3.9, audible 12.5 -> 10.5%).
+Electronic/quartet raw SNR drops 2-4 dB but NMR improves or holds
+(electronic 96k audible 6.4 -> 2.2%, p95 +1.7 dB better): trim
+redistributes bits perceptually — judge by NMR, same lesson as MP3
+short blocks. Castanets holds. Gate 8/8, ranges libopus-certified.
+Next: dynalloc_analysis (band importance + boosts; also feeds
+tf_analysis importance), spread analysis, intensity stereo, VBR.

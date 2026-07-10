@@ -260,6 +260,54 @@ int tf_analysis(int len, int is_transient, int* tf_res, int lambda,
         tf_res[i] = tf_res[i + 1] == 1 ? path1[i + 1] : path0[i + 1];
     return tf_select;
 }
+
+// Allocation-trim analysis (reference float path, no surround / no
+// tonality analyzer): base 5 shaded by the low-band stereo correlation
+// (correlated stereo -> spend low), the spectral tilt of the band log
+// energies (dark spectra -> trim up), and the transient strength.
+// Policy-only: the chosen trim is wire-coded and the decoder follows.
+int alloc_trim_analysis(const float* X, const float* band_log_e, int end,
+                        int lm, int C, int n0, double tf_estimate,
+                        int intensity, int32_t equiv_rate) {
+    double trim = 5.0;
+    if (equiv_rate < 64000) {
+        trim = 4.0;
+    } else if (equiv_rate < 80000) {
+        int32_t frac = (equiv_rate - 64000) >> 10;
+        trim = 4.0 + (1.0 / 16.0) * frac;
+    }
+    if (C == 2) {
+        // Inter-channel correlation of the normalized low bands.
+        double sum = 0;
+        for (int i = 0; i < 8; i++) {
+            double partial = 0;
+            for (int j = kEBands[i] << lm; j < kEBands[i + 1] << lm; j++)
+                partial += static_cast<double>(X[j]) * X[n0 + j];
+            sum += partial;
+        }
+        sum = std::min(1.0, std::fabs(sum * (1.0 / 8)));
+        double min_xc = sum;
+        for (int i = 8; i < intensity; i++) {
+            double partial = 0;
+            for (int j = kEBands[i] << lm; j < kEBands[i + 1] << lm; j++)
+                partial += static_cast<double>(X[j]) * X[n0 + j];
+            min_xc = std::min(min_xc, std::fabs(partial));
+        }
+        min_xc = std::min(1.0, min_xc);
+        double log_xc = std::log2(1.001 - sum * sum);
+        trim += std::max(-4.0, 0.75 * log_xc);
+    }
+    // Spectral tilt of the band log energies.
+    double diff = 0;
+    for (int c = 0; c < C; c++)
+        for (int i = 0; i < end - 1; i++)
+            diff += band_log_e[i + c * kNbEBands] * (2 + 2 * i - end);
+    diff /= C * (end - 1);
+    trim -= std::max(-2.0, std::min(2.0, (diff + 1.0) / 6));
+    trim -= 2 * tf_estimate;
+    int trim_index = static_cast<int>(std::floor(0.5 + trim));
+    return imax(0, imin(10, trim_index));
+}
 }  // namespace
 
 void CeltEncoder::init(int channels) {
@@ -537,10 +585,20 @@ int CeltEncoder::encode_frame(const float* pcm, int frame_size,
         }
     }
 
+    // Trim: analyzed when the budget allows the symbol, else the
+    // decoder-side default 5.
     int alloc_trim = 5;
     if (static_cast<int32_t>(enc.tell_frac()) + (6 << kBitRes) <=
-        (total_bits << kBitRes))
+        (total_bits << kBitRes)) {
+        // equiv_rate: 20ms-equivalent bits/s (shorter frames discount
+        // their fixed per-frame overhead, like the reference).
+        int32_t equiv_rate =
+            ((static_cast<int32_t>(nbytes) * 8 * 50) >> (3 - lm)) -
+            (40 * C + 20) * ((400 >> lm) - 50);
+        alloc_trim = alloc_trim_analysis(x_norm, band_log_e, end, lm, C,
+                                         n, tf_estimate, end, equiv_rate);
         enc.enc_icdf(alloc_trim, celt::kTrimIcdf, 7);
+    }
 
     int32_t bits = ((static_cast<int32_t>(nbytes) * 8) << kBitRes) -
                    static_cast<int32_t>(enc.tell_frac()) - 1;
