@@ -82,23 +82,33 @@ def main():
             [os.path.join(REPO, "src", s) for s in SRCS] + ["-o", cli])
 
         failures = 0
+        # (frame ms, bitrate, extra encoder args, decode channels or None
+        #  for same-as-encode). Decode-channel mismatches exercise the
+        #  mono<->stereo up/downmix synthesis paths; -bandwidth exercises
+        #  end_band < 21.
+        cases = (("2.5", 128000, [], None),
+                 ("5", 96000, [], None),
+                 ("10", 64000, ["-cbr"], None),
+                 ("20", 128000, [], None),
+                 ("20", 320000, ["-cbr"], None),
+                 ("20", 96000, ["-bandwidth", "NB"], None),
+                 ("10", 96000, ["-bandwidth", "WB"], None),
+                 ("20", 128000, ["-bandwidth", "SWB"], None),
+                 ("20", 128000, [], "swap"))
         for channels in (1, 2):
             sig = os.path.join(tmp, f"sig{channels}.raw")
             gen_signal(sig, channels)
-            for fsize, rate, extra in (("2.5", 128000, []),
-                                       ("5", 96000, []),
-                                       ("10", 64000, ["-cbr"]),
-                                       ("20", 128000, []),
-                                       ("20", 320000, ["-cbr"])):
+            for fsize, rate, extra, decmode in cases:
+                dec_ch = channels if decmode is None else 3 - channels
                 bit = os.path.join(tmp, "a.bit")
                 ref = os.path.join(tmp, "ref.raw")
                 mine = os.path.join(tmp, "mine.raw")
                 run([OPUS_DEMO, "-e", "restricted-lowdelay", "48000",
                      str(channels), str(rate), "-framesize", fsize] + extra +
                     [sig, bit], quiet=True)
-                run([OPUS_DEMO, "-d", "48000", str(channels), bit, ref],
+                run([OPUS_DEMO, "-d", "48000", str(dec_ch), bit, ref],
                     quiet=True)
-                r = run([cli, bit, str(channels), mine], quiet=True)
+                r = run([cli, bit, str(dec_ch), mine], quiet=True)
                 cli_msg = r.stdout.decode().strip()
 
                 a = open(ref, "rb").read()
@@ -118,8 +128,9 @@ def main():
                 status = "OK" if worst <= MAX_LSB else "FAIL"
                 if status == "FAIL":
                     failures += 1
-                print(f"{status} ch={channels} fs={fsize}ms rate={rate}"
-                      f"{' cbr' if extra else ''}: {cli_msg}, "
+                tag = " ".join(extra) if extra else "vbr"
+                print(f"{status} ch={channels}->{dec_ch} fs={fsize}ms "
+                      f"rate={rate} [{tag}]: {cli_msg}, "
                       f"max |pcm diff| = {worst} LSB")
         if failures:
             sys.exit(f"FAIL: {failures} configurations failed")

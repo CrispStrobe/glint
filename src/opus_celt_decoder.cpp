@@ -166,8 +166,9 @@ void CeltDecoder::init(int channels) {
     mdct_window_fill(window_, kOverlap);
 }
 
-void CeltDecoder::synthesis(const double* X, int C, int is_transient,
-                            int lm, int silence, int effend) {
+void CeltDecoder::synthesis(const double* X, int CC, int C,
+                            int is_transient, int lm, int silence,
+                            int effend) {
     int n = 120 << lm;
     int b, nb, shift;
     if (is_transient) {
@@ -180,21 +181,53 @@ void CeltDecoder::synthesis(const double* X, int C, int is_transient,
         shift = 3 - lm;
     }
     double freq[kMaxFrame];
-    for (int c = 0; c < C; c++) {
-        double* out_syn = decode_mem_[c] + kDecodeBufferSize - n;
-        denormalise_bands(X + c * n, freq, old_ebands_ + c * kNbEBands, 0,
-                          effend, 1 << lm, n, silence);
+    if (CC == 2 && C == 1) {
+        // Mono stream to stereo output: same signal into both channels.
+        // The IMDCT destroys its input, so stage a copy inside channel 1's
+        // output region (in-place safe: input == output + overlap/2).
+        denormalise_bands(X, freq, old_ebands_, 0, effend, 1 << lm, n,
+                          silence);
+        double* out0 = decode_mem_[0] + kDecodeBufferSize - n;
+        double* out1 = decode_mem_[1] + kDecodeBufferSize - n;
+        double* freq2 = out1 + kOverlap / 2;
+        std::memcpy(freq2, freq, n * sizeof(double));
         for (int blk = 0; blk < b; blk++)
-            imdct_.backward(&freq[blk], out_syn + nb * blk, window_,
-                            kOverlap, shift, b);
+            imdct_.backward(&freq2[blk], out0 + nb * blk, window_, kOverlap,
+                            shift, b);
+        for (int blk = 0; blk < b; blk++)
+            imdct_.backward(&freq[blk], out1 + nb * blk, window_, kOverlap,
+                            shift, b);
+    } else if (CC == 1 && C == 2) {
+        // Stereo stream to mono output: average the denormalised spectra.
+        double* out0 = decode_mem_[0] + kDecodeBufferSize - n;
+        double* freq2 = out0 + kOverlap / 2;
+        denormalise_bands(X, freq, old_ebands_, 0, effend, 1 << lm, n,
+                          silence);
+        denormalise_bands(X + n, freq2, old_ebands_ + kNbEBands, 0, effend,
+                          1 << lm, n, silence);
+        for (int i = 0; i < n; i++) freq[i] = 0.5 * freq[i] + 0.5 * freq2[i];
+        for (int blk = 0; blk < b; blk++)
+            imdct_.backward(&freq[blk], out0 + nb * blk, window_, kOverlap,
+                            shift, b);
+    } else {
+        for (int c = 0; c < CC; c++) {
+            double* out_syn = decode_mem_[c] + kDecodeBufferSize - n;
+            denormalise_bands(X + c * n, freq, old_ebands_ + c * kNbEBands,
+                              0, effend, 1 << lm, n, silence);
+            for (int blk = 0; blk < b; blk++)
+                imdct_.backward(&freq[blk], out_syn + nb * blk, window_,
+                                kOverlap, shift, b);
+        }
     }
 }
 
 int CeltDecoder::decode_frame(RangeDecoder& dec, uint32_t payload_bytes,
-                              float* pcm, int frame_size) {
-    const int C = channels_;
+                              float* pcm, int frame_size,
+                              int stream_channels, int end_band) {
+    const int CC = channels_;       // decoder output channels
+    const int C = stream_channels;  // channels coded in the stream
     const int start = 0;
-    const int end = kNbEBands;
+    const int end = end_band;
     const int effend = end;
 
     int lm;
@@ -314,7 +347,7 @@ int CeltDecoder::decode_frame(RangeDecoder& dec, uint32_t payload_bytes,
 
     unquant_fine_energy(start, end, old_ebands, fine_quant, dec, C);
 
-    for (int c = 0; c < C; c++)
+    for (int c = 0; c < CC; c++)
         std::memmove(decode_mem_[c], decode_mem_[c] + n,
                      (kDecodeBufferSize - n + kOverlap) * sizeof(double));
 
@@ -343,11 +376,11 @@ int CeltDecoder::decode_frame(RangeDecoder& dec, uint32_t payload_bytes,
         for (int i = 0; i < 2 * kNbEBands; i++) old_ebands[i] = -28.0;
     }
 
-    synthesis(X, C, is_transient, lm, silence, effend);
+    synthesis(X, CC, C, is_transient, lm, silence, effend);
 
     // Postfilter: previous frame's parameters over the first short-MDCT,
     // then a cross-fade to this frame's parameters.
-    for (int c = 0; c < C; c++) {
+    for (int c = 0; c < CC; c++) {
         double* out_syn = decode_mem_[c] + kDecodeBufferSize - n;
         postfilter_period_ = imax(postfilter_period_, kCombFilterMinPeriod);
         postfilter_period_old_ =
@@ -404,13 +437,13 @@ int CeltDecoder::decode_frame(RangeDecoder& dec, uint32_t payload_bytes,
     rng_ = dec.range();
 
     // De-emphasis (1-pole) and PCM output at ±1.0.
-    for (int c = 0; c < C; c++) {
+    for (int c = 0; c < CC; c++) {
         double* x = decode_mem_[c] + kDecodeBufferSize - n;
         double mem = preemph_mem_[c];
         for (int j = 0; j < n; j++) {
             double tmp = x[j] + kVerySmall + mem;
             mem = kPreemphCoef * tmp;
-            pcm[j * C + c] = static_cast<float>(tmp * (1.0 / 32768.0));
+            pcm[j * CC + c] = static_cast<float>(tmp * (1.0 / 32768.0));
         }
         preemph_mem_[c] = mem;
     }

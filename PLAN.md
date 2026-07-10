@@ -1252,3 +1252,16 @@ fullband 48 kHz) identically to libopus:
 O1 remainder (small): CELT-only narrower bandwidths (end<21 — NB/WB/SWB
 TOC configs 16..27), stream-channels != decoder-channels up/downmix paths,
 PLC (celt_decode_lost). Then O2 (SILK), O3 (Ogg).
+
+## O1 remainder (2026-07-10): endband + channel mixing DONE; PLC deferred
+
+- decode_frame now takes (stream_channels, end_band): NB/WB/SWB/FB CELT
+  configs map to end 13/17/19/21 (kEndband in opus_decoder.cpp), and
+  mono<->stereo mismatches use the reference synthesis paths (mono->stereo:
+  freq copy staged INSIDE ch1's output region, in-place IMDCT trick;
+  stereo->mono: average denormalised spectra). Decode loops use stream C;
+  memmove/postfilter/deemphasis use decoder CC.
+- E2E gate now 18 configs (bandwidths + both mismatch directions +
+  VBR/CBR + all frame sizes): ALL final ranges exact, PCM <= 4 LSB.
+- Still open in O1: PLC (celt_decode_lost) — deferred to the O2 arc since
+  opus_decode_native's PLC clock matters for SILK too.

@@ -30,11 +30,14 @@ public:
     void init(int channels);
 
     // Decode one frame of frame_size samples (120<<LM, LM in 0..3) into
-    // interleaved float PCM (±1.0). dec must be freshly initialized on the
-    // frame's payload (or positioned after preceding layers). Returns
+    // interleaved float PCM (±1.0, channels() wide). dec must be freshly
+    // initialized on the frame's payload (or positioned after preceding
+    // layers). stream_channels may differ from the decoder's channel
+    // count (mono streams upmix, stereo streams downmix, like the
+    // reference). end_band: 13/17/19/21 for NB/WB/SWB/FB. Returns
     // frame_size or a negative error.
-    int decode_frame(RangeDecoder& dec, uint32_t payload_bytes,
-                     float* pcm, int frame_size);
+    int decode_frame(RangeDecoder& dec, uint32_t payload_bytes, float* pcm,
+                     int frame_size, int stream_channels, int end_band);
 
     uint32_t range_final() const { return rng_; }
 
@@ -43,8 +46,8 @@ private:
     static constexpr int kOverlap = 120;
     static constexpr int kMaxFrame = 960;
 
-    void synthesis(const double* X, int C, int is_transient, int lm,
-                   int silence, int effend);
+    void synthesis(const double* X, int CC, int C, int is_transient,
+                   int lm, int silence, int effend);
 
     int channels_ = 0;
     uint32_t rng_ = 0;  // LCG seed, re-seeded from the range state per frame

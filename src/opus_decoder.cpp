@@ -214,9 +214,12 @@ int OpusDecoder::decode(const uint8_t* data, int32_t len, float* pcm,
     int err = opus_packet_parse(data, len, &pkt);
     if (err) return err;
     if (pkt.config < 16) return -5;  // SILK/hybrid: not until O2
-    if ((pkt.stereo ? 2 : 1) != channels_) return -6;
-    if (pkt.config < 28) return -7;  // non-fullband CELT: end<21, later
     if (pkt.frame_count * pkt.frame_size > max_samples) return -2;
+
+    // CELT-only bandwidth -> top coded band (NB/WB/SWB/FB).
+    static const int kEndband[4] = { 13, 17, 19, 21 };
+    int end_band = kEndband[(pkt.config >> 2) & 3];
+    int stream_channels = pkt.stereo ? 2 : 1;
 
     int total = 0;
     for (int f = 0; f < pkt.frame_count; f++) {
@@ -225,7 +228,8 @@ int OpusDecoder::decode(const uint8_t* data, int32_t len, float* pcm,
         dec.init(pkt.frames[f], static_cast<uint32_t>(pkt.sizes[f]));
         int ret = celt_.decode_frame(dec, static_cast<uint32_t>(pkt.sizes[f]),
                                      pcm + total * channels_,
-                                     pkt.frame_size);
+                                     pkt.frame_size, stream_channels,
+                                     end_band);
         if (ret < 0) return ret;
         final_range_ = dec.range();
         total += ret;

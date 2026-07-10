@@ -29,11 +29,16 @@ struct DecA {
 #include "opus_celt_decoder.hpp"
 struct DecA {
     glint::opus::CeltDecoder d;
-    void init(int channels) { d.init(channels); }
+    int ch = 0;
+    void init(int channels) {
+        ch = channels;
+        d.init(channels);
+    }
     int frame(const uint8_t* data, int len, float* pcm, int fsize) {
         glint::opus::RangeDecoder dec;
         dec.init(data, static_cast<uint32_t>(len));
-        return d.decode_frame(dec, static_cast<uint32_t>(len), pcm, fsize);
+        return d.decode_frame(dec, static_cast<uint32_t>(len), pcm, fsize,
+                              ch, 21);
     }
 };
 #endif
