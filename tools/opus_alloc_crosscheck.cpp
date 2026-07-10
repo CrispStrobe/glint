@@ -14,6 +14,7 @@ extern "C" {
 #include "rate.h"
 #include "celt.h"
 #include "entdec.h"
+#include "entenc.h"
 }
 struct AllocA {
     ec_dec d;
@@ -34,6 +35,29 @@ struct AllocA {
     }
     uint32_t tell() { return (uint32_t)ec_tell(&d); }
 };
+struct AllocEncA {
+    ec_enc e;
+    const CELTMode* mode;
+    int caps[21];
+    uint8_t* buf_;
+    void init(uint8_t* b, uint32_t n, int lm, int c) {
+        mode = opus_custom_mode_create(48000, 960, 0);
+        init_caps(mode, caps, lm, c);
+        ec_enc_init(&e, b, n);
+        buf_ = b;
+    }
+    int alloc(int start, int end, const int* offsets, int trim,
+              int* intensity, int* dual, int32_t total, int32_t* balance,
+              int* pulses, int* ebits, int* prio, int c, int lm, int prev,
+              int sbw) {
+        return clt_compute_allocation(mode, start, end, offsets, caps, trim,
+                                      intensity, dual, total, balance,
+                                      pulses, ebits, prio, c, lm,
+                                      (ec_ctx*)&e, 1, prev, sbw);
+    }
+    void done() { ec_enc_done(&e); }
+    uint32_t tell() { return (uint32_t)ec_tell(&e); }
+};
 #else
 #include "opus_celt_rate.hpp"
 #include "opus_ec.hpp"
@@ -52,6 +76,26 @@ struct AllocA {
             balance, pulses, ebits, prio, c, lm, d);
     }
     uint32_t tell() { return d.tell(); }
+};
+struct AllocEncA {
+    glint::opus::RangeEncoder e;
+    int caps[21];
+    uint8_t* buf_;
+    void init(uint8_t* b, uint32_t n, int lm, int c) {
+        glint::opus::init_caps(caps, lm, c);
+        e.init(b, n);
+        buf_ = b;
+    }
+    int alloc(int start, int end, const int* offsets, int trim,
+              int* intensity, int* dual, int32_t total, int32_t* balance,
+              int* pulses, int* ebits, int* prio, int c, int lm, int prev,
+              int sbw) {
+        return glint::opus::compute_allocation_enc(
+            start, end, offsets, caps, trim, intensity, dual, total,
+            balance, pulses, ebits, prio, c, lm, e, prev, sbw);
+    }
+    void done() { e.done(); }
+    uint32_t tell() { return e.tell(); }
 };
 #endif
 

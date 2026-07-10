@@ -57,5 +57,17 @@ int compute_allocation_dec(int start, int end, const int* offsets,
                            int* fine_priority, int channels, int lm,
                            RangeDecoder& dec);
 
+// Encoder-side twin: identical integer logic, but DECIDES band skips (the
+// depth-threshold policy driven by prev = last frame's codedBands and
+// signal_bandwidth) and WRITES the skip/intensity/dual-stereo symbols.
+// *intensity is clamped to codedBands and updated in place.
+int compute_allocation_enc(int start, int end, const int* offsets,
+                           const int* cap, int alloc_trim, int* intensity,
+                           int* dual_stereo, int32_t total,
+                           int32_t* balance, int* pulses, int* ebits,
+                           int* fine_priority, int channels, int lm,
+                           RangeEncoder& enc, int prev,
+                           int signal_bandwidth);
+
 }  // namespace opus
 }  // namespace glint

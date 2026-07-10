@@ -75,7 +75,8 @@ int interp_bits2pulses(int start, int end, int skip_start, const int* bits1,
                        int* intensity, int intensity_rsv, int* dual_stereo,
                        int dual_stereo_rsv, int* bits, int* ebits,
                        int* fine_priority, int C, int lm,
-                       RangeDecoder& dec) {
+                       RangeEncoder* enc, RangeDecoder* dec, int prev,
+                       int signal_bandwidth) {
     const int alloc_floor = C << kBitRes;
     const int stereo = C > 1 ? 1 : 0;
     const int log_m = lm << kBitRes;
@@ -142,7 +143,26 @@ int interp_bits2pulses(int start, int end, int skip_start, const int* bits1,
         int band_bits =
             static_cast<int>(bits[j] + percoeff * band_width + rem);
         if (band_bits >= imax(thresh[j], alloc_floor + (1 << kBitRes))) {
-            if (dec.dec_bit_logp(1)) break;
+            if (enc) {
+                // Stop-skipping policy: keep bands with enough depth (with
+                // hysteresis via prev) inside the signalled bandwidth.
+                int depth_threshold;
+                if (coded_bands > 17)
+                    depth_threshold = j < prev ? 7 : 9;
+                else
+                    depth_threshold = 0;
+                if (coded_bands <= start + 2 ||
+                    (band_bits >
+                         ((depth_threshold * band_width << lm << kBitRes) >>
+                          4) &&
+                     j <= signal_bandwidth)) {
+                    enc->enc_bit_logp(1, 1);
+                    break;
+                }
+                enc->enc_bit_logp(0, 1);
+            } else if (dec->dec_bit_logp(1)) {
+                break;
+            }
             psum += 1 << kBitRes;
             band_bits -= 1 << kBitRes;
         }
@@ -158,19 +178,30 @@ int interp_bits2pulses(int start, int end, int skip_start, const int* bits1,
         }
     }
 
-    if (intensity_rsv > 0)
-        *intensity = start + static_cast<int>(dec.dec_uint(
-                                 coded_bands + 1 - start));
-    else
+    if (intensity_rsv > 0) {
+        if (enc) {
+            *intensity = imin(*intensity, coded_bands);
+            enc->enc_uint(static_cast<uint32_t>(*intensity - start),
+                          static_cast<uint32_t>(coded_bands + 1 - start));
+        } else {
+            *intensity = start + static_cast<int>(dec->dec_uint(
+                                     coded_bands + 1 - start));
+        }
+    } else {
         *intensity = 0;
+    }
     if (*intensity <= start) {
         total += dual_stereo_rsv;
         dual_stereo_rsv = 0;
     }
-    if (dual_stereo_rsv > 0)
-        *dual_stereo = dec.dec_bit_logp(1);
-    else
+    if (dual_stereo_rsv > 0) {
+        if (enc)
+            enc->enc_bit_logp(*dual_stereo, 1);
+        else
+            *dual_stereo = dec->dec_bit_logp(1);
+    } else {
         *dual_stereo = 0;
+    }
 
     // Spread what's left uniformly per coefficient, remainder to the lowest
     // bands one coefficient's worth at a time.
@@ -256,12 +287,14 @@ int interp_bits2pulses(int start, int end, int skip_start, const int* bits1,
 
 }  // namespace
 
-int compute_allocation_dec(int start, int end, const int* offsets,
-                           const int* cap, int alloc_trim, int* intensity,
-                           int* dual_stereo, int32_t total,
-                           int32_t* balance, int* pulses, int* ebits,
-                           int* fine_priority, int channels, int lm,
-                           RangeDecoder& dec) {
+namespace {
+int compute_allocation_impl(int start, int end, const int* offsets,
+                            const int* cap, int alloc_trim, int* intensity,
+                            int* dual_stereo, int32_t total,
+                            int32_t* balance, int* pulses, int* ebits,
+                            int* fine_priority, int channels, int lm,
+                            RangeEncoder* enc, RangeDecoder* dec, int prev,
+                            int signal_bandwidth) {
     const int C = channels;
     int bits1[kNbEBands], bits2[kNbEBands];
     int thresh[kNbEBands], trim_offset[kNbEBands];
@@ -346,7 +379,35 @@ int compute_allocation_dec(int start, int end, const int* offsets,
     return interp_bits2pulses(start, end, skip_start, bits1, bits2, thresh,
                               cap, total, balance, skip_rsv, intensity,
                               intensity_rsv, dual_stereo, dual_stereo_rsv,
-                              pulses, ebits, fine_priority, C, lm, dec);
+                              pulses, ebits, fine_priority, C, lm, enc, dec,
+                              prev, signal_bandwidth);
+}
+}  // namespace
+
+int compute_allocation_dec(int start, int end, const int* offsets,
+                           const int* cap, int alloc_trim, int* intensity,
+                           int* dual_stereo, int32_t total,
+                           int32_t* balance, int* pulses, int* ebits,
+                           int* fine_priority, int channels, int lm,
+                           RangeDecoder& dec) {
+    return compute_allocation_impl(start, end, offsets, cap, alloc_trim,
+                                   intensity, dual_stereo, total, balance,
+                                   pulses, ebits, fine_priority, channels,
+                                   lm, nullptr, &dec, 0, 0);
+}
+
+int compute_allocation_enc(int start, int end, const int* offsets,
+                           const int* cap, int alloc_trim, int* intensity,
+                           int* dual_stereo, int32_t total,
+                           int32_t* balance, int* pulses, int* ebits,
+                           int* fine_priority, int channels, int lm,
+                           RangeEncoder& enc, int prev,
+                           int signal_bandwidth) {
+    return compute_allocation_impl(start, end, offsets, cap, alloc_trim,
+                                   intensity, dual_stereo, total, balance,
+                                   pulses, ebits, fine_priority, channels,
+                                   lm, &enc, nullptr, prev,
+                                   signal_bandwidth);
 }
 
 }  // namespace opus
