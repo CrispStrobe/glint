@@ -42,6 +42,7 @@ set(GLINT_SOURCES
     src/opus_ec.cpp
     src/opus_laplace.cpp
     src/opus_cwrs.cpp
+    src/opus_celt_energy.cpp
 )
 
 # Static library

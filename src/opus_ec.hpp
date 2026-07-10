@@ -135,6 +135,8 @@ public:
     // may continue (all outputs stay in valid ranges) per RFC robustness
     // requirements.
     int error() const { return error_; }
+    // Frame size in bytes (CELT computes bit budgets as storage * 8).
+    uint32_t storage_bytes() const { return storage_; }
 
 private:
     int read_byte();
