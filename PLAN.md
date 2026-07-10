@@ -1519,3 +1519,21 @@ O2 leftovers for later polish: FEC (LBRR decode-on-request), DTX beyond
 the per-frame conceal, decoder sample rates != 48k (API resampling
 covers 8-48k in SILK; CELT downsample path unimplemented), OPUS_SET_GAIN.
 NEXT: O3 (Ogg Opus demux -> decode .opus FILES) and/or O4 (CELT encoder).
+
+## O3 DONE (2026-07-10): Ogg Opus — glint decodes .opus FILES
+
+opus_ogg.{hpp,cpp}: Ogg page parse with CRC (0x04C11DB7 MSB-first, zero
+init/xor, CRC field zeroed for the check), packet reassembly (lacing +
+cross-page continuation, dangling-partial drop), OpusHead/OpusTags,
+edit-list semantics (pre-skip front trim, last-granule end trim, Q7.8 dB
+output gain). Mapping families 0 and 1 up to 2 channels (multistream
+deferred). tools/opusfile_dec_cli.cpp = .opus -> int16 PCM.
+
+Gate: tools/test_opus_ogg.py — 8 ffmpeg/libopus-encoded .opus configs
+(SILK/hybrid/CELT, VBR+CBR, mono+stereo, 10-40 ms frames) decoded and
+compared against ffmpeg FORCED to decode via libopus (its native opus
+decoder differs at more LSBs): sample counts exact, PCM within 1 LSB.
+
+MERGE CONDITION (user, 2026-07-10): decode + encode both proven correct
+=> merge feature/opus to main. Decode side is done; O4 (CELT encoder)
+is the remaining gate.
