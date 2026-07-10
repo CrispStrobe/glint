@@ -44,6 +44,7 @@ set(GLINT_SOURCES
     src/opus_cwrs.cpp
     src/opus_celt_energy.cpp
     src/opus_celt_rate.cpp
+    src/opus_celt_bands.cpp
     src/opus_mdct.cpp
 )
 

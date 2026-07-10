@@ -1177,3 +1177,40 @@ NEXT (O1 remainder, in order):
 3. TOC/packet parse (code 0-3 framing) + opus_decode top level for
    CELT-only streams; oracle: opus_demo with restricted-lowdelay.
 4. Then SILK (O2).
+
+## O1 progress 2 (2026-07-10): band decoding DONE — the largest CELT piece
+
+**opus_celt_bands.{hpp,cpp}** — decode side of bands.c/vq.c: quant_all_bands
+(folding-source norm buffers, lowband_offset/update tracking, hybrid special
+folding at start+1, dual-stereo->intensity switch), quant_band_stereo (theta
+join, N==2 orthogonal-side sign trick), quant_band (tf recombine/subdivide
+Haar chains, Hadamard reorder for transients, resynth un-do, sqrt(N) folding
+scale), quant_partition (recursive splits, delta bit-split from bit-exact
+integer log2tan, rebalance, PVQ leaf with budget walk-down, LCG noise/fold
+fills), compute_theta (all three PDFs: step/uniform/triangular + isqrt32),
+compute_qn, exp_rotation spreading, collapse masks, stereo_merge,
+anti_collapse. Encode branches and theta-RDO dropped (decoder-only).
+
+Gate: tools/crosscheck_opus_bands.py — fuzz oracle wired exactly like
+celt_decode_with_ec (allocator -> quant_all_bands -> anti-collapse bit ->
+anti_collapse) over 150 random frames covering all LM, mono/stereo, hybrid
+start=17, transient+tf combinations, all spread modes, dual stereo,
+disable_inv. Collapse masks / LCG seeds / tells byte-identical; spectra
+match to 4e-6 (float-vs-double). PASS.
+
+Learnings:
+- The decode path's ec reads are 100% integer-driven (qn/theta PDFs, delta
+  via bitexact_cos/log2tan, cache walk-downs) — signal values never touch
+  the wire, so the fuzz oracle is complete for this layer too.
+- tf_res values must stay in tf_select_table's domain per (LM, transient)
+  when fuzzing — arbitrary values hit UB in both implementations.
+- The reference decoder aliases lowband_scratch onto X_'s last-band region;
+  a separate scratch buffer is output-identical (scratch is written before
+  read within each quant_band call, and the last band never uses it).
+- Verify print-precision actually exercises the tolerance: at %.4f the
+  spectra compared EQUAL (deltas hid below the grid) — bumped to %.6f to
+  prove real float-vs-double deltas flow through the comparison.
+
+NEXT: celt_decoder.c top level (flags, dynalloc, tf_decode, postfilter,
+denormalise + IMDCT + deemphasis, PLC stub, energy state rotation), then
+TOC/packet framing, then decode real CELT-only packets vs opus_demo.
