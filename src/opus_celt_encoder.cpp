@@ -261,6 +261,191 @@ int tf_analysis(int len, int is_transient, int* tf_res, int lambda,
     return tf_select;
 }
 
+float median_of_5f(const float* x) {
+    float t0, t1, t2 = x[2], t3, t4;
+    if (x[0] > x[1]) {
+        t0 = x[1];
+        t1 = x[0];
+    } else {
+        t0 = x[0];
+        t1 = x[1];
+    }
+    if (x[3] > x[4]) {
+        t3 = x[4];
+        t4 = x[3];
+    } else {
+        t3 = x[3];
+        t4 = x[4];
+    }
+    if (t0 > t3) {
+        std::swap(t0, t3);
+        std::swap(t1, t4);
+    }
+    if (t2 > t1) return t1 < t3 ? std::min(t2, t3) : std::min(t4, t1);
+    return t2 < t3 ? std::min(t1, t3) : std::min(t2, t4);
+}
+
+float median_of_3f(const float* x) {
+    float t0, t1, t2 = x[2];
+    if (x[0] > x[1]) {
+        t0 = x[1];
+        t1 = x[0];
+    } else {
+        t0 = x[0];
+        t1 = x[1];
+    }
+    if (t1 < t2) return t1;
+    return t0 < t2 ? t2 : t0;
+}
+
+// Dynamic-allocation analysis (reference float path, CBR, no surround /
+// tonality analyzer / lfe). Produces per-band boost counts in offsets[]
+// (quanta flags for the dynalloc wire loop), importance[] for
+// tf_analysis, and spread_weight[] for the spread decision. The
+// follower tracks a smoothed spectral floor; boosts go to bands that
+// poke above it (tonal peaks the plain allocation starves).
+void dynalloc_analysis(const float* band_log_e, const float* band_log_e2,
+                       const float* old_band_e, int end, int C,
+                       int* offsets, int lsb_depth, int is_transient,
+                       int lm, int effective_bytes, int* importance,
+                       int* spread_weight) {
+    float follower[2 * kNbEBands], noise_floor[kNbEBands];
+    float band_log_e3[kNbEBands];
+    std::memset(offsets, 0, kNbEBands * sizeof(int));
+    float max_depth = -31.9f;
+    for (int i = 0; i < end; i++) {
+        // eMeans, bit depth, band width and the preemphasis tilt
+        // (~square of the bark band id) shape the noise floor.
+        noise_floor[i] =
+            0.0625f * celt::kLogN[i] + 0.5f + (9 - lsb_depth) -
+            static_cast<float>(celt::kEMeans[i]) +
+            0.0062f * (i + 5) * (i + 5);
+    }
+    for (int c = 0; c < C; c++)
+        for (int i = 0; i < end; i++)
+            max_depth = std::max(
+                max_depth, band_log_e[c * kNbEBands + i] - noise_floor[i]);
+    {
+        // Simple masking model for the spreading decision only.
+        float mask[kNbEBands], sig[kNbEBands];
+        for (int i = 0; i < end; i++)
+            mask[i] = band_log_e[i] - noise_floor[i];
+        if (C == 2)
+            for (int i = 0; i < end; i++)
+                mask[i] = std::max(
+                    mask[i], band_log_e[kNbEBands + i] - noise_floor[i]);
+        std::memcpy(sig, mask, end * sizeof(float));
+        for (int i = 1; i < end; i++)
+            mask[i] = std::max(mask[i], mask[i - 1] - 2.0f);
+        for (int i = end - 2; i >= 0; i--)
+            mask[i] = std::max(mask[i], mask[i + 1] - 3.0f);
+        for (int i = 0; i < end; i++) {
+            float smr =
+                sig[i] - std::max(std::max(0.0f, max_depth - 12.0f),
+                                  mask[i]);
+            int shift = imin(
+                5, imax(0, -static_cast<int>(std::floor(0.5f + smr))));
+            spread_weight[i] = 32 >> shift;
+        }
+    }
+    // Feature floor: 24 kb/s at 20 ms up to 96 kb/s at 2.5 ms.
+    if (effective_bytes >= 30 + 5 * lm) {
+        int last = 0;
+        for (int c = 0; c < C; c++) {
+            std::memcpy(band_log_e3, &band_log_e2[c * kNbEBands],
+                        end * sizeof(float));
+            if (lm == 0) {
+                // One-bin bands: energy too noisy, widen with history.
+                for (int i = 0; i < imin(8, end); i++)
+                    band_log_e3[i] =
+                        std::max(band_log_e2[c * kNbEBands + i],
+                                 old_band_e[c * kNbEBands + i]);
+            }
+            float* f = &follower[c * kNbEBands];
+            f[0] = band_log_e3[0];
+            for (int i = 1; i < end; i++) {
+                // The last band >=.5 dB above its neighbor bounds the
+                // backward pass (bandlimited-signal guard).
+                if (band_log_e3[i] > band_log_e3[i - 1] + 0.5f) last = i;
+                f[i] = std::min(f[i - 1] + 1.5f, band_log_e3[i]);
+            }
+            for (int i = last - 1; i >= 0; i--)
+                f[i] = std::min(
+                    f[i], std::min(f[i + 1] + 2.0f, band_log_e3[i]));
+            // Median filter (offset 1 dB) against spurious triggers.
+            const float offset = 1.0f;
+            for (int i = 2; i < end - 2; i++)
+                f[i] = std::max(f[i],
+                                median_of_5f(&band_log_e3[i - 2]) - offset);
+            float tmp = median_of_3f(&band_log_e3[0]) - offset;
+            f[0] = std::max(f[0], tmp);
+            f[1] = std::max(f[1], tmp);
+            tmp = median_of_3f(&band_log_e3[end - 3]) - offset;
+            f[end - 2] = std::max(f[end - 2], tmp);
+            f[end - 1] = std::max(f[end - 1], tmp);
+            for (int i = 0; i < end; i++)
+                f[i] = std::max(f[i], noise_floor[i]);
+        }
+        if (C == 2) {
+            for (int i = 0; i < end; i++) {
+                // 24 dB (4 log2) cross-talk between channels.
+                follower[kNbEBands + i] = std::max(
+                    follower[kNbEBands + i], follower[i] - 4.0f);
+                follower[i] = std::max(follower[i],
+                                       follower[kNbEBands + i] - 4.0f);
+                follower[i] =
+                    0.5f *
+                    (std::max(0.0f, band_log_e[i] - follower[i]) +
+                     std::max(0.0f,
+                              band_log_e[kNbEBands + i] -
+                                  follower[kNbEBands + i]));
+            }
+        } else {
+            for (int i = 0; i < end; i++)
+                follower[i] =
+                    std::max(0.0f, band_log_e[i] - follower[i]);
+        }
+        for (int i = 0; i < end; i++)
+            importance[i] = static_cast<int>(std::floor(
+                0.5f + 13.0f * std::exp2(std::min(follower[i], 4.0f))));
+        // CBR non-transient frames: halve the dynalloc contribution.
+        if (!is_transient)
+            for (int i = 0; i < end; i++) follower[i] *= 0.5f;
+        for (int i = 0; i < end; i++) {
+            if (i < 8) follower[i] *= 2;
+            if (i >= 12) follower[i] *= 0.5f;
+        }
+        int32_t tot_boost = 0;
+        for (int i = 0; i < end; i++) {
+            follower[i] = std::min(follower[i], 4.0f);
+            int width = C * (kEBands[i + 1] - kEBands[i]) << lm;
+            int boost, boost_bits;
+            if (width < 6) {
+                boost = static_cast<int>(follower[i]);
+                boost_bits = (boost * width) << kBitRes;
+            } else if (width > 48) {
+                boost = static_cast<int>(follower[i] * 8);
+                boost_bits = ((boost * width) << kBitRes) / 8;
+            } else {
+                boost = static_cast<int>(follower[i] * width / 6);
+                boost_bits = (boost * 6) << kBitRes;
+            }
+            // CBR: dynalloc limited to 2/3 of the frame's bits.
+            if ((tot_boost + boost_bits) >> kBitRes >> 3 >
+                2 * effective_bytes / 3) {
+                int32_t cap = (2 * effective_bytes / 3) << kBitRes << 3;
+                offsets[i] = cap - tot_boost;
+                tot_boost = cap;
+                break;
+            }
+            offsets[i] = boost;
+            tot_boost += boost_bits;
+        }
+    } else {
+        for (int i = 0; i < end; i++) importance[i] = 13;
+    }
+}
+
 // Allocation-trim analysis (reference float path, no surround / no
 // tonality analyzer): base 5 shaded by the low-band stereo correlation
 // (correlated stereo -> spend low), the spectral tilt of the band log
@@ -469,21 +654,45 @@ int CeltEncoder::encode_frame(const float* pcm, int frame_size,
         }
     }
 
-    // Band analysis.
+    // Band analysis. band_log_e2 = LONG-window log energies (+lm/2 dB)
+    // even on transient frames — dynalloc's follower needs the stable
+    // long-window view (the reference's secondMdct at complexity >= 8).
     float band_e[2 * kNbEBands], band_log_e[2 * kNbEBands];
+    float band_log_e2[2 * kNbEBands];
     float x_norm[2 * kMaxFrame];
     compute_band_energies(X, band_e, end, C, lm);
     amp2Log2(end, end, band_e, band_log_e, C);
+    if (is_transient) {
+        static thread_local float x_long[2 * kMaxFrame];
+        double freq_d[kMaxFrame];
+        float band_e2[2 * kNbEBands];
+        for (int c = 0; c < C; c++) {
+            mdct_.forward(in[c], freq_d, window_, kOverlap, 3 - lm, 1);
+            for (int k = 0; k < n; k++)
+                x_long[c * n + k] = static_cast<float>(freq_d[k]);
+        }
+        compute_band_energies(x_long, band_e2, end, C, lm);
+        amp2Log2(end, end, band_e2, band_log_e2, C);
+        for (int i = 0; i < C * kNbEBands; i++)
+            band_log_e2[i] += 0.5f * lm;
+    } else {
+        std::memcpy(band_log_e2, band_log_e, sizeof(band_log_e2));
+    }
     normalise_bands(X, x_norm, band_e, end, C, m);
 
-    // Per-band TF resolution (quality item 3). Uniform importance until
-    // dynalloc_analysis lands (reference lfe fallback value 13). At very
-    // small frames the analysis is disabled, like the reference.
+    // Dynalloc analysis: per-band boost counts (wire-coded below),
+    // importance for tf_analysis, spread weights (spread analysis TBD).
+    int offsets[kNbEBands], importance[kNbEBands];
+    int spread_weight[kNbEBands];
+    dynalloc_analysis(band_log_e, band_log_e2, old_ebands_, end, C,
+                      offsets, /*lsb_depth=*/16, is_transient, lm, nbytes,
+                      importance, spread_weight);
+
+    // Per-band TF resolution (quality item 3). Disabled at very small
+    // frames, like the reference.
     int tf_res[kNbEBands];
     int tf_select = 0;
     if (nbytes >= 15 * C) {
-        int importance[kNbEBands];
-        for (int i = 0; i < kNbEBands; i++) importance[i] = 13;
         int lambda = imax(80, 20480 / nbytes + 2);
         tf_select = tf_analysis(end, is_transient, tf_res, lambda, x_norm,
                                 n, lm, tf_estimate, tf_chan, importance);
@@ -569,27 +778,48 @@ int CeltEncoder::encode_frame(const float* pcm, int frame_size,
     int cap[kNbEBands];
     init_caps(cap, lm, C);
 
-    // Dynalloc: no boosts — write a single zero flag per band wherever
-    // the decoder would look for one.
-    int offsets[kNbEBands] = { 0 };
+    // Dynalloc wire loop: one flag chain per band; each accepted flag
+    // buys `quanta` eighth-bits of boost. offsets[] comes in as the
+    // analysis' flag counts and leaves as the wire-coded boost in
+    // eighth-bits — exactly what the decoder derives and what
+    // compute_allocation consumes.
+    int32_t total_boost = 0;
     {
         int dynalloc_logp = 6;
         int32_t total_bits_q3 = total_bits << kBitRes;
         int32_t tellf = static_cast<int32_t>(enc.tell_frac());
         for (int i = start; i < end; i++) {
-            if (tellf + (dynalloc_logp << kBitRes) < total_bits_q3 &&
-                0 < cap[i]) {
-                enc.enc_bit_logp(0, static_cast<unsigned>(dynalloc_logp));
+            int width = C * (kEBands[i + 1] - kEBands[i]) << lm;
+            // 6 bits per quantum, capped at 1 bit/sample, floored at
+            // 1/8 bit/sample.
+            int quanta = imin(width << kBitRes, imax(6 << kBitRes, width));
+            int dynalloc_loop_logp = dynalloc_logp;
+            int boost = 0;
+            int j;
+            for (j = 0;
+                 tellf + (dynalloc_loop_logp << kBitRes) <
+                     total_bits_q3 - total_boost &&
+                 boost < cap[i];
+                 j++) {
+                int flag = j < offsets[i];
+                enc.enc_bit_logp(flag,
+                                 static_cast<unsigned>(dynalloc_loop_logp));
                 tellf = static_cast<int32_t>(enc.tell_frac());
+                if (!flag) break;
+                boost += quanta;
+                total_boost += quanta;
+                dynalloc_loop_logp = 1;
             }
+            if (j) dynalloc_logp = imax(2, dynalloc_logp - 1);
+            offsets[i] = boost;
         }
     }
 
-    // Trim: analyzed when the budget allows the symbol, else the
-    // decoder-side default 5.
+    // Trim: analyzed when the budget (net of dynalloc boosts) allows
+    // the symbol, else the decoder-side default 5.
     int alloc_trim = 5;
     if (static_cast<int32_t>(enc.tell_frac()) + (6 << kBitRes) <=
-        (total_bits << kBitRes)) {
+        (total_bits << kBitRes) - total_boost) {
         // equiv_rate: 20ms-equivalent bits/s (shorter frames discount
         // their fixed per-frame overhead, like the reference).
         int32_t equiv_rate =

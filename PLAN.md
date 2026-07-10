@@ -1751,3 +1751,27 @@ redistributes bits perceptually — judge by NMR, same lesson as MP3
 short blocks. Castanets holds. Gate 8/8, ranges libopus-certified.
 Next: dynalloc_analysis (band importance + boosts; also feeds
 tf_analysis importance), spread analysis, intensity stereo, VBR.
+
+## O4 quality item 5 (2026-07-10): dynalloc_analysis + wire boosts — done
+
+dynalloc_analysis (reference float path, CBR, no surround/tonality/
+lfe): noise floor from kLogN/kEMeans/lsb_depth(16)/preemph tilt;
+follower = fwd 1.5-dB + bwd 2-dB envelope bounded by the last band
+rising >=.5 dB (bandlimited guard), median-of-5/3 filtered (offset 1),
+floored at the noise floor; stereo 24-dB cross-talk merge; importance =
+13*2^min(follower,4) (feeds tf_analysis — was uniform 13); CBR halves
+follower on non-transient frames, <8 doubles, >=12 halves, cap 4;
+per-band boost quanta with the 2/3-of-frame CBR cap. The dynalloc WIRE
+loop now codes real flag chains (6-bit logp decaying to 1 after a hit,
+next-band start at max(2, logp-1)); offsets[] leaves as eighth-bit
+boosts, exactly what the conformant decoder derives. Trim gate now
+subtracts total_boost (decoder decrements total_bits in place — the
+encoder-side equivalent). band_log_e2 on transient frames = second
+LONG-window MDCT energies + lm/2 dB (reference secondMdct semantics).
+
+Measured vs trim-build: piano SNR +0.6/+0.6 (21.7/27.7 — libopus gap
+now -1.2 dB, was -4.4 at baseline), electronic +0.2/+0.3, quartet
++0.1/+0.1, castanets flat (96k p95 -0.35 better / mean +0.24, audible
+6.0 -> 5.8%; still ahead of libopus 3.8 mean / 3.7 p95). NMR flat
+elsewhere. Gate 8/8, ranges libopus-certified. spread_weight[] is
+computed and ready for the spread-analysis item.
