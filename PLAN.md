@@ -1379,3 +1379,27 @@ lpc_inverse_pred_gain thresholds 16773022 (0.99975 Q24) / 107374
 
 Remaining in O2: decode_parameters + decode_core (synthesis loop),
 decode_frame/silk_Decode + stereo + resamplers, hybrid, PLC, RFC vectors.
+
+## O2 MILESTONE (2026-07-10): full SILK frame decode byte-identical
+
+opus_silk_frame.{hpp,cpp}: decode_parameters (gain chain, NLSF->LPC for
+both interpolation halves, LTP codebook taps <<7, pitch lags, LTP scale;
+unvoiced zeroes controls AND resets PERIndex), decode_core (Q14 excitation
+with LCG sign dither + level adjust + offsets, per-subframe gain-step state
+rescaling via DIV32_varQ, voiced rewhitening through lpc_analysis_filter
+at k==0 / k==2-with-interp incl. the LTP-scale downscaling on independent
+frames, 5-tap LTP with +2 bias counter, order-10/16 LPC synthesis with
++order/2 bias counter, SAT16(RSHIFT_ROUND(SMULWW(.,gain_q10),8)) output),
+bwexpander (ROUNDED multiplies on purpose — SMULWB bias destabilizes),
+lpc_analysis_filter (wrapping accumulation per reference), decode_frame
+(clean path + outBuf history shuffle).
+
+Gate: tools/crosscheck_opus_silk_frame.py — 250 sequences x 4 chained
+frames vs the REAL silk_decode_frame (incl. its PLC/CNG upkeep, proving
+those are output-neutral on clean streams): xq PCM and tells
+BYTE-IDENTICAL. PLC/CNG state upkeep still stubbed (documented in code);
+becomes real work in the PLC item.
+
+Remaining in O2: silk_Decode top level (frame-size/rate dispatch, stereo
+weights + MS->LR unmix, resamplers to the API rate, LBRR/VAD header
+flags), opus_decode_native integration + hybrid, PLC/CNG, RFC vectors.

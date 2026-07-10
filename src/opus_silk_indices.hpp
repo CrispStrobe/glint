@@ -60,8 +60,20 @@ struct DecoderState {
     int vad_flags[3] = { 0, 0, 0 };
     int8_t ec_prev_signal_type = 0;
     int16_t ec_prev_lag_index = 0;
-    int8_t prev_gain_index = 0;  // silk_gains_dequant chain state
+    int8_t prev_gain_index = 0;  // reference LastGainIndex (gain chain)
     SideInfoIndices indices;
+
+    // Synthesis state (decode_core / decode_frame).
+    int n_frames_decoded = 0;
+    int first_frame_after_reset = 1;
+    int loss_cnt = 0;
+    int8_t prev_signal_type = 0;
+    int lag_prev = 100;
+    int32_t prev_gain_q16 = 65536;
+    int16_t prev_nlsf_q15[kMaxLpcOrder] = {};
+    int16_t out_buf[320 + 2 * 80] = {};   // ltp_mem + 2 subframes
+    int32_t slpc_q14_buf[kMaxLpcOrder] = {};
+    int32_t exc_q14[320] = {};
 
     void set_fs(int fs_khz_new, int nb_subfr_new);
 };
