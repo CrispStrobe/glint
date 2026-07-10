@@ -552,6 +552,193 @@ static void test_aac_api_smoke() {
     glint_aac_destroy(enc);
 }
 
+// --- Opus range coder (PLAN § O0) ---
+#include "opus_ec.hpp"
+
+// xorshift32; encode and decode passes replay the same op script from the
+// same seed, so op parameters never need to be stored.
+static uint32_t ec_rand_state;
+static uint32_t ec_rand() {
+    uint32_t x = ec_rand_state;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    return ec_rand_state = x;
+}
+
+// icdf[s] = 256 - fh(s): 5 symbols with widths 56/80/80/28/12.
+static const uint8_t kEcTestIcdf[5] = { 200, 120, 40, 12, 0 };
+
+static void ec_script_encode(uint32_t seed, int ops,
+                             glint::opus::RangeEncoder& enc,
+                             uint32_t* tells) {
+    ec_rand_state = seed;
+    if (tells) tells[0] = enc.tell();
+    for (int i = 0; i < ops; i++) {
+        switch (ec_rand() % 5) {
+        case 0: {
+            uint32_t ft = 2 + ec_rand() % ((1u << 15) - 2);
+            uint32_t fl = ec_rand() % ft;
+            enc.encode(fl, fl + 1, ft);
+            break;
+        }
+        case 1: {
+            unsigned logp = 1 + ec_rand() % 14;
+            int bit = static_cast<int>(ec_rand() & 1);
+            enc.enc_bit_logp(bit, logp);
+            break;
+        }
+        case 2:
+            enc.enc_icdf(static_cast<int>(ec_rand() % 5), kEcTestIcdf, 8);
+            break;
+        case 3: {
+            uint32_t ft = 2 + ec_rand() % (1u << 20);
+            uint32_t v = ec_rand() % ft;
+            enc.enc_uint(v, ft);
+            break;
+        }
+        case 4: {
+            unsigned bits = 1 + ec_rand() % 24;
+            uint32_t v = ec_rand() & ((1u << bits) - 1);
+            enc.enc_bits(v, bits);
+            break;
+        }
+        }
+        if (tells) tells[i + 1] = enc.tell();
+    }
+}
+
+static void ec_script_decode(uint32_t seed, int ops,
+                             glint::opus::RangeDecoder& dec,
+                             const uint32_t* tells, bool* values_ok,
+                             bool* tells_ok) {
+    ec_rand_state = seed;
+    *values_ok = true;
+    *tells_ok = !tells || dec.tell() == tells[0];
+    for (int i = 0; i < ops; i++) {
+        switch (ec_rand() % 5) {
+        case 0: {
+            uint32_t ft = 2 + ec_rand() % ((1u << 15) - 2);
+            uint32_t fl = ec_rand() % ft;
+            if (dec.decode(ft) != fl) *values_ok = false;
+            dec.dec_update(fl, fl + 1, ft);
+            break;
+        }
+        case 1: {
+            unsigned logp = 1 + ec_rand() % 14;
+            int bit = static_cast<int>(ec_rand() & 1);
+            if (dec.dec_bit_logp(logp) != bit) *values_ok = false;
+            break;
+        }
+        case 2: {
+            int s = static_cast<int>(ec_rand() % 5);
+            if (dec.dec_icdf(kEcTestIcdf, 8) != s) *values_ok = false;
+            break;
+        }
+        case 3: {
+            uint32_t ft = 2 + ec_rand() % (1u << 20);
+            uint32_t v = ec_rand() % ft;
+            if (dec.dec_uint(ft) != v) *values_ok = false;
+            break;
+        }
+        case 4: {
+            unsigned bits = 1 + ec_rand() % 24;
+            uint32_t v = ec_rand() & ((1u << bits) - 1);
+            if (dec.dec_bits(bits) != v) *values_ok = false;
+            break;
+        }
+        }
+        if (tells && dec.tell() != tells[i + 1]) *tells_ok = false;
+    }
+}
+
+static void test_opus_range_coder() {
+    std::printf("Opus range coder...\n");
+    using glint::opus::RangeEncoder;
+    using glint::opus::RangeDecoder;
+    enum { kOps = 2000, kBufSize = 8192 };
+    static uint8_t buf[kBufSize];
+    static uint32_t tells[kOps + 1];
+
+    for (uint32_t seed = 1; seed <= 5; seed++) {
+        RangeEncoder enc;
+        enc.init(buf, kBufSize);
+        ec_script_encode(seed, kOps, enc, tells);
+        uint32_t final_tell = enc.tell();
+        enc.done();
+        CHECK(enc.error() == 0, "encoder buffer did not overflow");
+
+        RangeDecoder dec;
+        dec.init(buf, kBufSize);
+        bool values_ok = false, tells_ok = false;
+        ec_script_decode(seed, kOps, dec, tells, &values_ok, &tells_ok);
+        CHECK(values_ok, "all decoded values match encoded");
+        CHECK(tells_ok, "decoder tell() tracks encoder tell() per op");
+        CHECK(dec.error() == 0, "decoder error flag clear");
+
+        // The stream must fit in ceil(tell/8) bytes — re-run the same
+        // script into an exact-size buffer and decode from that.
+        uint32_t nbytes = (final_tell + 7) / 8;
+        CHECK(nbytes <= kBufSize, "exact size within scratch buffer");
+        RangeEncoder enc2;
+        enc2.init(buf, nbytes);
+        ec_script_encode(seed, kOps, enc2, nullptr);
+        enc2.done();
+        CHECK(enc2.error() == 0, "exact-size buffer suffices (done() bound)");
+        RangeDecoder dec2;
+        dec2.init(buf, nbytes);
+        ec_script_decode(seed, kOps, dec2, nullptr, &values_ok, &tells_ok);
+        CHECK(values_ok, "exact-size round-trip decodes");
+    }
+
+    // Carry stress: maximal symbols drive val to the top of the range,
+    // exercising the buffered-0xFF carry chain in carry_out().
+    {
+        uint8_t cbuf[256];
+        RangeEncoder enc;
+        enc.init(cbuf, sizeof(cbuf));
+        for (int i = 0; i < 100; i++) enc.encode(255, 256, 256);
+        enc.done();
+        CHECK(enc.error() == 0, "carry stress encode fits");
+        RangeDecoder dec;
+        dec.init(cbuf, sizeof(cbuf));
+        bool ok = true;
+        for (int i = 0; i < 100; i++) {
+            if (dec.decode(256) != 255) ok = false;
+            dec.dec_update(255, 256, 256);
+        }
+        CHECK(ok, "carry stress round-trip");
+    }
+
+    // enc_uint edges around the range/raw split at 2^8 and power-of-2 fts.
+    {
+        static const uint32_t fts[] = {
+            2, 3, 255, 256, 257, 1u << 16, (1u << 16) + 1, 1u << 24
+        };
+        uint8_t ubuf[512];
+        RangeEncoder enc;
+        enc.init(ubuf, sizeof(ubuf));
+        for (uint32_t ft : fts) {
+            const uint32_t vals[4] = { 0, 1, ft / 2, ft - 1 };
+            for (uint32_t v : vals) enc.enc_uint(v, ft);
+        }
+        uint32_t etell = enc.tell();
+        enc.done();
+        CHECK(enc.error() == 0, "uint edges encode fits");
+        RangeDecoder dec;
+        dec.init(ubuf, sizeof(ubuf));
+        bool ok = true;
+        for (uint32_t ft : fts) {
+            const uint32_t vals[4] = { 0, 1, ft / 2, ft - 1 };
+            for (uint32_t v : vals)
+                if (dec.dec_uint(ft) != v) ok = false;
+        }
+        CHECK(ok, "uint edges round-trip");
+        CHECK(dec.tell() == etell, "uint edges tell parity");
+        CHECK(dec.error() == 0, "uint edges no decoder error");
+    }
+}
+
 int main() {
     std::printf("=== glint unit tests ===\n\n");
 
@@ -577,6 +764,8 @@ int main() {
     test_aac_tables_sanity();
     test_aac_coder_count_matches_emission();
     test_aac_api_smoke();
+
+    test_opus_range_coder();
 
     std::printf("\n%d/%d tests passed\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

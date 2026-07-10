@@ -1041,3 +1041,78 @@ per-coefficient rates is fatal:
 
 Stack use (~30 KB transient in MDCT/fit) is not in the 47.6 KB figure;
 neither is vo-aacenc's stack in its 48 KB (heap-only, same basis).
+
+# Opus track (started 2026-07-10) — branch `feature/opus` ONLY
+
+**Git workflow override for this track: commit to `feature/opus`, do NOT
+merge to main** until explicitly cleared. (MP3/AAC work keeps the usual
+merge-to-main rule.)
+
+Scope assessment (2026-07-10): Opus (RFC 6716) = SILK (LPC speech coder,
+8/12/16k internal) + CELT (MDCT, 2.5–20 ms at 48k) + hybrid mode, glued by
+a shared range coder. Unlike MP3/AAC there are no scalefactors-as-side-info:
+CELT's bit allocation is IMPLICIT — decoder re-derives it from the same
+computation the encoder runs, keyed on tell_frac() at 1/8-bit precision, so
+encoder/decoder must agree bit-for-bit on entropy-coder state. The normative
+spec is the reference code (prose loses ties); decoder conformance = official
+test vectors + opus_compare quality threshold, not bit-exactness. No
+legal/patent reason for clean-room (BSD reference, royalty-free) — it's the
+project ethos only, and reference implementations remain fair game as test
+ORACLES (same rule as gen_aac_tables.py). Calibration: ffmpeg's independent
+native Opus encoder is CELT-only and still clearly behind libopus after
+years — "correct" is achievable, "league-competitive" is a long campaign.
+
+Phases:
+- **O0 — range coder — DONE (see below).**
+- **O1 — CELT decoder**: mixed-radix FFT (MDCT sizes 120/240/480/960 =
+  2^a·3·5, NOT power-of-two — the MP3/AAC FFTs don't cover this), coarse
+  energy (2-D prediction + Laplace), fine energy, the implicit allocator,
+  PVQ decode + spreading/folding + anti-collapse, TF resolution, intensity +
+  mid/side, postfilter. Interim oracle before full conformance: CELT-only
+  streams from `opus_demo` (restricted-lowdelay application forces CELT).
+- **O2 — SILK decoder + hybrid**: LPC synthesis, LTP, stereo
+  prediction/unmixing, resamplers. Gate: official test vectors 01–12 pass
+  the opus_compare threshold (both rates of each vector).
+- **O3 — Ogg Opus container** (RFC 7845): mux/demux, pre-skip, granule
+  accounting; Opus packets are not self-framing (no ADTS analog).
+- **O4 — CELT-only encoder**: reuses the decoder's allocator verbatim;
+  PVQ search, coarse/fine energy quant, TF/transient decisions, VBR.
+  Needs ec_enc_shrink + ec_enc_patch_initial_bits (not yet implemented in
+  opus_ec). Validate: decode with libopus/ffmpeg, league via
+  compare_encoders vs libopus + ffmpeg-native at matched rates.
+- **O5 (optional) — SILK/hybrid encoder** for low-rate speech.
+
+## O0. Range coder — DONE (2026-07-10), byte-identical to libopus
+
+`src/opus_ec.{hpp,cpp}`: RangeEncoder/RangeDecoder per RFC 6716 §4.1 —
+encode/encode_bin/bit_logp/icdf/uint/raw bits + tell/tell_frac, all-integer
+(safe for GLINT_MODE=fixed), in the glint library build.
+
+Verification, two layers:
+- Unit tests (test_unit.cpp): randomized op-script round-trips (5 seeds ×
+  2000 ops), per-op encoder-vs-decoder tell() parity, exact-size
+  ceil(tell/8) buffer round-trip, carry stress (max-symbol runs), enc_uint
+  edges around the 2^8 range/raw split. 260/260 pass.
+- **Wire-compat gate: `tools/crosscheck_opus_ec.py`** builds libopus 1.5.2
+  as an oracle in ~/code/glint-tools/opus-1.5.2 (static lib; ec_* symbols
+  are linkable even though not public API), compiles
+  `tools/opus_ec_crosscheck.cpp` twice (reference adapter vs glint), and
+  requires byte-identical stdout: encoded buffers (full + exact-size),
+  tell/tell_frac traces, decoded values — 8 seeds × 2000 ops × 6 op kinds.
+  **PASS on first run.** Re-run after any opus_ec change.
+
+Hard-won invariants:
+- Decoder `val` is COMPLEMENTED (distance from the top of the range):
+  init reads 127 − (b0>>1), renormalization inserts ~sym. Both sides
+  report tell()==1 immediately after init.
+- Range bits fill the buffer from the FRONT, raw bits (enc_bits) from the
+  BACK; the two streams may legally share the final byte — done() ORs the
+  raw-bit remainder into it. Total stream always fits ceil(tell/8) bytes.
+- 0xFF chunks cannot be emitted eagerly (a later carry could ripple
+  through); carry_out() buffers a run count (ext_) + one pending byte
+  (rem_) and materializes on the next non-0xFF chunk.
+- tell_frac refines ilog(rng) by 3 bits via repeated Q15 squaring of the
+  top 16 bits of rng. CELT's allocator consumes this — it must match the
+  reference EXACTLY (it does; traced per op in the cross-check).
+- Still missing from opus_ec (needed by O4, trivial adds): ec_enc_shrink,
+  ec_enc_patch_initial_bits.

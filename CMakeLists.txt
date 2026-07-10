@@ -39,6 +39,7 @@ set(GLINT_SOURCES
     src/aac_psy.cpp
     src/aac_tns.cpp
     src/aac_encoder.cpp
+    src/opus_ec.cpp
 )
 
 # Static library
