@@ -53,6 +53,8 @@ set(GLINT_SOURCES
     src/opus_silk_nlsf.cpp
     src/opus_silk_frame.cpp
     src/opus_silk_stereo.cpp
+    src/opus_silk_resampler.cpp
+    src/opus_silk_decoder.cpp
 )
 
 # Static library

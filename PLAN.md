@@ -1418,3 +1418,32 @@ Remaining in O2 after resamplers: silk_Decode top level (dec_API.c:
 header flags VAD/LBRR per frame, frame-size dispatch, stereo glue incl.
 mid-only handling, resample to API rate), opus_decode_native integration
 + hybrid (SILK + CELT in one ec), PLC/CNG, RFC test vectors.
+
+## O2 MILESTONE 2 (2026-07-10): top-level SILK decoder byte-identical
+
+- opus_silk_resampler.{hpp,cpp} (agent-built, mutant-tested gate): the
+  four decode-reachable kernels (copy, up2_HQ, IIR_FIR, down_FIR) over
+  all 15 (8/12/16 -> 8/12/16/24/48 kHz) pairs, byte-identical across 220
+  chained blocks each. Invariants: ratio math on Hz with ROUND-UP Q16,
+  first 1 ms flows through the delay-equalization buffer, down_FIR's
+  batch loop exits on inLen > 1 (reference quirk, replicated).
+- opus_silk_decoder.{hpp,cpp}: silk_Decode equivalent — VAD/LBRR header
+  flags + LBRR distribution + LBRR skip-on-normal-decode, stereo pred/
+  mid-only glue with the side-reset on mid-only transitions, per-channel
+  frame decode with the conditional-coding rules (INDEP_NO_LTP_SCALING
+  after skipped side frames), MS->LR or mono carry, resample to API rate,
+  stereo_to_mono collapse handling, channel-transition state resets.
+  DecoderState::set_fs now mirrors decoder_set_fs faithfully (guarded
+  resets incl. LastGainIndex=10, lagPrev=100 on rate change; returns
+  "resampler needs reinit").
+- Gate: tools/crosscheck_opus_silk_dec.py — 150 sequences x 3 packets
+  with mono<->stereo/rate/duration changes at packet boundaries vs the
+  reference silk_Decode: PCM and tells BYTE-IDENTICAL.
+- Integration bug the gate caught instantly: passing api HZ where the
+  resampler init takes KHZ — output lacked the resampler warm-up delay
+  while tells still matched ("tell equal + PCM off from sample 1" =
+  post-wire plumbing, same lesson family as the soft-clip story).
+
+Remaining in O2: opus layer integration (SILK-only packets in
+OpusDecoder; hybrid = SILK WB + CELT >=8k in ONE ec with the CELT start
+band 17), PLC/CNG, then RFC test vectors 01-12 as the exit gate.

@@ -3,6 +3,8 @@
 
 #include "opus_silk_indices.hpp"
 
+#include <cstring>
+
 #include "opus_silk_math.hpp"
 
 namespace glint {
@@ -20,31 +22,50 @@ constexpr int32_t kInvScaleQ16 =
     (65536 * (((88 - 2) * 128) / 6)) / (kNLevelsQGain - 1);
 }  // namespace
 
-void DecoderState::set_fs(int fs_khz_new, int nb_subfr_new) {
-    fs_khz = fs_khz_new;
+bool DecoderState::set_fs(int fs_khz_new, int nb_subfr_new,
+                          int32_t fs_api_hz_new) {
     nb_subfr = nb_subfr_new;
-    subfr_length = 5 * fs_khz;             // 5 ms subframes
-    frame_length = subfr_length * nb_subfr;
-    ltp_mem_length = 20 * fs_khz;
-    if (fs_khz == 8) {
-        pitch_lag_low_bits_icdf = kUniform4Icdf;
-        pitch_contour_icdf = nb_subfr == kMaxNbSubfr
-                                 ? kPitchContourNbIcdf
-                                 : kPitchContour10MsNbIcdf;
-    } else {
-        pitch_lag_low_bits_icdf =
-            fs_khz == 12 ? kUniform6Icdf : kUniform8Icdf;
-        pitch_contour_icdf = nb_subfr == kMaxNbSubfr
-                                 ? kPitchContourIcdf
-                                 : kPitchContour10MsIcdf;
+    subfr_length = 5 * fs_khz_new;  // 5 ms subframes
+    int frame_length_new = subfr_length * nb_subfr;
+
+    bool resampler_changed =
+        fs_khz != fs_khz_new || fs_api_hz != fs_api_hz_new;
+    fs_api_hz = fs_api_hz_new;
+
+    if (fs_khz != fs_khz_new || frame_length_new != frame_length) {
+        if (fs_khz_new == 8) {
+            pitch_contour_icdf = nb_subfr == kMaxNbSubfr
+                                     ? kPitchContourNbIcdf
+                                     : kPitchContour10MsNbIcdf;
+        } else {
+            pitch_contour_icdf = nb_subfr == kMaxNbSubfr
+                                     ? kPitchContourIcdf
+                                     : kPitchContour10MsIcdf;
+        }
+        if (fs_khz != fs_khz_new) {
+            ltp_mem_length = 20 * fs_khz_new;
+            if (fs_khz_new == 16) {
+                nlsf_cb = &kNlsfCbWb;
+                lpc_order = kMaxLpcOrder;
+                pitch_lag_low_bits_icdf = kUniform8Icdf;
+            } else {
+                nlsf_cb = &kNlsfCbNbMb;
+                lpc_order = 10;
+                pitch_lag_low_bits_icdf =
+                    fs_khz_new == 12 ? kUniform6Icdf : kUniform4Icdf;
+            }
+            // Internal-rate switch: history is meaningless, reset it.
+            first_frame_after_reset = 1;
+            lag_prev = 100;
+            prev_gain_index = 10;
+            prev_signal_type = kTypeNoVoiceActivity;
+            std::memset(out_buf, 0, sizeof(out_buf));
+            std::memset(slpc_q14_buf, 0, sizeof(slpc_q14_buf));
+        }
+        fs_khz = fs_khz_new;
+        frame_length = frame_length_new;
     }
-    if (fs_khz == 16) {
-        nlsf_cb = &kNlsfCbWb;
-        lpc_order = 16;
-    } else {
-        nlsf_cb = &kNlsfCbNbMb;
-        lpc_order = 10;
-    }
+    return resampler_changed;
 }
 
 void nlsf_unpack(int16_t* ec_ix, uint8_t* pred_q8, const NlsfCodebook& cb,
