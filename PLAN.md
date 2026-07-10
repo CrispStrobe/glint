@@ -1942,3 +1942,16 @@ equivalent of libopus OPUS_SET_GAIN for the .opus file path. Remaining
 O5: multistream/surround (mapping family 1), non-48k decoder output
 rates (SILK side is trivial — the resampler takes api_hz; CELT needs
 the reference's downsample-by-N in the synthesis path).
+
+## League-refresh note (2026-07-10 late)
+
+A full 10-clip ODG re-run with the tonality build was attempted and
+abandoned: the machine is under heavy external load (loadavg ~45;
+peaqb/visqol run 5-10x slower than the 18:52 baseline league). The
+material tonality-build deltas ARE measured and recorded above (piano
+96k vbr ODG -1.24 -> -0.77, torture cbr -1.84 -> -0.92, VBR rates
+tracking libopus within ~0.5 kb/s); the committed full table
+(tests/opus_league_2026-07-10.txt) otherwise predates the tonality
+port — its glint-vbr rows understate the current encoder on tonal
+content. Re-run `compare_encoders.py --codec opus --bitrates 96 192`
+on an idle machine to refresh the record.
