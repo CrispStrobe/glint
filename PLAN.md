@@ -1626,3 +1626,32 @@ Build order:
 
 **MERGE CONDITION SATISFIED: decode (12/12 RFC vectors) + encode
 (libopus-certified streams) both correct.**
+
+## O4 quality campaign — baseline (2026-07-10, post-merge)
+
+Listening pack: /Users/christianstrobele/Downloads/glint_samples/
+listening_opus/ (glint .opus files at 96/192k + libopus A/B + a
+glint-decoded libopus stream + README with regeneration commands).
+
+Delay-aligned SNR vs source, 60 s stereo clips, CBR (ffmpeg-native
+column pending a fixed invocation — its output didn't decode):
+
+| clip        | rate | glint | libopus |
+|-------------|------|-------|---------|
+| electronic  |  96k | 30.0  | 24.4    |
+| electronic  | 192k | 34.9  | 26.9    |
+| quartet     |  96k | 25.9  | 24.1    |
+| quartet     | 192k | 30.4  | 27.5    |
+| industrial  |  96k | 15.1  | 14.5    |
+| industrial  | 192k | 21.7  | 20.1    |
+| piano       |  96k | 18.5  | 22.9    |
+| piano       | 192k | 24.0  | 28.1    |
+
+Read: glint's untuned encoder is waveform-faithful (higher raw SNR on
+3/4 clips — libopus spends bits perceptually, so judge by EAR/ODG, not
+SNR; the MP3/AAC lesson applies). **Piano is the measured loss (-4.4/-4.1
+dB): tonal content with note onsets — the pitch PREFILTER (search
+already ported for PLC) + transient/TF analysis are the first two
+campaign items.** Then: dynalloc, trim/spread analysis, intensity
+stereo, VBR, and wiring `tests/compare_encoders.py --codec opus`
+(ODG/PEAQ) for the league.
