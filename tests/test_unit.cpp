@@ -739,6 +739,89 @@ static void test_opus_range_coder() {
     }
 }
 
+// --- Opus CELT primitives (PLAN § O1) ---
+#include "opus_laplace.hpp"
+#include "opus_cwrs.hpp"
+#include "opus_celt_tables.hpp"
+
+static void test_opus_celt_prims() {
+    std::printf("Opus CELT primitives (tables, laplace, cwrs)...\n");
+    using namespace glint::opus;
+
+    // Generated-tables sanity (deep checks live in the generator itself).
+    CHECK(celt::kEBands[0] == 0 && celt::kEBands[21] == 100,
+          "eBands endpoints");
+    CHECK(celt::kWindow[119] > 0.999 && celt::kWindow[0] < 1e-3,
+          "window shape");
+    CHECK(celt::kEProbModel[0][0][0] > 0, "e_prob_model nonzero");
+
+    // Laplace round-trip, including the flat-tail clamp path. Parameters
+    // drawn exactly like CELT uses them (prob<<7, decay<<6).
+    enum { kNVals = 300 };
+    static uint8_t buf[4096];
+    static unsigned fss[kNVals];
+    static int decays[kNVals], coded[kNVals];
+    static uint32_t tells[kNVals];
+    ec_rand_state = 42;
+    RangeEncoder enc;
+    enc.init(buf, sizeof(buf));
+    for (int i = 0; i < kNVals; i++) {
+        fss[i] = (1 + ec_rand() % 255) << 7;
+        decays[i] = (1 + ec_rand() % 178) << 6;
+        int v = static_cast<int>(ec_rand() % 81) - 40;
+        if (i % 8 == 0) v = static_cast<int>(ec_rand() % 4000) - 2000;
+        coded[i] = laplace_encode(enc, v, fss[i], decays[i]);
+        tells[i] = enc.tell();
+    }
+    enc.done();
+    CHECK(enc.error() == 0, "laplace encode fits");
+    RangeDecoder dec;
+    dec.init(buf, sizeof(buf));
+    bool vals_ok = true, tell_ok = true;
+    for (int i = 0; i < kNVals; i++) {
+        if (laplace_decode(dec, fss[i], decays[i]) != coded[i])
+            vals_ok = false;
+        if (dec.tell() != tells[i]) tell_ok = false;
+    }
+    CHECK(vals_ok, "laplace round-trip (incl. tail clamp)");
+    CHECK(tell_ok, "laplace tell parity");
+
+    // CWRS round-trip across representative (n, k) pairs.
+    static const int nk[][2] = { { 2, 1 },   { 2, 128 }, { 3, 128 },
+                                 { 4, 7 },   { 8, 3 },   { 22, 10 },
+                                 { 96, 4 },  { 176, 2 } };
+    for (auto& p : nk) {
+        int n = p[0], k = p[1];
+        int y[176] = { 0 };
+        // Deterministic vector: alternate signs, spread pulses.
+        int left = k;
+        for (int j = 0; left > 0; j = (j + 1) % n) {
+            int take = left > 3 ? 3 : left;
+            y[j] += (j & 1) ? -take : take;  // sign fixed per slot
+            left -= take;
+        }
+        RangeEncoder e2;
+        e2.init(buf, sizeof(buf));
+        encode_pulses(y, n, k, e2);
+        uint32_t etell = e2.tell();
+        e2.done();
+        CHECK(e2.error() == 0, "cwrs encode fits");
+        RangeDecoder d2;
+        d2.init(buf, sizeof(buf));
+        int yd[176];
+        int32_t yy = decode_pulses(yd, n, k, d2);
+        bool same = true;
+        int32_t yy_ref = 0;
+        for (int j = 0; j < n; j++) {
+            if (yd[j] != y[j]) same = false;
+            yy_ref += y[j] * y[j];
+        }
+        CHECK(same, "cwrs round-trip vector");
+        CHECK(yy == yy_ref, "cwrs yy (sum of squares)");
+        CHECK(d2.tell() == etell, "cwrs tell parity");
+    }
+}
+
 int main() {
     std::printf("=== glint unit tests ===\n\n");
 
@@ -766,6 +849,7 @@ int main() {
     test_aac_api_smoke();
 
     test_opus_range_coder();
+    test_opus_celt_prims();
 
     std::printf("\n%d/%d tests passed\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;
