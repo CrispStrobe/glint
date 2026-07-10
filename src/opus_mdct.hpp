@@ -43,9 +43,10 @@
 //     a plain "+=": the overlap-add is realized by this windowed rotation.
 //
 // Scaling: NONE anywhere (matches the reference: "backward MDCT (no
-//   scaling)"; the missing factor 2 of a textbook TDAC round-trip is folded
-//   into the window mixing, so forward(4/N-scaled) o backward reconstructs
-//   at 1/2 amplitude).
+//   scaling)"; the whole round-trip normalization lives in the forward's
+//   4/N factor, so forward o backward reconstructs at UNIT amplitude —
+//   proven < 1e-9 by the ROUNDTRIP test in tools/opus_mdct_crosscheck.cpp.
+//   A "1/2 amplitude" claim previously here was wrong).
 //
 // Aliasing: all reads of `in` happen before any write to `out`, so the
 //   decoder's in-place trick (in == out + ov/2, celt_synthesis's
@@ -54,6 +55,42 @@
 // Chaining (what celt_synthesis relies on): consecutive blocks write to
 //   out pointers spaced S apart; block m's raw tail at its out[S .. S+ov/2)
 //   is exactly block m+1's "previous content of out[0 .. ov/2)".
+// ---------------------------------------------------------------------------
+// Contract of CeltImdct::forward(in, out, window, overlap, shift, stride)
+// (encoder side; verified against libopus clt_mdct_forward_c by
+// tools/crosscheck_opus_mdct.py):
+//
+//   S  = (n >> shift) / 2      spectral bins produced
+//   ov = overlap               window length
+//
+// Input: reads EXACTLY in[0 .. S + ov) and modifies nothing (libopus's
+//   non-const `in` notwithstanding — clt_mdct_forward_c only reads it).
+//   The hop is S: celt_encoder's compute_mdcts keeps a per-channel buffer
+//   of B*S + ov samples (the frame's B*S new samples preceded by ov
+//   history samples) and calls forward(in + b*S, ...) per block b, so
+//   consecutive calls overlap by ov input samples.
+//
+// Output: spectral bin k is written to out[stride * k], k = 0..S-1,
+//   nothing else. compute_mdcts stores interleaved short-block spectra as
+//   freq[b + B*k] by calling forward(in + b*S, &freq[b], ..., stride = B)
+//   — the exact layout backward() consumes.
+//
+// Scaling / closed form (W(m) = window[m] for m < ov, 1 for ov <= m < S,
+//   window[S+ov-1-m] for m >= S; the effective 2S-point MDCT window is W
+//   centered in the frame with (S-ov)/2 implicit zeros on each side):
+//
+//     X[k] = (2/S) * sum_{m=0}^{S+ov-1}
+//                W(m) * in[m] * cos( pi/S * (m + S - ov/2 + 1/2) * (k + 1/2) )
+//
+//   The 2/S (= 4/N; the reference applies its FFT's 1/nfft, nfft = N/4,
+//   in the pre-rotation) is chosen so that forward followed by backward
+//   (which is unscaled) reconstructs the input at UNIT amplitude once the
+//   backward TDAC window mixing completes (the CELT window is
+//   Princen-Bradley: window[i]^2 + window[ov-1-i]^2 = 1). The round-trip
+//   test in tools/opus_mdct_crosscheck.cpp proves this to < 1e-9.
+//
+// Aliasing: all reads of `in` happen before any write to `out`, so
+//   in == out (or overlapping) is safe; `in` and the scratch never alias.
 // ---------------------------------------------------------------------------
 
 #pragma once
@@ -89,6 +126,11 @@ public:
     // even and <= (n >> shift) / 2.
     void backward(const double* in, double* out, const double* window,
                   int overlap, int shift, int stride) const;
+
+    // Forward (encoder) MDCT; see the contract block above. Same window /
+    // overlap / shift constraints as backward().
+    void forward(const double* in, double* out, const double* window,
+                 int overlap, int shift, int stride) const;
 
     int size(int shift) const { return n_ >> shift; }  // time samples (2S)
     int max_shift() const { return maxshift_; }

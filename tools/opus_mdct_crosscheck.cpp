@@ -1,28 +1,42 @@
-// Cross-check driver for the glint CELT inverse MDCT (PLAN § O1).
+// Cross-check driver for the glint CELT MDCT, backward + forward
+// (PLAN § O1 / § O4).
 //
 // Compiled twice by tools/crosscheck_opus_mdct.py:
 //   -DUSE_LIBOPUS : runs the test script through libopus 1.5.2's
-//                   clt_mdct_backward_c on the real 48 kHz/960 mode
-//                   (custom-modes build; float arithmetic). Also prints the
-//                   max delta between the mode's window[] table and glint's
-//                   analytic mdct_window() ("WINDOW maxdelta ...").
+//                   clt_mdct_backward_c / clt_mdct_forward_c on the real
+//                   48 kHz/960 mode (custom-modes build; float arithmetic).
+//                   Also prints the max delta between the mode's window[]
+//                   table and glint's analytic mdct_window()
+//                   ("WINDOW maxdelta ...").
 //   (default)     : runs it through glint's src/opus_mdct.{hpp,cpp} in
 //                   double precision, and additionally self-checks the fast
-//                   path against a direct O(S^2) evaluation of the
-//                   documented closed form ("SELFCHECK ..." lines).
+//                   paths against direct O(S^2) evaluations of the
+//                   documented closed forms ("SELFCHECK ..." backward,
+//                   "FWDCHECK ..." forward) and proves the forward/backward
+//                   TDAC round trip ("ROUNDTRIP ..." lines).
 //
 // Both binaries print every output sample as "o <idx> %.9e"; the python
 // harness pairs the streams and asserts max |diff| < 2e-4 (the oracle is
-// float, so byte identity is impossible). SELFCHECK lines appear only in
-// the glint build, WINDOW only in the oracle build — the harness looks for
-// each in the right stream.
+// float, so byte identity is impossible). SELFCHECK/FWDCHECK/ROUNDTRIP
+// lines appear only in the glint build, WINDOW only in the oracle build —
+// the harness looks for each in the right stream.
 //
-// Test script: for each config (shift 0..3 at stride 1, plus a
+// Test script, backward: for each config (shift 0..3 at stride 1, plus a
 // transient-style shift=3 / B=8 interleaved config), run several chained
 // MDCT blocks into one output buffer pre-filled with PRNG values, exactly
 // the way celt_synthesis() chains them (out pointers spaced S apart, TDAC
 // tail handed to the next block). Spectra are unit-RMS-scaled uniform noise
 // from the same xorshift PRNG in both builds.
+//
+// Test script, forward: same configs. A unit-RMS PRNG time signal of
+// frames*B*S + overlap samples is analyzed the way celt_encoder's
+// compute_mdcts() does it: block b of frame f reads s[f*B*S + b*S ..
+// f*B*S + b*S + S + ov) (hop S, ov samples shared with the neighbor) and
+// writes interleaved bins X[f*B*S + b + B*k]. The glint build then chains
+// its OWN backward over those spectra and checks out[g] == s[g] for
+// g in [ov, frames*B*S) (< 1e-9): the TDAC round trip is unit-gain once
+// the window mixing completes (first ov samples mix with prefill, the
+// last ov/2 are a raw unfinished tail).
 
 #include <cmath>
 #include <cstdint>
@@ -86,6 +100,24 @@ void direct_backward(const double* in, double* out, const double* w,
         double cur = out[overlap - 1 - i];
         out[i] = w[overlap - 1 - i] * prev - w[i] * cur;
         out[overlap - 1 - i] = w[i] * prev + w[overlap - 1 - i] * cur;
+    }
+}
+
+// Direct O(S^2) reference for the forward contract (see opus_mdct.hpp):
+// reads x[0 .. S+ov), writes bin k to out[stride*k]. Written from the
+// documented closed form, independent of the fold+FFT fast path.
+void direct_forward(const double* x, double* out, const double* w,
+                    int overlap, int S, int stride) {
+    for (int k = 0; k < S; k++) {
+        double acc = 0.0;
+        for (int m = 0; m < S + overlap; m++) {
+            double win = (m < overlap) ? w[m]
+                         : (m >= S)    ? w[S + overlap - 1 - m]
+                                       : 1.0;
+            acc += win * x[static_cast<size_t>(m)] *
+                   std::cos(kPi / S * (m + S - 0.5 * overlap + 0.5) * (k + 0.5));
+        }
+        out[static_cast<size_t>(stride) * k] = 2.0 / S * acc;
     }
 }
 #endif
@@ -190,6 +222,96 @@ int main() {
         }
         std::printf("SELFCHECK config=%zu maxdiff=%.3e %s\n", ci, md,
                     md < 1e-9 ? "PASS" : "FAIL");
+#endif
+    }
+
+    // ------------------------------------------------------------------
+    // Forward MDCT (encoder side), same configs, compute_mdcts layout.
+    // ------------------------------------------------------------------
+    for (size_t ci = 0; ci < sizeof(kConfigs) / sizeof(kConfigs[0]); ci++) {
+        const Config& cfg = kConfigs[ci];
+        const int S = 960 >> cfg.shift;  // bins per block == input hop
+        const int B = cfg.blocks;
+        const int frame_len = S * B;              // bins (and samples) per frame
+        const int nbins = cfg.frames * frame_len; // total bins printed
+        const int in_len = nbins + kOverlap;      // time signal incl. history
+        std::printf("config fwd shift=%d B=%d frames=%d bins=%d\n", cfg.shift,
+                    B, cfg.frames, nbins);
+
+        // Unit-RMS PRNG time signal, identical in both builds.
+        rng_state = 0x2545f491u + static_cast<uint32_t>(ci);
+        std::vector<double> sig(static_cast<size_t>(in_len));
+        double e = 0.0;
+        for (int i = 0; i < in_len; i++) {
+            sig[static_cast<size_t>(i)] = frand();
+            e += sig[static_cast<size_t>(i)] * sig[static_cast<size_t>(i)];
+        }
+        double norm = 1.0 / std::sqrt(e / in_len);
+        for (int i = 0; i < in_len; i++) sig[static_cast<size_t>(i)] *= norm;
+
+#ifdef USE_LIBOPUS
+        std::vector<float> spec(static_cast<size_t>(nbins));
+        std::vector<float> tmp(static_cast<size_t>(S + kOverlap));
+        for (int f = 0; f < cfg.frames; f++) {
+            for (int b = 0; b < B; b++) {
+                // Fresh copy per call: the reference API takes a non-const
+                // input ("Forward MDCT trashes the input array").
+                const double* src = sig.data() + f * frame_len + b * S;
+                for (int i = 0; i < S + kOverlap; i++)
+                    tmp[static_cast<size_t>(i)] = static_cast<float>(src[i]);
+                clt_mdct_forward_c(&mode->mdct, tmp.data(),
+                                   spec.data() + f * frame_len + b,
+                                   mode->window, mode->overlap, cfg.shift, B,
+                                   /*arch=*/0);
+            }
+        }
+        for (int i = 0; i < nbins; i++)
+            std::printf("o %d %.9e\n", i,
+                        static_cast<double>(spec[static_cast<size_t>(i)]));
+#else
+        std::vector<double> spec(static_cast<size_t>(nbins));
+        for (int f = 0; f < cfg.frames; f++)
+            for (int b = 0; b < B; b++)
+                mdct.forward(sig.data() + f * frame_len + b * S,
+                             spec.data() + f * frame_len + b, window.data(),
+                             kOverlap, cfg.shift, B);
+        for (int i = 0; i < nbins; i++)
+            std::printf("o %d %.9e\n", i, spec[static_cast<size_t>(i)]);
+
+        // Self-check: rerun through the direct O(S^2) closed form.
+        std::vector<double> ref(static_cast<size_t>(nbins));
+        for (int f = 0; f < cfg.frames; f++)
+            for (int b = 0; b < B; b++)
+                direct_forward(sig.data() + f * frame_len + b * S,
+                               ref.data() + f * frame_len + b, window.data(),
+                               kOverlap, S, B);
+        double md = 0.0;
+        for (int i = 0; i < nbins; i++) {
+            double d = std::fabs(spec[static_cast<size_t>(i)] -
+                                 ref[static_cast<size_t>(i)]);
+            if (d > md) md = d;
+        }
+        std::printf("FWDCHECK config=%zu maxdiff=%.3e %s\n", ci, md,
+                    md < 1e-9 ? "PASS" : "FAIL");
+
+        // Round trip: chain glint's backward over the forward spectra the
+        // way celt_synthesis does; TDAC must rebuild sig at unit gain on
+        // [ov, nbins) (head mixes with the zero prefill, the last ov/2
+        // written samples are a raw unfinished tail at [nbins, ...)).
+        std::vector<double> rec(static_cast<size_t>(nbins + kOverlap / 2), 0.0);
+        for (int f = 0; f < cfg.frames; f++)
+            for (int b = 0; b < B; b++)
+                mdct.backward(spec.data() + f * frame_len + b,
+                              rec.data() + f * frame_len + b * S,
+                              window.data(), kOverlap, cfg.shift, B);
+        double rt = 0.0;
+        for (int i = kOverlap; i < nbins; i++) {
+            double d = std::fabs(rec[static_cast<size_t>(i)] -
+                                 sig[static_cast<size_t>(i)]);
+            if (d > rt) rt = d;
+        }
+        std::printf("ROUNDTRIP config=%zu maxdiff=%.3e %s\n", ci, rt,
+                    rt < 1e-9 ? "PASS" : "FAIL");
 #endif
     }
     return 0;

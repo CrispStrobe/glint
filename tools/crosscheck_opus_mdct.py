@@ -1,21 +1,28 @@
 #!/usr/bin/env python3
-"""Cross-check glint's CELT inverse MDCT against libopus clt_mdct_backward.
+"""Cross-check glint's CELT MDCT (backward AND forward) against libopus.
 
 Uses the custom-modes libopus build in ~/code/glint-tools/opus-1.5.2-custom
 (built from the release tarball with --enable-custom-modes if missing),
 compiles tools/opus_mdct_crosscheck.cpp twice (oracle vs glint), runs both,
 and asserts:
 
-  * per config (shift 0..3 stride 1, plus shift 3 / B=8 interleaved):
+  * per config (shift 0..3 stride 1, plus shift 3 / B=8 interleaved),
+    for BOTH directions (backward vs clt_mdct_backward_c, forward vs
+    clt_mdct_forward_c in the compute_mdcts layout):
     max |glint - libopus| < 2e-4 over every output sample (the oracle is
     FLOAT, so byte identity is impossible; inputs are unit-RMS-scaled)
-  * the glint build's built-in O(S^2) direct-formula self-check PASSes
-    (< 1e-9) for every config  [SELFCHECK lines, glint output only]
+  * the glint build's built-in O(S^2) direct-formula self-checks PASS
+    (< 1e-9) for every config in both directions  [SELFCHECK = backward,
+    FWDCHECK = forward; glint output only]
+  * glint forward -> glint backward reconstructs the overlapped time
+    signal at unit gain (< 1e-9) for every config  [ROUNDTRIP lines,
+    glint output only]
   * glint's analytic window matches the mode's window table to < 1e-6
     [WINDOW line, oracle output only]
 
-This is the wire-semantics gate for the PLAN § O1 inverse MDCT — the same
-oracle pattern as crosscheck_opus_ec.py.
+This is the wire-semantics gate for the PLAN § O1 inverse MDCT and the
+§ O4 encoder-side forward MDCT — the same oracle pattern as
+crosscheck_opus_ec.py.
 
 Usage: python3 tools/crosscheck_opus_mdct.py
 """
@@ -110,16 +117,19 @@ def main():
         print(f"{status}: window maxdelta {wd:.3e} (tol {WINDOW_TOL:g})")
         ok &= wd < WINDOW_TOL
 
-    # 2) Direct-formula self-check (glint output).
-    selfchecks = re.findall(r"SELFCHECK config=(\d+) maxdiff=(\S+) (\w+)",
+    # 2) Direct-formula self-checks + round trip (glint output).
+    for tag, what in (("SELFCHECK", "backward vs direct O(S^2)"),
+                      ("FWDCHECK", "forward vs direct O(S^2)"),
+                      ("ROUNDTRIP", "forward->backward TDAC round trip")):
+        checks = re.findall(tag + r" config=(\d+) maxdiff=(\S+) (\w+)",
                             glint_out)
-    if len(selfchecks) != 5:
-        print(f"FAIL: expected 5 SELFCHECK lines, got {len(selfchecks)}")
-        ok = False
-    for idx, md, status in selfchecks:
-        print(f"{status}: selfcheck config {idx} vs direct O(S^2) "
-              f"maxdiff {float(md):.3e} (tol 1e-9)")
-        ok &= status == "PASS"
+        if len(checks) != 5:
+            print(f"FAIL: expected 5 {tag} lines, got {len(checks)}")
+            ok = False
+        for idx, md, status in checks:
+            print(f"{status}: {what}, config {idx}, "
+                  f"maxdiff {float(md):.3e} (tol 1e-9)")
+            ok &= status == "PASS"
 
     # 3) Sample-by-sample glint vs libopus.
     ref_cfg = parse_configs(ref_out)
@@ -141,7 +151,8 @@ def main():
         ok &= md < MAX_DIFF
 
     if ok:
-        print(f"PASS: glint CELT IMDCT matches libopus {OPUS_VERSION} "
+        print(f"PASS: glint CELT MDCT (backward + forward + round trip) "
+              f"matches libopus {OPUS_VERSION} "
               f"(all shifts + interleaved transient layout)")
         return 0
     return 1

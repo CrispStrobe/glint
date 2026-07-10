@@ -162,5 +162,57 @@ void CeltImdct::backward(const double* in, double* out, const double* window,
     }
 }
 
+void CeltImdct::forward(const double* in, double* out, const double* window,
+                        int overlap, int shift, int stride) const {
+    assert(shift >= 0 && shift <= maxshift_);
+    const int N = n_ >> shift;
+    const int N2 = N >> 1;  // spectral bins S
+    const int N4 = N >> 2;
+    const int ov = overlap;
+    assert(ov >= 0 && ov % 2 == 0 && ov <= N2);
+    const double* t = trig_[static_cast<size_t>(shift)].data();
+    Cpx* z = scratch_.data();       // folded + pre-rotated input
+    Cpx* Z = scratch_.data() + N4;  // FFT output
+    const double scale = 4.0 / N;   // the reference FFT's 1/nfft, nfft = N/4
+
+    // Windowed input read: W(m) * in[m], with W rising over [0, ov),
+    // flat 1 over [ov, S), falling over [S, S+ov), and 0 outside the
+    // buffer (= the closed form's implicit zero padding to 2S samples).
+    auto wx = [&](int m) -> double {
+        if (m < 0 || m >= N2 + ov) return 0.0;
+        double v = in[m];
+        if (m < ov) return v * window[m];
+        if (m >= N2) return v * window[N2 + ov - 1 - m];
+        return v;
+    };
+
+    // Fold the (conceptually 2S-point) windowed frame down to S real
+    // values = S/2 complex pairs using the MDCT kernel's symmetries
+    // (kernel phase m + S - ov/2 + 1/2 in buffer coordinates; antiperiod
+    // S in the conceptual frame index), then pre-rotate by e^{-j theta_i},
+    // theta_i = 2 pi (i + 1/8) / N (t[i] = cos, t[N4+i] = -sin), scaled.
+    // All input reads happen here, before any output write.
+    for (int i = 0; i < N4; i++) {
+        double im = wx(ov / 2 + 2 * i) - wx(ov / 2 - 1 - 2 * i) +
+                    wx(N + ov / 2 - 1 - 2 * i);
+        double re = wx(N2 - 1 + ov / 2 - 2 * i) + wx(N2 + ov / 2 + 2 * i) -
+                    wx(ov / 2 + 2 * i - N2);
+        z[i] = {scale * (re * t[i] - im * t[N4 + i]),
+                scale * (im * t[i] + re * t[N4 + i])};
+    }
+
+    fft_[static_cast<size_t>(shift)].run(z, Z);
+
+    // Post-rotate: W_i = Z_i e^{-j theta_i}; X[2i] = -Re(W_i),
+    // X[S-1-2i] = Im(W_i)  (t[N4+i] = -sin(theta_i), so
+    // -Re(W) = im*t[N4+i] - re*t[i] and Im(W) = re*t[N4+i] + im*t[i]).
+    for (int i = 0; i < N4; i++) {
+        double re = Z[i].re, im = Z[i].im;
+        out[static_cast<size_t>(stride) * (2 * i)] = im * t[N4 + i] - re * t[i];
+        out[static_cast<size_t>(stride) * (N2 - 1 - 2 * i)] =
+            re * t[N4 + i] + im * t[i];
+    }
+}
+
 }  // namespace opus
 }  // namespace glint
