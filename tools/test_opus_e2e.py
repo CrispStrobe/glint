@@ -26,7 +26,10 @@ OPUS_DEMO = os.path.join(TOOLS_DIR, "opus_demo")
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRCS = ["opus_ec.cpp", "opus_laplace.cpp", "opus_cwrs.cpp",
         "opus_celt_energy.cpp", "opus_celt_rate.cpp", "opus_celt_bands.cpp",
-        "opus_mdct.cpp", "opus_celt_decoder.cpp", "opus_decoder.cpp"]
+        "opus_mdct.cpp", "opus_celt_decoder.cpp", "opus_decoder.cpp",
+        "opus_silk_excitation.cpp", "opus_silk_indices.cpp",
+        "opus_silk_nlsf.cpp", "opus_silk_frame.cpp", "opus_silk_stereo.cpp",
+        "opus_silk_resampler.cpp", "opus_silk_decoder.cpp"]
 MAX_LSB = 4
 
 
@@ -82,28 +85,45 @@ def main():
             [os.path.join(REPO, "src", s) for s in SRCS] + ["-o", cli])
 
         failures = 0
-        # (frame ms, bitrate, extra encoder args, decode channels or None
-        #  for same-as-encode). Decode-channel mismatches exercise the
-        #  mono<->stereo up/downmix synthesis paths; -bandwidth exercises
-        #  end_band < 21.
-        cases = (("2.5", 128000, [], None),
-                 ("5", 96000, [], None),
-                 ("10", 64000, ["-cbr"], None),
-                 ("20", 128000, [], None),
-                 ("20", 320000, ["-cbr"], None),
-                 ("20", 96000, ["-bandwidth", "NB"], None),
-                 ("10", 96000, ["-bandwidth", "WB"], None),
-                 ("20", 128000, ["-bandwidth", "SWB"], None),
-                 ("20", 128000, [], "swap"))
+        # (app, frame ms, bitrate, extra encoder args, decode channels or
+        #  None for same-as-encode). restricted-lowdelay = CELT-only;
+        #  voip + NB/MB/WB = SILK-only; voip + SWB/FB = hybrid. Decode-
+        #  channel mismatches exercise the up/downmix paths.
+        cases = (("restricted-lowdelay", "2.5", 128000, [], None),
+                 ("restricted-lowdelay", "5", 96000, [], None),
+                 ("restricted-lowdelay", "10", 64000, ["-cbr"], None),
+                 ("restricted-lowdelay", "20", 128000, [], None),
+                 ("restricted-lowdelay", "20", 320000, ["-cbr"], None),
+                 ("restricted-lowdelay", "20", 96000,
+                  ["-bandwidth", "NB"], None),
+                 ("restricted-lowdelay", "10", 96000,
+                  ["-bandwidth", "WB"], None),
+                 ("restricted-lowdelay", "20", 128000,
+                  ["-bandwidth", "SWB"], None),
+                 ("restricted-lowdelay", "20", 128000, [], "swap"),
+                 # SILK-only
+                 ("voip", "20", 12000, ["-bandwidth", "NB"], None),
+                 ("voip", "20", 16000, ["-bandwidth", "MB"], None),
+                 ("voip", "20", 24000, ["-bandwidth", "WB"], None),
+                 ("voip", "40", 20000, ["-bandwidth", "WB"], None),
+                 ("voip", "60", 16000, ["-bandwidth", "WB"], None),
+                 ("voip", "20", 24000, ["-bandwidth", "WB", "-cbr"],
+                  "swap"),
+                 # Hybrid
+                 ("voip", "20", 28000, ["-bandwidth", "SWB"], None),
+                 ("voip", "10", 32000, ["-bandwidth", "FB"], None),
+                 ("voip", "20", 40000, ["-bandwidth", "FB"], None),
+                 ("voip", "20", 32000, ["-bandwidth", "FB", "-cbr"],
+                  "swap"))
         for channels in (1, 2):
             sig = os.path.join(tmp, f"sig{channels}.raw")
             gen_signal(sig, channels)
-            for fsize, rate, extra, decmode in cases:
+            for app, fsize, rate, extra, decmode in cases:
                 dec_ch = channels if decmode is None else 3 - channels
                 bit = os.path.join(tmp, "a.bit")
                 ref = os.path.join(tmp, "ref.raw")
                 mine = os.path.join(tmp, "mine.raw")
-                run([OPUS_DEMO, "-e", "restricted-lowdelay", "48000",
+                run([OPUS_DEMO, "-e", app, "48000",
                      str(channels), str(rate), "-framesize", fsize] + extra +
                     [sig, bit], quiet=True)
                 run([OPUS_DEMO, "-d", "48000", str(dec_ch), bit, ref],
@@ -129,8 +149,8 @@ def main():
                 if status == "FAIL":
                     failures += 1
                 tag = " ".join(extra) if extra else "vbr"
-                print(f"{status} ch={channels}->{dec_ch} fs={fsize}ms "
-                      f"rate={rate} [{tag}]: {cli_msg}, "
+                print(f"{status} {app} ch={channels}->{dec_ch} "
+                      f"fs={fsize}ms rate={rate} [{tag}]: {cli_msg}, "
                       f"max |pcm diff| = {worst} LSB")
         if failures:
             sys.exit(f"FAIL: {failures} configurations failed")

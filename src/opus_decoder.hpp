@@ -11,6 +11,7 @@
 #include <cstdint>
 
 #include "opus_celt_decoder.hpp"
+#include "opus_silk_decoder.hpp"
 
 namespace glint {
 namespace opus {
@@ -39,6 +40,9 @@ public:
     void init(int channels) {
         channels_ = channels;
         celt_.init(channels);
+        silk_ = silk::SilkDecoder();
+        prev_mode_ = 0;
+        final_range_ = 0;
     }
 
     // Decode one packet into interleaved float PCM (±1.0). Returns the
@@ -52,9 +56,15 @@ public:
     uint32_t final_range() const { return final_range_; }
 
 private:
+    int decode_frame_impl(const uint8_t* data, int16_t size, float* pcm,
+                          const OpusPacket& pkt);
+
     int channels_ = 0;
     uint32_t final_range_ = 0;
+    int prev_mode_ = 0;  // 1 SILK, 2 hybrid, 3 CELT; 0 = none yet
+    int prev_redundancy_ = 0;
     CeltDecoder celt_;
+    silk::SilkDecoder silk_;
 };
 
 }  // namespace opus

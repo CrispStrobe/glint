@@ -1447,3 +1447,33 @@ mid-only handling, resample to API rate), opus_decode_native integration
 Remaining in O2: opus layer integration (SILK-only packets in
 OpusDecoder; hybrid = SILK WB + CELT >=8k in ONE ec with the CELT start
 band 17), PLC/CNG, then RFC test vectors 01-12 as the exit gate.
+
+## O2 MILESTONE 3 (2026-07-10): full three-mode Opus decoding + 9/12 RFC vectors
+
+- OpusDecoder now routes all TOC modes: SILK-only (0..11, internal rate
+  from bandwidth, 40/60 ms via chained silk decodes), hybrid (12..15:
+  SILK-WB + CELT start band 17 on the SAME range decoder), CELT-only.
+  CELT endband by bandwidth incl. the MB->17 mapping.
+- **Transition redundancy implemented** (the deferred machinery — real
+  voip streams need it: the encoder appends a 5 ms CELT frame when
+  switching modes). Hybrid flags it (bit_logp 12 + uint(256)+2 bytes);
+  SILK-only IMPLIES it when >=17 bits remain after the SILK data (the
+  tell-gate). RangeDecoder::shrink() cuts the redundant bytes from the
+  main frame's budget. CELT->SILK: redundant frame continues the old CELT
+  state and owns the first 2.5 ms + fade; SILK->CELT: fresh CELT state
+  primed by the redundant frame + tail fade; final range = main ^
+  redundant. CELT reset on mode switch is gated on !prev_redundancy.
+  (Found via a single voip packet with a range mismatch — the last SILK
+  packet before a CELT switch.)
+- E2E gate now 38 configs incl. SILK NB/MB/WB 10-60 ms and hybrid
+  SWB/FB: ALL final ranges exact; SILK-only PCM is BIT-EXACT (0 LSB),
+  CELT/hybrid within 4 LSB.
+- **Official RFC 6716/8251 test vectors (tools/test_opus_vectors.py):
+  9/12 PASS via opus_compare, and 12/12 have ZERO range mismatches
+  (23k+ packets)** — the whole wire decode is right; vectors 05/06/10
+  fail only on PCM: they exercise NON-redundant mode transitions whose
+  crossfades need PLC frames (SILK PLC + celt_decode_lost).
+
+NEXT (the last O2 item): PLC/CNG (celt_decode_lost, silk PLC+CNG, DTX
+zero-length frames, transition fades without redundancy) -> expect
+12/12 vectors. Then O3 (Ogg) / O4 (CELT encoder).

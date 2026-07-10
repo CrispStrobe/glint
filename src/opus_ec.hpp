@@ -142,6 +142,9 @@ public:
     // Pretend `bits` total bits have been consumed (CELT silence frames
     // mark the whole frame as read).
     void set_tell(uint32_t bits) { nbits_total_ += bits - tell(); }
+    // Cut trailing bytes off the buffer (Opus transition redundancy is
+    // stored at the end). Only valid before any raw bits were read.
+    void shrink(uint32_t bytes) { storage_ -= bytes; }
 
 private:
     int read_byte();

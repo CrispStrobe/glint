@@ -34,10 +34,13 @@ public:
     // initialized on the frame's payload (or positioned after preceding
     // layers). stream_channels may differ from the decoder's channel
     // count (mono streams upmix, stereo streams downmix, like the
-    // reference). end_band: 13/17/19/21 for NB/WB/SWB/FB. Returns
-    // frame_size or a negative error.
+    // reference). end_band: 13/17/19/21 for NB/WB/SWB/FB. start_band is 0
+    // (CELT-only) or 17 (hybrid: SILK covers the low bands and dec is
+    // positioned after the SILK payload; no postfilter, no silence flag).
+    // Returns frame_size or a negative error.
     int decode_frame(RangeDecoder& dec, uint32_t payload_bytes, float* pcm,
-                     int frame_size, int stream_channels, int end_band);
+                     int frame_size, int stream_channels, int end_band,
+                     int start_band = 0);
 
     uint32_t range_final() const { return rng_; }
 
@@ -47,7 +50,7 @@ private:
     static constexpr int kMaxFrame = 960;
 
     void synthesis(const double* X, int CC, int C, int is_transient,
-                   int lm, int silence, int effend);
+                   int lm, int silence, int effend, int start);
 
     int channels_ = 0;
     uint32_t rng_ = 0;  // LCG seed, re-seeded from the range state per frame
