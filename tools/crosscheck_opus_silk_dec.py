@@ -18,7 +18,7 @@ CUSTOM_LIB = os.path.join(CUSTOM_SRC, ".libs", "libopus.a")
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DRIVER = os.path.join(REPO, "tools", "opus_silk_dec_crosscheck.cpp")
 SRCS = ["opus_ec.cpp", "opus_silk_excitation.cpp", "opus_silk_indices.cpp",
-        "opus_silk_nlsf.cpp", "opus_silk_frame.cpp", "opus_silk_stereo.cpp",
+        "opus_silk_nlsf.cpp", "opus_silk_plc.cpp", "opus_silk_frame.cpp", "opus_silk_stereo.cpp",
         "opus_silk_resampler.cpp", "opus_silk_decoder.cpp"]
 
 

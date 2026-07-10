@@ -8,6 +8,7 @@
 #include "opus_silk_excitation.hpp"
 #include "opus_silk_math.hpp"
 #include "opus_silk_nlsf.hpp"
+#include "opus_silk_plc.hpp"
 #include "opus_silk_tables.hpp"
 
 namespace glint {
@@ -112,7 +113,7 @@ void lpc_analysis_filter(int16_t* out, const int16_t* in,
     std::memset(out, 0, order * sizeof(int16_t));
 }
 
-void decode_core(DecoderState* st, const DecoderControl& ctrl, int16_t* xq,
+void decode_core(DecoderState* st, DecoderControl& ctrl, int16_t* xq,
                  const int16_t* pulses) {
     int16_t slt[kLtpMemMax];
     int32_t slt_q15[kLtpMemMax + kMaxFrameLength];
@@ -153,7 +154,7 @@ void decode_core(DecoderState* st, const DecoderControl& ctrl, int16_t* xq,
         const int32_t* pres_q14 = res_q14;
         std::memcpy(a_q12, ctrl.pred_coef_q12[k >> 1],
                     st->lpc_order * sizeof(int16_t));
-        const int16_t* b_q14 = &ctrl.ltp_coef_q14[k * kLtpOrder];
+        int16_t* b_q14 = &ctrl.ltp_coef_q14[k * kLtpOrder];
         int signal_type = st->indices.signal_type;
 
         int32_t gain_q10 = ctrl.gains_q16[k] >> 6;
@@ -169,8 +170,17 @@ void decode_core(DecoderState* st, const DecoderControl& ctrl, int16_t* xq,
         }
         st->prev_gain_q16 = ctrl.gains_q16[k];
 
-        // (PLC's voiced->unvoiced transition patch goes here later; it
-        // only triggers when loss_cnt != 0.)
+        // Avoid an abrupt transition from voiced concealment to unvoiced
+        // decoding: the first half of the first good frame after a voiced
+        // loss keeps a weak (0.25) centered pitch tap at the concealment
+        // lag. Written into ctrl so the PLC update below sees it.
+        if (st->loss_cnt && st->prev_signal_type == kTypeVoiced &&
+            st->indices.signal_type != kTypeVoiced && k < kMaxNbSubfr / 2) {
+            std::memset(b_q14, 0, kLtpOrder * sizeof(int16_t));
+            b_q14[kLtpOrder / 2] = 4096;  // 0.25 in Q14
+            signal_type = kTypeVoiced;
+            ctrl.pitch_lags[k] = st->lag_prev;
+        }
 
         if (signal_type == kTypeVoiced) {
             lag = ctrl.pitch_lags[k];
@@ -257,30 +267,48 @@ void decode_core(DecoderState* st, const DecoderControl& ctrl, int16_t* xq,
                 kMaxLpcOrder * sizeof(int32_t));
 }
 
-int decode_frame(DecoderState* st, RangeDecoder& dec, int16_t* xq,
-                 int cond_coding) {
+int decode_frame(DecoderState* st, RangeDecoder* dec, int16_t* xq,
+                 int cond_coding, bool lost) {
     DecoderControl ctrl;
     ctrl.ltp_scale_q14 = 0;
-    int16_t pulses[(kMaxFrameLength + kShellCodecFrameLength - 1) &
-                   ~(kShellCodecFrameLength - 1)];
-
-    decode_indices(st, dec, st->n_frames_decoded, false, cond_coding);
-    decode_pulses(dec, pulses, st->indices.signal_type,
-                  st->indices.quant_offset_type, st->frame_length);
-    decode_parameters(st, &ctrl, cond_coding);
-    decode_core(st, ctrl, xq, pulses);
-
-    // Output history: keep the last ltp_mem_length samples.
     int mv_len = st->ltp_mem_length - st->frame_length;
-    std::memmove(st->out_buf, &st->out_buf[st->frame_length],
-                 mv_len * sizeof(int16_t));
-    std::memcpy(&st->out_buf[mv_len], xq,
-                st->frame_length * sizeof(int16_t));
 
-    // (PLC/CNG state upkeep goes here; no output effect on clean frames.)
-    st->loss_cnt = 0;
-    st->prev_signal_type = st->indices.signal_type;
-    st->first_frame_after_reset = 0;
+    if (!lost) {
+        int16_t pulses[(kMaxFrameLength + kShellCodecFrameLength - 1) &
+                       ~(kShellCodecFrameLength - 1)];
+
+        decode_indices(st, *dec, st->n_frames_decoded, false, cond_coding);
+        decode_pulses(*dec, pulses, st->indices.signal_type,
+                      st->indices.quant_offset_type, st->frame_length);
+        decode_parameters(st, &ctrl, cond_coding);
+        decode_core(st, ctrl, xq, pulses);
+
+        // Output history: keep the last ltp_mem_length samples.
+        std::memmove(st->out_buf, &st->out_buf[st->frame_length],
+                     mv_len * sizeof(int16_t));
+        std::memcpy(&st->out_buf[mv_len], xq,
+                    st->frame_length * sizeof(int16_t));
+
+        plc_update(st, &ctrl);
+        st->loss_cnt = 0;
+        st->prev_signal_type = st->indices.signal_type;
+        st->first_frame_after_reset = 0;
+    } else {
+        // Packet lost: extrapolate from state (increments loss_cnt); the
+        // range decoder is never touched.
+        plc_conceal(st, &ctrl, xq);
+
+        std::memmove(st->out_buf, &st->out_buf[st->frame_length],
+                     mv_len * sizeof(int16_t));
+        std::memcpy(&st->out_buf[mv_len], xq,
+                    st->frame_length * sizeof(int16_t));
+    }
+
+    // Comfort-noise estimation (good frames) / generation (lost frames),
+    // then the loss->good energy glue fade.
+    cng(st, ctrl, xq, st->frame_length);
+    plc_glue_frames(st, xq, st->frame_length);
+
     st->lag_prev = ctrl.pitch_lags[st->nb_subfr - 1];
     return st->frame_length;
 }

@@ -236,62 +236,105 @@ void smooth_fade(const float* in1, const float* in2, float* out,
 }
 }  // namespace
 
-int OpusDecoder::decode_frame_impl(const uint8_t* data, int16_t size,
-                                   float* pcm, const OpusPacket& pkt) {
-    const int stream_channels = pkt.stereo ? 2 : 1;
-    // Mode from the TOC config: SILK-only 0..11, hybrid 12..15,
-    // CELT-only 16..31.
-    const int mode = pkt.config < 12 ? 1 : (pkt.config < 16 ? 2 : 3);
-    // CELT end band by bandwidth (MB has no CELT layer; it maps to 17).
-    int end_band = 21;
-    if (mode == 1)
-        end_band = (pkt.config >> 2) == 0 ? 13 : 17;  // NB / MB+WB
-    else if (mode == 2)
-        end_band = (pkt.config & 2) ? 21 : 19;  // SWB 19, FB 21
-    else
-        end_band = ((pkt.config >> 2) & 3) == 0
-                       ? 13
-                       : (((pkt.config >> 2) & 3) == 1
-                              ? 17
-                              : (((pkt.config >> 2) & 3) == 2 ? 19 : 21));
+int OpusDecoder::decode_frame_impl(const uint8_t* data, int32_t size,
+                                   float* pcm, int frame_size, int config,
+                                   int stereo_flag) {
+    const int stream_channels = stereo_flag ? 2 : 1;
+    int mode, audiosize, end_band = 21;
+    constexpr int kF20 = 960, kF10 = 480, kF5 = 240, kF2_5 = 120;
+
+    if (data != nullptr) {
+        audiosize = frame_size;
+        mode = config < 12 ? 1 : (config < 16 ? 2 : 3);
+        if (mode == 1)
+            end_band = (config >> 2) == 0 ? 13 : 17;  // NB / MB+WB
+        else if (mode == 2)
+            end_band = (config & 2) ? 21 : 19;  // SWB 19, FB 21
+        else
+            end_band = ((config >> 2) & 3) == 0
+                           ? 13
+                           : (((config >> 2) & 3) == 1
+                                  ? 17
+                                  : (((config >> 2) & 3) == 2 ? 19 : 21));
+    } else {
+        // Concealment: continue in the last mode (CELT if it was primed
+        // by redundancy).
+        audiosize = frame_size;
+        mode = prev_redundancy_ ? 3 : prev_mode_;
+        end_band = 21;
+        if (mode == 0) {
+            // Nothing decoded yet: silence.
+            std::memset(pcm, 0, static_cast<size_t>(audiosize) *
+                                    channels_ * sizeof(float));
+            return audiosize;
+        }
+        if (audiosize > kF20) {
+            do {
+                int ret = decode_frame_impl(
+                    nullptr, 0, pcm, audiosize < kF20 ? audiosize : kF20,
+                    config, stereo_flag);
+                if (ret < 0) return ret;
+                pcm += ret * channels_;
+                audiosize -= ret;
+            } while (audiosize > 0);
+            return frame_size;
+        }
+        if (audiosize < kF20) {
+            if (audiosize > kF10)
+                audiosize = kF10;
+            else if (mode != 1 && audiosize > kF5 && audiosize < kF10)
+                audiosize = kF5;
+        }
+        frame_size = audiosize;
+    }
+
+    // Mode-transition fade source: a 5 ms concealment frame in the OLD
+    // mode, when the switch has no redundancy to cover it.
+    int transition = 0;
+    float pcm_transition[2 * 240];
+    if (data != nullptr && prev_mode_ > 0 &&
+        ((mode == 3 && prev_mode_ != 3 && !prev_redundancy_) ||
+         (mode != 3 && prev_mode_ == 3)))
+        transition = 1;
+    if (transition && mode == 3) {
+        int ret = decode_frame_impl(nullptr, 0, pcm_transition,
+                                    audiosize < kF5 ? audiosize : kF5,
+                                    config, stereo_flag);
+        if (ret < 0) return ret;
+    }
 
     RangeDecoder dec;
-    dec.init(data, static_cast<uint32_t>(size));
-
-    // A mode switch invalidates CELT's synthesis history — unless the
-    // previous packet carried SILK->CELT redundancy, which already reset
-    // and primed it.
-    if (mode != prev_mode_ && prev_mode_ > 0 && !prev_redundancy_)
-        celt_.init(channels_);
+    if (data != nullptr) dec.init(data, static_cast<uint32_t>(size));
 
     int32_t len = size;
     int16_t pcm_silk[2 * 2880];
     int n_silk = 0;
     if (mode != 3) {
-        // SILK part: internal rate from bandwidth (hybrid is always WB);
-        // 40/60 ms packets decode as chained 20 ms SILK frames.
-        int internal_khz;
-        if (mode == 2)
-            internal_khz = 16;
-        else
-            internal_khz = 8 + 4 * ((pkt.config >> 2) & 3);  // NB/MB/WB
-        int payload_ms = pkt.frame_size / 48;
-        while (n_silk < pkt.frame_size) {
-            int ret = silk_.decode(dec, pcm_silk + n_silk * channels_,
+        if (prev_mode_ == 3) silk_ = silk::SilkDecoder();
+        // The SILK PLC cannot conceal less than 10 ms.
+        int payload_ms = audiosize / 48 > 10 ? audiosize / 48 : 10;
+        int internal_khz = 16;
+        if (data != nullptr && mode == 1)
+            internal_khz = 8 + 4 * ((config >> 2) & 3);  // NB/MB/WB
+        while (n_silk < frame_size) {
+            int ret;
+            if (data != nullptr)
+                ret = silk_.decode(dec, pcm_silk + n_silk * channels_,
                                    channels_, stream_channels,
                                    internal_khz, 48000, payload_ms,
                                    n_silk == 0);
+            else
+                ret = silk_.decode_lost(pcm_silk + n_silk * channels_,
+                                        channels_, payload_ms,
+                                        n_silk == 0);
             if (ret < 0) return ret;
             n_silk += ret;
         }
     }
 
-    // Transition redundancy: a 5 ms CELT frame appended to the payload.
-    // Hybrid signals it with a flag; SILK-only implies it whenever enough
-    // bits are left over.
     int redundancy = 0, celt_to_silk = 0;
     int32_t redundancy_bytes = 0;
-    if (mode != 3 &&
+    if (data != nullptr && mode != 3 &&
         static_cast<int32_t>(dec.tell()) + 17 + 20 * (mode == 2) <=
             8 * len) {
         redundancy = mode == 2 ? dec.dec_bit_logp(12) : 1;
@@ -307,21 +350,30 @@ int OpusDecoder::decode_frame_impl(const uint8_t* data, int16_t size,
                 redundancy_bytes = 0;
                 redundancy = 0;
             }
-            // The redundant frame's bytes leave the main frame's budget
-            // (raw bits at the buffer end belong to the redundancy).
             dec.shrink(static_cast<uint32_t>(redundancy_bytes));
         }
+    }
+
+    // A redundant frame covers the switch better than a concealment fade.
+    if (redundancy) transition = 0;
+
+    if (transition && mode != 3) {
+        int ret = decode_frame_impl(nullptr, 0, pcm_transition,
+                                    audiosize < kF5 ? audiosize : kF5,
+                                    config, stereo_flag);
+        if (ret < 0) return ret;
     }
 
     float redundant_audio[2 * 240];
     uint32_t redundant_rng = 0;
     if (redundancy && celt_to_silk) {
-        // CELT->SILK: the redundant frame continues the old CELT state.
+        // Always decoded (the final range needs it) even when the audio
+        // is stale and unused (gated application below).
         RangeDecoder rdec;
         rdec.init(data + len, static_cast<uint32_t>(redundancy_bytes));
         int ret = celt_.decode_frame(
             rdec, static_cast<uint32_t>(redundancy_bytes), redundant_audio,
-            240, stream_channels, end_band, 0);
+            kF5, stream_channels, end_band, 0);
         if (ret < 0) return ret;
         redundant_rng = rdec.range();
     }
@@ -329,54 +381,80 @@ int OpusDecoder::decode_frame_impl(const uint8_t* data, int16_t size,
     if (mode != 1) {
         // CELT part (hybrid: same range decoder, bands from 17).
         int start_band = mode == 2 ? 17 : 0;
-        int celt_frame = pkt.frame_size < 960 ? pkt.frame_size : 960;
-        int ret = celt_.decode_frame(dec, static_cast<uint32_t>(len), pcm,
+        int celt_frame = frame_size < kF20 ? frame_size : kF20;
+        if (mode != prev_mode_ && prev_mode_ > 0 && !prev_redundancy_)
+            celt_.init(channels_);
+        int ret;
+        if (data != nullptr)
+            ret = celt_.decode_frame(dec, static_cast<uint32_t>(len), pcm,
                                      celt_frame, stream_channels, end_band,
                                      start_band);
+        else
+            ret = celt_.decode_lost(pcm, celt_frame);
         if (ret < 0) return ret;
     } else {
-        std::memset(pcm, 0,
-                    static_cast<size_t>(pkt.frame_size) * channels_ *
-                        sizeof(float));
+        std::memset(pcm, 0, static_cast<size_t>(frame_size) * channels_ *
+                                sizeof(float));
+        // Hybrid -> SILK: decode a silence frame so the CELT MDCT fades
+        // itself out.
+        if (prev_mode_ == 2 &&
+            !(redundancy && celt_to_silk && prev_redundancy_)) {
+            static const uint8_t kSilence[2] = { 0xFF, 0xFF };
+            RangeDecoder sdec;
+            sdec.init(kSilence, 2);
+            celt_.decode_frame(sdec, 2, pcm, kF2_5, stream_channels, 21,
+                               0);
+        }
     }
 
     if (mode != 3) {
-        // Mix in the SILK output (CELT wrote pcm already in hybrid).
-        for (int i = 0; i < n_silk * channels_; i++)
+        for (int i = 0; i < frame_size * channels_; i++)
             pcm[i] += pcm_silk[i] * (1.0f / 32768.0f);
     }
 
     if (redundancy && !celt_to_silk) {
-        // SILK->CELT: prime a fresh CELT state with the redundant frame,
-        // then fade this frame's tail into it.
+        // SILK->CELT: prime a fresh CELT state, fade the tail into it.
         celt_.init(channels_);
         RangeDecoder rdec;
         rdec.init(data + len, static_cast<uint32_t>(redundancy_bytes));
         int ret = celt_.decode_frame(
             rdec, static_cast<uint32_t>(redundancy_bytes), redundant_audio,
-            240, stream_channels, end_band, 0);
+            kF5, stream_channels, end_band, 0);
         if (ret < 0) return ret;
         redundant_rng = rdec.range();
-        smooth_fade(pcm + channels_ * (pkt.frame_size - 120),
-                    redundant_audio + channels_ * 120,
-                    pcm + channels_ * (pkt.frame_size - 120), 120,
+        smooth_fade(pcm + channels_ * (frame_size - kF2_5),
+                    redundant_audio + channels_ * kF2_5,
+                    pcm + channels_ * (frame_size - kF2_5), kF2_5,
                     channels_, celt_window());
     }
-    if (redundancy && celt_to_silk) {
-        // CELT->SILK: the redundant frame owns the first 2.5 ms, then
-        // fades into the SILK output.
+    if (redundancy && celt_to_silk &&
+        (prev_mode_ != 1 || prev_redundancy_)) {
+        // Apply only if the previous frame actually used CELT (its first
+        // redundancy frame may have been lost).
         for (int c = 0; c < channels_; c++)
-            for (int i = 0; i < 120; i++)
+            for (int i = 0; i < kF2_5; i++)
                 pcm[channels_ * i + c] = redundant_audio[channels_ * i + c];
-        smooth_fade(redundant_audio + channels_ * 120,
-                    pcm + channels_ * 120, pcm + channels_ * 120, 120,
-                    channels_, celt_window());
+        smooth_fade(redundant_audio + channels_ * kF2_5,
+                    pcm + channels_ * kF2_5, pcm + channels_ * kF2_5,
+                    kF2_5, channels_, celt_window());
+    }
+    if (transition) {
+        if (audiosize >= kF5) {
+            for (int i = 0; i < channels_ * kF2_5; i++)
+                pcm[i] = pcm_transition[i];
+            smooth_fade(pcm_transition + channels_ * kF2_5,
+                        pcm + channels_ * kF2_5, pcm + channels_ * kF2_5,
+                        kF2_5, channels_, celt_window());
+        } else {
+            smooth_fade(pcm_transition, pcm, pcm, kF2_5, channels_,
+                        celt_window());
+        }
     }
 
     prev_mode_ = mode;
     prev_redundancy_ = redundancy && !celt_to_silk;
-    final_range_ = dec.range() ^ redundant_rng;
-    return pkt.frame_size;
+    final_range_ = data != nullptr ? dec.range() ^ redundant_rng : 0;
+    return frame_size;
 }
 
 int OpusDecoder::decode(const uint8_t* data, int32_t len, float* pcm,
@@ -388,9 +466,16 @@ int OpusDecoder::decode(const uint8_t* data, int32_t len, float* pcm,
 
     int total = 0;
     for (int f = 0; f < pkt.frame_count; f++) {
-        if (pkt.sizes[f] < 1) return -4;  // PLC/DTX frames: later
-        int ret = decode_frame_impl(pkt.frames[f], pkt.sizes[f],
-                                    pcm + total * channels_, pkt);
+        int ret;
+        if (pkt.sizes[f] < 1)  // DTX: conceal in the previous mode
+            ret = decode_frame_impl(nullptr, 0, pcm + total * channels_,
+                                    pkt.frame_size, pkt.config,
+                                    pkt.stereo);
+        else
+            ret = decode_frame_impl(pkt.frames[f], pkt.sizes[f],
+                                    pcm + total * channels_,
+                                    pkt.frame_size, pkt.config,
+                                    pkt.stereo);
         if (ret < 0) return ret;
         total += ret;
     }

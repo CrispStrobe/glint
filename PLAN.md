@@ -1477,3 +1477,45 @@ band 17), PLC/CNG, then RFC test vectors 01-12 as the exit gate.
 NEXT (the last O2 item): PLC/CNG (celt_decode_lost, silk PLC+CNG, DTX
 zero-length frames, transition fades without redundancy) -> expect
 12/12 vectors. Then O3 (Ogg) / O4 (CELT encoder).
+
+## O2 COMPLETE (2026-07-10): RFC-CONFORMANT OPUS DECODER — 12/12 test vectors
+
+**tools/test_opus_vectors.py: all 12 official RFC 6716/8251 test vectors
+PASS the normative opus_compare procedure (97.1-100% quality), with ZERO
+range mismatches across ~20k packets.** The clean-room decoder is
+conformant.
+
+Final pieces (this pass):
+- SILK PLC + CNG (opus_silk_plc.{hpp,cpp}, agent-built): conceal/update/
+  glue + comfort noise, byte-identical over 500 sequences with 605
+  concealed frames. KEY reference corrections: PLC/CNG reset LAZILY on an
+  fs mismatch inside silk_PLC/silk_CNG (decoder_set_fs does NOT reset
+  them); init runs while frame_length==0 (pitch 0, gains 1.0, CNG seed
+  3176576). decode_core's voiced-PLC->unvoiced patch writes into ctrl
+  (the PLC update must see it).
+- CELT PLC (in opus_celt_decoder.cpp, agent-built): noise/CNG branch +
+  pitch-based branch (pitch_downsample/pitch_search/_celt_lpc ports;
+  remove_doubling NOT needed), prefilter_and_fold, skip_plc, the
+  loss-safety energy block. Two latent glint bugs found by its gate:
+  background_log_e_ inits to 0 (NOT -28 — only oldLogE gets -28), and
+  synthesis passed literal 0 for start (hybrid no-op until then).
+- SilkDecoder::decode_lost (dec_API loss path: stored config, prev
+  stereo predictors, has_side=!prev_decode_only_middle, LastGainIndex=10
+  after loss, prev_decode_only_middle NOT updated).
+- opus_decoder.cpp: full transition orchestration — concealment
+  recursion for lost/DTX (F20 chunks, F10/F5 clamps), transition fade
+  sources in the OLD mode, SILK reset on CELT->SILK, hybrid->SILK
+  CELT-silence fade-out frame, gated celt_to_silk application, and the
+  vector-10 lesson: **redundancy CANCELS the transition fade**
+  (`if (redundancy) transition = 0`) and the SILK-side transition PLC
+  decodes AFTER the redundancy parse. Found by bisecting vector 10 to 8
+  diverging packets, all CELT->hybrid switches carrying redundancy.
+- Final range convention: concealed frames report 0.
+
+All gates green: 301/301 unit, every crosscheck_opus_*.py, E2E 38
+configs, 12/12 vectors.
+
+O2 leftovers for later polish: FEC (LBRR decode-on-request), DTX beyond
+the per-frame conceal, decoder sample rates != 48k (API resampling
+covers 8-48k in SILK; CELT downsample path unimplemented), OPUS_SET_GAIN.
+NEXT: O3 (Ogg Opus demux -> decode .opus FILES) and/or O4 (CELT encoder).

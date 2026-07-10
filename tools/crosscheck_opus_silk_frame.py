@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Cross-check glint's full SILK frame decode (indices + pulses +
-parameters + core synthesis) against the reference silk_decode_frame.
+parameters + core synthesis + PLC/CNG) against the reference
+silk_decode_frame.
 
-Byte-identical fuzz oracle: 250 sequences x 4 chained frames across all
-internal rates and frame durations; xq PCM and tells must match exactly.
+Byte-identical fuzz oracle: 250 all-clean sequences x 4 chained frames
+(the original pre-PLC gate content) plus 250 loss-mixing sequences x 6
+frames (random losses incl. loss-at-start and bursts, decoded with
+FLAG_PACKET_LOST on the reference side) across all internal rates and
+frame durations; xq PCM and tells must match exactly.
 
 Usage: python3 tools/crosscheck_opus_silk_frame.py
 """
@@ -19,7 +23,7 @@ CUSTOM_LIB = os.path.join(CUSTOM_SRC, ".libs", "libopus.a")
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DRIVER = os.path.join(REPO, "tools", "opus_silk_frame_crosscheck.cpp")
 SRCS = ["opus_ec.cpp", "opus_silk_excitation.cpp", "opus_silk_indices.cpp",
-        "opus_silk_nlsf.cpp", "opus_silk_frame.cpp"]
+        "opus_silk_nlsf.cpp", "opus_silk_plc.cpp", "opus_silk_frame.cpp"]
 
 
 def run(cmd):
@@ -49,9 +53,11 @@ def main():
         gl = subprocess.run([glint_bin], check=True,
                             capture_output=True).stdout
     if ref == gl:
-        nseq = sum(1 for l in ref.splitlines() if l.startswith(b"seed"))
+        lines = ref.splitlines()
+        nseq = sum(1 for l in lines if l.startswith(b"seed"))
+        nlost = sum(1 for l in lines if b" lost 1 " in l)
         print(f"PASS: SILK frame decode byte-identical with libopus "
-              f"({nseq} fuzzed sequences x 4 chained frames)")
+              f"({nseq} fuzzed sequences, {nlost} concealed frames)")
         return 0
     for i, (a, b) in enumerate(zip(ref.splitlines(), gl.splitlines()), 1):
         if a != b:

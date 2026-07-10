@@ -56,8 +56,10 @@ public:
     uint32_t final_range() const { return final_range_; }
 
 private:
-    int decode_frame_impl(const uint8_t* data, int16_t size, float* pcm,
-                          const OpusPacket& pkt);
+    // data == nullptr runs concealment (lost packet / DTX / transition
+    // fade source) in the previous mode.
+    int decode_frame_impl(const uint8_t* data, int32_t size, float* pcm,
+                          int frame_size, int config, int stereo_flag);
 
     int channels_ = 0;
     uint32_t final_range_ = 0;

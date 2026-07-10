@@ -4,6 +4,15 @@
 // Fuzz oracle at the celt_decode level: sequences of random packets into a
 // persistent decoder instance (state carryover: MDCT overlap, energy
 // history, postfilter parameters, LCG seed), PCM compared per frame.
+//
+// Phase 2 mixes in LOST frames (glint decode_lost vs reference
+// opus_custom_decode_float(st, NULL, 0, ...)): loss at stream start
+// (skip_plc -> noise PLC), consecutive losses (pitch-PLC fade + the 100 ms
+// noise fallback), and good-after-loss frames (prefilter_and_fold + the
+// coarse-energy loss-safety adjustment). Phase-2 packets are shorter and
+// mixed with genuine SILENCE packets so band gains stay sane: the pitch
+// search takes discrete argmax decisions, which only stay float-vs-double
+// equivalent while its correlation products stay far from float overflow.
 
 #include <cstdint>
 #include <cstdio>
@@ -24,6 +33,9 @@ struct DecA {
     int frame(const uint8_t* data, int len, float* pcm, int fsize) {
         return opus_custom_decode_float(st, data, len, pcm, fsize);
     }
+    int frame_lost(float* pcm, int fsize) {
+        return opus_custom_decode_float(st, NULL, 0, pcm, fsize);
+    }
 };
 #else
 #include "opus_celt_decoder.hpp"
@@ -40,6 +52,7 @@ struct DecA {
         return d.decode_frame(dec, static_cast<uint32_t>(len), pcm, fsize,
                               ch, 21);
     }
+    int frame_lost(float* pcm, int fsize) { return d.decode_lost(pcm, fsize); }
 };
 #endif
 
@@ -68,6 +81,51 @@ int main() {
             for (uint32_t i = 0; i < len; i++) buf[i] = (uint8_t)xrand();
             int ret = dec.frame(buf, (int)len, pcm, fsize);
             std::printf("frame %d len %u ret %d pcm", f, len, ret);
+            for (int i = 0; i < channels * fsize; i += 13)
+                std::printf(" %.5f", (double)pcm[i]);
+            std::printf("\n");
+        }
+    }
+
+    // Phase 2: packet-loss concealment.
+    // A CELT "silence" packet (first symbol = the 1/2^15 silence flag).
+    static const uint8_t silence_pkt[2] = { 0xFF, 0xFE };
+    for (uint32_t seed = 101; seed <= 160; seed++) {
+        rng_state = seed;
+        int channels = 1 + (int)(xrand() & 1);
+        int lm = (int)(xrand() % 4);
+        int fsize = 120 << lm;
+        DecA dec;
+        dec.init(channels);
+        std::printf("plc seed %u ch %d lm %d\n", seed, channels, lm);
+        for (int f = 0; f < 12; f++) {
+            int lost;
+            if (seed % 3 == 0 && f < 2)
+                lost = 1;  // loss at stream start (skip_plc path)
+            else if (seed % 5 == 0 && f >= 3 && f <= 9)
+                lost = 1;  // long burst (fade + noise fallback at lm >= 2)
+            else if (f == 5 || f == 6)
+                lost = 1;  // mid-sequence consecutive pair
+            else
+                lost = (int)(xrand() % 3 == 0);
+            int ret;
+            if (lost) {
+                ret = dec.frame_lost(pcm, fsize);
+                std::printf("frame %d LOST ret %d pcm", f, ret);
+            } else {
+                uint32_t len;
+                if (xrand() % 5 == 0) {  // real silence frame: tames gains
+                    len = 2;
+                    buf[0] = silence_pkt[0];
+                    buf[1] = silence_pkt[1];
+                } else {
+                    len = 2 + xrand() % 60;
+                    for (uint32_t i = 0; i < len; i++)
+                        buf[i] = (uint8_t)xrand();
+                }
+                ret = dec.frame(buf, (int)len, pcm, fsize);
+                std::printf("frame %d len %u ret %d pcm", f, len, ret);
+            }
             for (int i = 0; i < channels * fsize; i += 13)
                 std::printf(" %.5f", (double)pcm[i]);
             std::printf("\n");

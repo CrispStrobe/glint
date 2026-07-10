@@ -3,7 +3,9 @@
 
 Fuzz oracle at celt_decode level: persistent decoder instances fed
 sequences of random packets (state carryover across frames); return codes
-exact, PCM within relative float-vs-double tolerance.
+exact, PCM within relative float-vs-double tolerance. Phase 2 mixes in
+LOST frames (packet-loss concealment: noise/CNG + pitch-based PLC,
+prefilter_and_fold, loss-safe energy prediction).
 
 Usage: python3 tools/crosscheck_opus_celt_dec.py
 """
@@ -24,6 +26,13 @@ RTOL = 2e-3   # relative, for the wild gains random streams can produce
 # noise scales with the LARGEST sample in the sequence (it persists through
 # the decoder's overlap memory into later frames). Tolerance must too.
 PEAK_TOL = 1e-4
+# Loss sequences: pitch-based PLC runs autocorr -> order-24 LPC -> IIR
+# resynthesis over the decode history, which amplifies the accumulated
+# float-vs-double history difference a few-fold (measured ~3.3e-4 of peak;
+# verified NOT exc-storage precision -- rounding glint's excitation to
+# float moves nothing). Still tight enough to catch a wrong pitch lag or
+# filter tap, which produce order-of-peak errors.
+PEAK_TOL_PLC = 1e-3
 
 SRCS = ["opus_ec.cpp", "opus_laplace.cpp", "opus_cwrs.cpp",
         "opus_celt_energy.cpp", "opus_celt_rate.cpp", "opus_celt_bands.cpp",
@@ -63,6 +72,7 @@ def main():
                  f"{len(gl_lines)})")
     worst = 0.0
     running_peak = 0.0
+    peak_tol = PEAK_TOL
     for ln, (a, b) in enumerate(zip(ref_lines, gl_lines), 1):
         ta, tb = a.split(), b.split()
         if "pcm" not in ta:
@@ -70,6 +80,8 @@ def main():
                 sys.exit(f"FAIL line {ln}:\n  ref:   {a[:130]}\n"
                          f"  glint: {b[:130]}")
             running_peak = 0.0  # new decoder instance / seed
+            if ta and ta[0] in ("seed", "plc"):
+                peak_tol = PEAK_TOL_PLC if ta[0] == "plc" else PEAK_TOL
             continue
         cut = ta.index("pcm")
         if ta[:cut + 1] != tb[:cut + 1]:
@@ -82,13 +94,14 @@ def main():
         for va, vb in vals:
             d = abs(va - vb)
             lim = max(ATOL, RTOL * max(abs(va), abs(vb)),
-                      PEAK_TOL * running_peak)
+                      peak_tol * running_peak)
             worst = max(worst, d / lim)
             if d > lim:
                 sys.exit(f"FAIL (pcm) line {ln}: {va} vs {vb} "
                          f"(peak {running_peak:.1f})")
     print(f"PASS: CELT frame decoder matches libopus over 60 fuzzed "
-          f"sequences x 6 frames (worst delta at {worst:.2f} of tolerance)")
+          f"sequences x 6 frames + 60 loss sequences x 12 frames "
+          f"(worst delta at {worst:.2f} of tolerance)")
     return 0
 
 

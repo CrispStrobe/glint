@@ -19,7 +19,7 @@ SRCS = ["opus_ec.cpp", "opus_laplace.cpp", "opus_cwrs.cpp",
         "opus_celt_energy.cpp", "opus_celt_rate.cpp", "opus_celt_bands.cpp",
         "opus_mdct.cpp", "opus_celt_decoder.cpp", "opus_decoder.cpp",
         "opus_silk_excitation.cpp", "opus_silk_indices.cpp",
-        "opus_silk_nlsf.cpp", "opus_silk_frame.cpp", "opus_silk_stereo.cpp",
+        "opus_silk_nlsf.cpp", "opus_silk_plc.cpp", "opus_silk_frame.cpp", "opus_silk_stereo.cpp",
         "opus_silk_resampler.cpp", "opus_silk_decoder.cpp"]
 
 

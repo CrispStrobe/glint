@@ -13,6 +13,7 @@
 #include <cstdint>
 
 #include "opus_ec.hpp"
+#include "opus_silk_plc.hpp"
 #include "opus_silk_tables.hpp"
 
 namespace glint {
@@ -78,6 +79,12 @@ struct DecoderState {
     int16_t out_buf[320 + 2 * 80] = {};   // ltp_mem + 2 subframes
     int32_t slpc_q14_buf[kMaxLpcOrder] = {};
     int32_t exc_q14[320] = {};
+
+    // Packet-loss concealment + comfort noise (opus_silk_plc.hpp). Their
+    // defaults mirror silk_init_decoder; both reset themselves lazily when
+    // fs_khz changes (the reference does NOT reset them in decoder_set_fs).
+    PlcState plc;
+    CngState cng;
 
     // Mirrors the reference decoder_set_fs: rate-dependent tables plus the
     // guarded state resets on an internal-rate change. Returns true when

@@ -196,6 +196,95 @@ int SilkDecoder::decode(RangeDecoder& dec, int16_t* samples_out,
     return n_out;
 }
 
+int SilkDecoder::decode_lost(int16_t* samples_out, int channels_api,
+                             int payload_ms, bool new_packet) {
+    DecoderState* ch = channel_state;
+    const int channels_internal =
+        n_channels_internal > 0 ? n_channels_internal : 1;
+    const int internal_khz = ch[0].fs_khz > 0 ? ch[0].fs_khz : 16;
+    const int32_t api_hz = ch[0].fs_api_hz > 0 ? ch[0].fs_api_hz : 48000;
+    int32_t ms_pred_q13[2];
+
+    if (new_packet) {
+        for (int n = 0; n < channels_internal; n++)
+            ch[n].n_frames_decoded = 0;
+    }
+    if (ch[0].n_frames_decoded == 0) {
+        int n_frames_per_packet, nb_subfr;
+        switch (payload_ms) {
+        case 10: n_frames_per_packet = 1; nb_subfr = 2; break;
+        case 20: n_frames_per_packet = 1; nb_subfr = 4; break;
+        case 40: n_frames_per_packet = 2; nb_subfr = 4; break;
+        case 60: n_frames_per_packet = 3; nb_subfr = 4; break;
+        default: return -11;
+        }
+        for (int n = 0; n < channels_internal; n++) {
+            ch[n].n_frames_per_packet = n_frames_per_packet;
+            if (ch[n].set_fs(internal_khz, nb_subfr, api_hz))
+                resampler[n].init(internal_khz,
+                                  static_cast<int>(api_hz / 1000));
+        }
+    }
+
+    // Predictors carry over; no bitstream to read.
+    ms_pred_q13[0] = stereo.pred_prev_q13[0];
+    ms_pred_q13[1] = stereo.pred_prev_q13[1];
+
+    int has_side = !prev_decode_only_middle;
+    int16_t ch_out[2][322];
+    int n_dec = ch[0].frame_length;
+
+    for (int n = 0; n < channels_internal; n++) {
+        if (n == 0 || has_side) {
+            int frame_index = ch[0].n_frames_decoded - n;
+            int cond = frame_index <= 0
+                           ? kCodeIndependently
+                           : (n > 0 && prev_decode_only_middle
+                                  ? kCodeIndependentlyNoLtpScaling
+                                  : kCodeConditionally);
+            decode_frame(&ch[n], nullptr, &ch_out[n][2], cond,
+                         /*lost=*/true);
+        } else {
+            std::memset(&ch_out[n][2], 0, n_dec * sizeof(int16_t));
+        }
+        ch[n].n_frames_decoded++;
+    }
+
+    if (channels_api == 2 && channels_internal == 2) {
+        stereo_ms_to_lr(&stereo, ch_out[0], ch_out[1], ms_pred_q13,
+                        ch[0].fs_khz, n_dec);
+    } else {
+        std::memcpy(ch_out[0], stereo.s_mid, 2 * sizeof(int16_t));
+        std::memcpy(stereo.s_mid, &ch_out[0][n_dec], 2 * sizeof(int16_t));
+    }
+
+    int n_out = static_cast<int>(
+        static_cast<int64_t>(n_dec) * api_hz / (ch[0].fs_khz * 1000));
+
+    int16_t resample_buf[960];
+    int16_t* resample_out =
+        channels_api == 2 ? resample_buf : samples_out;
+    int n_mixed = channels_api < channels_internal ? channels_api
+                                                   : channels_internal;
+    for (int n = 0; n < n_mixed; n++) {
+        resampler[n].process(resample_out, &ch_out[n][1], n_dec);
+        if (channels_api == 2) {
+            for (int i = 0; i < n_out; i++)
+                samples_out[n + 2 * i] = resample_out[i];
+        }
+    }
+    if (channels_api == 2 && channels_internal == 1) {
+        for (int i = 0; i < n_out; i++)
+            samples_out[1 + 2 * i] = samples_out[2 * i];
+    }
+
+    // Post-loss: drop the gain-chain clamp so energy can come back down.
+    for (int n = 0; n < channels_internal; n++)
+        ch[n].prev_gain_index = 10;
+    // prev_decode_only_middle intentionally NOT updated on loss.
+    return n_out;
+}
+
 }  // namespace silk
 }  // namespace opus
 }  // namespace glint

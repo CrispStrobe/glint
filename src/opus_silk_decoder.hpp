@@ -39,6 +39,12 @@ struct SilkDecoder {
     int decode(RangeDecoder& dec, int16_t* samples_out, int channels_api,
                int channels_internal, int internal_khz, int32_t api_hz,
                int payload_ms, bool new_packet);
+
+    // Conceal one frame set (lost packet / DTX / transition source) using
+    // the previous configuration; no bitstream reads
+    // (reference silk_Decode with FLAG_PACKET_LOST).
+    int decode_lost(int16_t* samples_out, int channels_api, int payload_ms,
+                    bool new_packet);
 };
 
 }  // namespace silk
