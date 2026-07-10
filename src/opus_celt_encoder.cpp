@@ -3,6 +3,9 @@
 
 #include "opus_celt_encoder.hpp"
 
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "opus_celt_enc_bands.hpp"
@@ -20,6 +23,69 @@ using celt::kNbEBands;
 constexpr float kPreemphCoef = 0.85f;
 constexpr int kSpreadNormal = 2;
 constexpr int kCombFilterMinPeriodEnc = 15;
+
+// Forward/backward-masking transient detector (reference float path).
+// Pure encoder policy: the decision changes quality, never validity.
+int transient_analysis(const double* in, int len, int C) {
+    // 6*64/x lookup, reference-trained.
+    static const uint8_t kInvTable[128] = {
+        255, 255, 156, 110, 86, 70, 59, 51, 45, 40, 37, 33, 31, 28, 26, 25,
+        23,  22,  21,  20,  19, 18, 17, 16, 16, 15, 15, 14, 13, 13, 12, 12,
+        12,  12,  11,  11,  11, 10, 10, 10, 9,  9,  9,  9,  9,  9,  8,  8,
+        8,   8,   8,   7,   7,  7,  7,  7,  7,  6,  6,  6,  6,  6,  6,  6,
+        6,   6,   6,   6,   6,  6,  6,  6,  6,  5,  5,  5,  5,  5,  5,  5,
+        5,   5,   5,   5,   5,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,
+        4,   4,   4,   4,   4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  3,  3,
+        3,   3,   3,   3,   3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  2,
+    };
+    static thread_local double tmp[2 * (960 + 120)];
+    int len2 = len / 2;
+    int32_t mask_metric = 0;
+    for (int c = 0; c < C; c++) {
+        // High-pass (1 - 2z^-1 + z^-2)/(1 - z^-1 + .5z^-2).
+        double mem0 = 0, mem1 = 0;
+        for (int i = 0; i < len; i++) {
+            double x = in[c * (960 + 120) + i];
+            double y = mem0 + x;
+            mem0 = mem1 + y - 2 * x;
+            mem1 = x - 0.5 * y;
+            tmp[i] = y;
+        }
+        for (int i = 0; i < 12; i++) tmp[i] = 0;
+
+        // Forward pass: post-echo threshold (6.7 dB/ms decay).
+        double mean = 0, mem = 0;
+        const double fwd = 0.0625;
+        for (int i = 0; i < len2; i++) {
+            double x2 = tmp[2 * i] * tmp[2 * i] +
+                        tmp[2 * i + 1] * tmp[2 * i + 1];
+            mean += x2;
+            mem = x2 + (1.0 - fwd) * mem;
+            tmp[i] = fwd * mem;
+        }
+        // Backward pass: pre-echo threshold (13.9 dB/ms).
+        mem = 0;
+        double max_e = 0;
+        for (int i = len2 - 1; i >= 0; i--) {
+            mem = tmp[i] + 0.875 * mem;
+            tmp[i] = 0.125 * mem;
+            if (tmp[i] > max_e) max_e = tmp[i];
+        }
+        // Bitrate-normalized temporal noise-to-mask ratio: harmonic mean
+        // of the threshold vs the (geometric-mean) frame energy.
+        mean = std::sqrt(mean * max_e * 0.5 * len2);
+        double norm = len2 / (1e-15 + mean);
+        int32_t unmask = 0;
+        for (int i = 12; i < len2 - 5; i += 4) {
+            double v = std::floor(64.0 * norm * (tmp[i] + 1e-15));
+            int id = v < 0 ? 0 : (v > 127 ? 127 : static_cast<int>(v));
+            unmask += kInvTable[id];
+        }
+        unmask = 64 * unmask * 4 / (6 * (len2 - 17));
+        if (unmask > mask_metric) mask_metric = unmask;
+    }
+    return mask_metric > 200;
+}
 inline int imin(int a, int b) { return a < b ? a : b; }
 inline int imax(int a, int b) { return a > b ? a : b; }
 }  // namespace
@@ -151,15 +217,29 @@ int CeltEncoder::encode_frame(const float* pcm, int frame_size,
         }
     }
 
-    // Forward MDCT (long block), double transform narrowed to float
-    // spectra: the layer gates are float-exact, the transform itself only
-    // needs to be accurate (validity never depends on it).
+    // Transient detection on the (prefiltered) input incl. history.
+    // Gate on the bit budget BEFORE the MDCT: the flag on the wire, the
+    // transform interleave and the decoder's tf_res derivation must all
+    // agree, so is_transient may never change after this point.
+    int is_transient =
+        lm > 0 ? transient_analysis(&in[0][0], n + kOverlap, C) : 0;
+    if (!(lm > 0 && static_cast<int32_t>(enc.tell()) + 3 <= total_bits))
+        is_transient = 0;
+    if (std::getenv("GLINT_DBG_TRANSIENT"))
+        std::fprintf(stderr, "T%d", is_transient);
+    const int short_blocks = is_transient ? m : 0;
+
+    // Forward MDCT: one long transform, or M interleaved short blocks.
     static thread_local float X[2 * kMaxFrame];
     {
         double freq_d[kMaxFrame];
-        int shift = 3 - lm;
+        int B = is_transient ? m : 1;
+        int nb = is_transient ? 120 : n;
+        int shift = is_transient ? 3 : 3 - lm;
         for (int c = 0; c < C; c++) {
-            mdct_.forward(in[c], freq_d, window_, kOverlap, shift, 1);
+            for (int b = 0; b < B; b++)
+                mdct_.forward(in[c] + b * nb, &freq_d[b], window_,
+                              kOverlap, shift, B);
             for (int k = 0; k < n; k++)
                 X[c * n + k] = static_cast<float>(freq_d[k]);
         }
@@ -196,7 +276,7 @@ int CeltEncoder::encode_frame(const float* pcm, int frame_size,
     prefilter_tapset_ = new_tapset;
     tell = static_cast<int32_t>(enc.tell());
     if (lm > 0 && tell + 3 <= total_bits) {
-        enc.enc_bit_logp(0, 3);  // not transient
+        enc.enc_bit_logp(is_transient, 3);
         tell = static_cast<int32_t>(enc.tell());
     }
 
@@ -207,13 +287,24 @@ int CeltEncoder::encode_frame(const float* pcm, int frame_size,
                         &delayed_intra_, /*two_pass=*/1, /*loss_rate=*/0,
                         /*lfe=*/0);
 
-    // tf_encode with all-zero tf_res: per-band change bits where the
-    // budget allows; the select bit is skipped when both table halves
-    // agree (they do for the all-zero path).
+    // tf_encode with all-zero raw tf_res: per-band change bits where the
+    // budget allows, plus the select bit when the two table halves
+    // disagree for tf_changed == 0 (they do on transient LM>=2). After
+    // encoding, tf_res is remapped through the select table EXACTLY as
+    // the decoder's tf_decode does — quant_all_bands must see the same
+    // per-band tf resolution the decoder will derive, or the band
+    // symbols desync (valid wire, garbage audio).
+    int tf_res[kNbEBands];
     {
+        static const signed char kTfSel[4][8] = {
+            { 0, -1, 0, -1, 0, -1, 0, -1 },
+            { 0, -1, 0, -2, 1, 0, 1, -1 },
+            { 0, -2, 0, -3, 2, 0, 1, -1 },
+            { 0, -2, 0, -3, 3, 0, 1, -1 },
+        };
         uint32_t budget = static_cast<uint32_t>(total_bits);
         uint32_t tf_tell = enc.tell();
-        int logp = 4;  // not transient
+        int logp = is_transient ? 2 : 4;
         uint32_t tf_select_rsv = lm > 0 && tf_tell + logp + 1 <= budget;
         budget -= tf_select_rsv;
         for (int i = start; i < end; i++) {
@@ -221,10 +312,14 @@ int CeltEncoder::encode_frame(const float* pcm, int frame_size,
                 enc.enc_bit_logp(0, static_cast<unsigned>(logp));
                 tf_tell = enc.tell();
             }
-            logp = 5;
+            logp = is_transient ? 4 : 5;
         }
-        // kTfSelectTable[lm][0] == kTfSelectTable[lm][2] == 0: no select
-        // bit for the all-zero, non-transient case.
+        if (tf_select_rsv &&
+            kTfSel[lm][4 * is_transient + 0] !=
+                kTfSel[lm][4 * is_transient + 2])
+            enc.enc_bit_logp(0, 1);  // tf_select = 0
+        for (int i = 0; i < kNbEBands; i++)
+            tf_res[i] = kTfSel[lm][4 * is_transient + 0];
     }
 
     tell = static_cast<int32_t>(enc.tell());
@@ -255,9 +350,13 @@ int CeltEncoder::encode_frame(const float* pcm, int frame_size,
         (total_bits << kBitRes))
         enc.enc_icdf(alloc_trim, celt::kTrimIcdf, 7);
 
-    // No transient => no anti-collapse reservation.
     int32_t bits = ((static_cast<int32_t>(nbytes) * 8) << kBitRes) -
                    static_cast<int32_t>(enc.tell_frac()) - 1;
+    int anti_collapse_rsv =
+        is_transient && lm >= 2 && bits >= ((lm + 2) << kBitRes)
+            ? 1 << kBitRes
+            : 0;
+    bits -= anti_collapse_rsv;
 
     int pulses[kNbEBands], fine_quant[kNbEBands], fine_priority[kNbEBands];
     int intensity = end;  // no intensity stereo
@@ -273,18 +372,26 @@ int CeltEncoder::encode_frame(const float* pcm, int frame_size,
                       enc, C);
 
     uint8_t collapse_masks[2 * kNbEBands];
-    int tf_res[kNbEBands] = { 0 };
     uint32_t seed = 0;
     quant_all_bands_enc(start, end, x_norm, C == 2 ? x_norm + n : nullptr,
-                        collapse_masks, band_e, pulses, /*short_blocks=*/0,
+                        collapse_masks, band_e, pulses, short_blocks,
                         spread, dual_stereo, intensity, tf_res,
-                        (static_cast<int32_t>(nbytes) * 8) << kBitRes,
+                        ((static_cast<int32_t>(nbytes) * 8) << kBitRes) -
+                            anti_collapse_rsv,
                         balance, enc, lm, coded_bands, &seed);
+
+    if (anti_collapse_rsv > 0)
+        enc.enc_bits(consec_transient_ < 2 ? 1u : 0u, 1);
 
     quant_energy_finalise(start, end, old_ebands_, energy_error_,
                           fine_quant, fine_priority,
                           nbytes * 8 - static_cast<int>(enc.tell()), enc,
                           C);
+
+    if (is_transient)
+        consec_transient_++;
+    else
+        consec_transient_ = 0;
 
     final_range_ = enc.range();
     enc.done();

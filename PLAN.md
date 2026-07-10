@@ -1676,3 +1676,37 @@ short blocks (the band encoder already passes its byte-exact gate WITH
 transients; only the top-level analysis + short-MDCT + anti-collapse
 bit are missing). Note: enc prefilter and dec postfilter fades are
 offset by one short-MDCT by design — the synthesis delay aligns them.
+
+## O4 quality item 2 (2026-07-10): transients + short blocks — done
+
+Encoder: transient_analysis (reference float detector: HP filter
+(1-2z^-1+z^-2)/(1-z^-1+.5z^-2), forward 0.0625 / backward 0.875-0.125
+masking decay, inv-table harmonic-mean metric > 200), short-block
+forward MDCT (M interleaved 120-pt transforms, shift=3, stride M),
+transient wire bit, tf_encode transient logps (2/4), anti-collapse
+reservation (lm>=2) + bit (consec_transient_ < 2), bands called with
+short_blocks and the rsv-adjusted budget.
+
+**The hard-won bug — tf_res must be REMAPPED, not just encoded.** The
+reference's tf_encode ends with tf_res[i] =
+tf_select_table[LM][4*isTransient+2*tf_select+tf_res[i]]; the decoder
+derives tf_res = 1/2/3 (lm=1/2/3) on transient frames even when the
+raw bits are all zero. Feeding quant_all_bands the raw zeros desyncs
+the band recombine/theta symbols: streams stay VALID (libopus certifies
+the ranges, both decoders agree — they share the decoded
+interpretation) but transient frames decode as garbage. Gate signature:
+"ranges ok, decoders agree, SNR -6..-13 dB". When ranges pass but
+quality craters, suspect an encoder-internal desync between the
+analysis passed to the band coder and what the decoder will derive
+from the wire. Also: the tell+3 budget gate must be decided BEFORE the
+MDCT (flag, interleave and tf derivation must agree).
+
+Measured (castanets 60s stereo, NMR from tests/measure_audio.py):
+96k mean NMR 22.8 -> 20.1 (p95 10.9 -> 9.5); 192k mean 8.4 -> 4.8
+(p95 -1.9 -> -2.5, audible 4.3% -> 3.8%). SNR cost -0.1/-0.2 dB (by
+design; judge transient work by NMR, not SNR). Piano unchanged
+(19.1/24.6 — its gap is tonal-resolution, not pre-echo). Detector
+fires 172/1000 castanets frames, 102/3000 piano, 1/100 gate-signal.
+libopus castanets NMR (3.8 / -4.7) still ahead: that gap = tf_analysis
+(per-band TF resolution), dynalloc, trim analysis -> next items.
+GLINT_DBG_TRANSIENT=1 traces per-frame decisions.
