@@ -24,9 +24,22 @@ constexpr float kPreemphCoef = 0.85f;
 constexpr int kSpreadNormal = 2;
 constexpr int kCombFilterMinPeriodEnc = 15;
 
+// tf_select_table (RFC 6716): per-LM effective tf resolution for
+// [4*isTransient + 2*tf_select + tf_res]. Shared by tf_analysis,
+// tf_encode and the post-encode remap that quant_all_bands consumes.
+const signed char kTfSelectTable[4][8] = {
+    { 0, -1, 0, -1, 0, -1, 0, -1 },
+    { 0, -1, 0, -2, 1, 0, 1, -1 },
+    { 0, -2, 0, -3, 2, 0, 1, -1 },
+    { 0, -2, 0, -3, 3, 0, 1, -1 },
+};
+
 // Forward/backward-masking transient detector (reference float path).
 // Pure encoder policy: the decision changes quality, never validity.
-int transient_analysis(const double* in, int len, int C) {
+// Also produces tf_estimate (transient strength, feeds the tf_analysis
+// bias) and tf_chan (the channel that tripped the metric).
+int transient_analysis(const double* in, int len, int C,
+                       double* tf_estimate, int* tf_chan) {
     // 6*64/x lookup, reference-trained.
     static const uint8_t kInvTable[128] = {
         255, 255, 156, 110, 86, 70, 59, 51, 45, 40, 37, 33, 31, 28, 26, 25,
@@ -82,12 +95,171 @@ int transient_analysis(const double* in, int len, int C) {
             unmask += kInvTable[id];
         }
         unmask = 64 * unmask * 4 / (6 * (len2 - 17));
-        if (unmask > mask_metric) mask_metric = unmask;
+        if (unmask > mask_metric) {
+            *tf_chan = c;
+            mask_metric = unmask;
+        }
     }
+    double tf_max =
+        std::max(0.0, std::sqrt(27.0 * mask_metric) - 42.0);
+    *tf_estimate = std::sqrt(
+        std::max(0.0, 0.0069 * std::min(163.0, tf_max) - 0.139));
     return mask_metric > 200;
 }
+
 inline int imin(int a, int b) { return a < b ? a : b; }
 inline int imax(int a, int b) { return a > b ? a : b; }
+
+// Local float Haar butterfly (the enc_bands copy is TU-private).
+void haar1f(float* x, int n0, int stride) {
+    n0 >>= 1;
+    for (int i = 0; i < stride; i++) {
+        for (int j = 0; j < n0; j++) {
+            float tmp1 = 0.70710678f * x[stride * 2 * j + i];
+            float tmp2 = 0.70710678f * x[stride * (2 * j + 1) + i];
+            x[stride * 2 * j + i] = tmp1 + tmp2;
+            x[stride * (2 * j + 1) + i] = tmp1 - tmp2;
+        }
+    }
+}
+
+// L1 norm with a bias toward frequency resolution when in doubt.
+double l1_metric(const float* tmp, int n, int lm, double bias) {
+    double l1 = 0;
+    for (int i = 0; i < n; i++) l1 += std::fabs(tmp[i]);
+    return l1 + lm * bias * l1;
+}
+
+// Per-band time-frequency resolution analysis (reference tf_analysis):
+// L1-sparsity of each band under successive Haar merges/splits picks a
+// per-band metric; a Viterbi pass with switching cost lambda smooths
+// the change bits; tf_select picks the better of the two table halves.
+// Policy-only: any tf_res is a valid stream.
+int tf_analysis(int len, int is_transient, int* tf_res, int lambda,
+                const float* X, int n0, int lm, double tf_estimate,
+                int tf_chan, const int* importance) {
+    // 176 = widest band (22) << max LM (3).
+    float tmp[176], tmp_1[176];
+    int metric[kNbEBands], path0[kNbEBands], path1[kNbEBands];
+    double bias = 0.04 * std::max(-0.25, 0.5 - tf_estimate);
+
+    for (int i = 0; i < len; i++) {
+        int N = (kEBands[i + 1] - kEBands[i]) << lm;
+        // Band too narrow to be split down to LM=-1.
+        int narrow = (kEBands[i + 1] - kEBands[i]) == 1;
+        std::memcpy(tmp, &X[tf_chan * n0 + (kEBands[i] << lm)],
+                    N * sizeof(float));
+        double L1 = l1_metric(tmp, N, is_transient ? lm : 0, bias);
+        double best_L1 = L1;
+        int best_level = 0;
+        // The -1 case (extra merge) for transients.
+        if (is_transient && !narrow) {
+            std::memcpy(tmp_1, tmp, N * sizeof(float));
+            haar1f(tmp_1, N >> lm, 1 << lm);
+            L1 = l1_metric(tmp_1, N, lm + 1, bias);
+            if (L1 < best_L1) {
+                best_L1 = L1;
+                best_level = -1;
+            }
+        }
+        for (int k = 0; k < lm + !(is_transient || narrow); k++) {
+            int B = is_transient ? lm - k - 1 : k + 1;
+            haar1f(tmp, N >> k, 1 << k);
+            L1 = l1_metric(tmp, N, B, bias);
+            if (L1 < best_L1) {
+                best_L1 = L1;
+                best_level = k + 1;
+            }
+        }
+        // Q1 metric so narrow bands can sit on the half-way point.
+        metric[i] = is_transient ? 2 * best_level : -2 * best_level;
+        if (narrow && (metric[i] == 0 || metric[i] == -2 * lm))
+            metric[i] -= 1;
+    }
+
+    // Try both tf_select settings.
+    int selcost[2];
+    for (int sel = 0; sel < 2; sel++) {
+        int cost0 =
+            importance[0] *
+            std::abs(metric[0] -
+                     2 * kTfSelectTable[lm][4 * is_transient + 2 * sel]);
+        int cost1 =
+            importance[0] *
+                std::abs(
+                    metric[0] -
+                    2 * kTfSelectTable[lm][4 * is_transient + 2 * sel + 1]) +
+            (is_transient ? 0 : lambda);
+        for (int i = 1; i < len; i++) {
+            int curr0 = imin(cost0, cost1 + lambda);
+            int curr1 = imin(cost0 + lambda, cost1);
+            cost0 = curr0 +
+                    importance[i] *
+                        std::abs(metric[i] -
+                                 2 * kTfSelectTable[lm]
+                                                   [4 * is_transient +
+                                                    2 * sel]);
+            cost1 = curr1 +
+                    importance[i] *
+                        std::abs(metric[i] -
+                                 2 * kTfSelectTable[lm]
+                                                   [4 * is_transient +
+                                                    2 * sel + 1]);
+        }
+        selcost[sel] = imin(cost0, cost1);
+    }
+    // Conservative: tf_select=1 only for transients (reference policy).
+    int tf_select = (selcost[1] < selcost[0] && is_transient) ? 1 : 0;
+
+    // Viterbi forward pass.
+    int cost0 =
+        importance[0] *
+        std::abs(metric[0] -
+                 2 * kTfSelectTable[lm][4 * is_transient + 2 * tf_select]);
+    int cost1 =
+        importance[0] *
+            std::abs(metric[0] -
+                     2 * kTfSelectTable[lm]
+                                       [4 * is_transient + 2 * tf_select +
+                                        1]) +
+        (is_transient ? 0 : lambda);
+    for (int i = 1; i < len; i++) {
+        int from0 = cost0, from1 = cost1 + lambda;
+        int curr0;
+        if (from0 < from1) {
+            curr0 = from0;
+            path0[i] = 0;
+        } else {
+            curr0 = from1;
+            path0[i] = 1;
+        }
+        from0 = cost0 + lambda;
+        from1 = cost1;
+        int curr1;
+        if (from0 < from1) {
+            curr1 = from0;
+            path1[i] = 0;
+        } else {
+            curr1 = from1;
+            path1[i] = 1;
+        }
+        cost0 = curr0 +
+                importance[i] *
+                    std::abs(metric[i] -
+                             2 * kTfSelectTable[lm][4 * is_transient +
+                                                    2 * tf_select]);
+        cost1 = curr1 +
+                importance[i] *
+                    std::abs(metric[i] -
+                             2 * kTfSelectTable[lm][4 * is_transient +
+                                                    2 * tf_select + 1]);
+    }
+    tf_res[len - 1] = cost0 < cost1 ? 0 : 1;
+    // Backward pass.
+    for (int i = len - 2; i >= 0; i--)
+        tf_res[i] = tf_res[i + 1] == 1 ? path1[i + 1] : path0[i + 1];
+    return tf_select;
+}
 }  // namespace
 
 void CeltEncoder::init(int channels) {
@@ -221,8 +393,12 @@ int CeltEncoder::encode_frame(const float* pcm, int frame_size,
     // Gate on the bit budget BEFORE the MDCT: the flag on the wire, the
     // transform interleave and the decoder's tf_res derivation must all
     // agree, so is_transient may never change after this point.
+    double tf_estimate = 0;
+    int tf_chan = 0;
     int is_transient =
-        lm > 0 ? transient_analysis(&in[0][0], n + kOverlap, C) : 0;
+        lm > 0 ? transient_analysis(&in[0][0], n + kOverlap, C,
+                                    &tf_estimate, &tf_chan)
+               : 0;
     if (!(lm > 0 && static_cast<int32_t>(enc.tell()) + 3 <= total_bits))
         is_transient = 0;
     if (std::getenv("GLINT_DBG_TRANSIENT"))
@@ -251,6 +427,21 @@ int CeltEncoder::encode_frame(const float* pcm, int frame_size,
     compute_band_energies(X, band_e, end, C, lm);
     amp2Log2(end, end, band_e, band_log_e, C);
     normalise_bands(X, x_norm, band_e, end, C, m);
+
+    // Per-band TF resolution (quality item 3). Uniform importance until
+    // dynalloc_analysis lands (reference lfe fallback value 13). At very
+    // small frames the analysis is disabled, like the reference.
+    int tf_res[kNbEBands];
+    int tf_select = 0;
+    if (nbytes >= 15 * C) {
+        int importance[kNbEBands];
+        for (int i = 0; i < kNbEBands; i++) importance[i] = 13;
+        int lambda = imax(80, 20480 / nbytes + 2);
+        tf_select = tf_analysis(end, is_transient, tf_res, lambda, x_norm,
+                                n, lm, tf_estimate, tf_chan, importance);
+    } else {
+        for (int i = 0; i < end; i++) tf_res[i] = is_transient;
+    }
 
     // ---- Symbol sequence (mirrors the conformant decoder) ----
     int32_t tell = static_cast<int32_t>(enc.tell());
@@ -287,39 +478,40 @@ int CeltEncoder::encode_frame(const float* pcm, int frame_size,
                         &delayed_intra_, /*two_pass=*/1, /*loss_rate=*/0,
                         /*lfe=*/0);
 
-    // tf_encode with all-zero raw tf_res: per-band change bits where the
-    // budget allows, plus the select bit when the two table halves
-    // disagree for tf_changed == 0 (they do on transient LM>=2). After
-    // encoding, tf_res is remapped through the select table EXACTLY as
-    // the decoder's tf_decode does — quant_all_bands must see the same
-    // per-band tf resolution the decoder will derive, or the band
-    // symbols desync (valid wire, garbage audio).
-    int tf_res[kNbEBands];
+    // tf_encode: XOR-delta-code the per-band change bits where the
+    // budget allows, then the select bit when it would actually change
+    // the decode. After encoding, tf_res is remapped through the select
+    // table EXACTLY as the decoder's tf_decode does — quant_all_bands
+    // must see the same per-band tf resolution the decoder will derive,
+    // or the band symbols desync (valid wire, garbage audio).
     {
-        static const signed char kTfSel[4][8] = {
-            { 0, -1, 0, -1, 0, -1, 0, -1 },
-            { 0, -1, 0, -2, 1, 0, 1, -1 },
-            { 0, -2, 0, -3, 2, 0, 1, -1 },
-            { 0, -2, 0, -3, 3, 0, 1, -1 },
-        };
         uint32_t budget = static_cast<uint32_t>(total_bits);
         uint32_t tf_tell = enc.tell();
         int logp = is_transient ? 2 : 4;
         uint32_t tf_select_rsv = lm > 0 && tf_tell + logp + 1 <= budget;
         budget -= tf_select_rsv;
+        int curr = 0, tf_changed = 0;
         for (int i = start; i < end; i++) {
             if (tf_tell + logp <= budget) {
-                enc.enc_bit_logp(0, static_cast<unsigned>(logp));
+                enc.enc_bit_logp(tf_res[i] ^ curr,
+                                 static_cast<unsigned>(logp));
                 tf_tell = enc.tell();
+                curr = tf_res[i];
+                tf_changed |= curr;
+            } else {
+                tf_res[i] = curr;
             }
             logp = is_transient ? 4 : 5;
         }
         if (tf_select_rsv &&
-            kTfSel[lm][4 * is_transient + 0] !=
-                kTfSel[lm][4 * is_transient + 2])
-            enc.enc_bit_logp(0, 1);  // tf_select = 0
-        for (int i = 0; i < kNbEBands; i++)
-            tf_res[i] = kTfSel[lm][4 * is_transient + 0];
+            kTfSelectTable[lm][4 * is_transient + tf_changed] !=
+                kTfSelectTable[lm][4 * is_transient + 2 + tf_changed])
+            enc.enc_bit_logp(static_cast<unsigned>(tf_select), 1);
+        else
+            tf_select = 0;
+        for (int i = start; i < end; i++)
+            tf_res[i] = kTfSelectTable[lm][4 * is_transient +
+                                           2 * tf_select + tf_res[i]];
     }
 
     tell = static_cast<int32_t>(enc.tell());

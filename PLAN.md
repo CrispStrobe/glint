@@ -1710,3 +1710,25 @@ fires 172/1000 castanets frames, 102/3000 piano, 1/100 gate-signal.
 libopus castanets NMR (3.8 / -4.7) still ahead: that gap = tf_analysis
 (per-band TF resolution), dynalloc, trim analysis -> next items.
 GLINT_DBG_TRANSIENT=1 traces per-frame decisions.
+
+## O4 quality item 3 (2026-07-10): tf_analysis (per-band TF resolution) — done
+
+Reference port: transient_analysis now also outputs tf_estimate
+(sqrt(max(0, .0069*min(163,tf_max)-.139))) and tf_chan; tf_analysis =
+per-band L1-sparsity of Haar merge/split ladders (bias .04*max(-.25,
+.5-tf_estimate), narrow-band half-point metric) + 2x selcost pass +
+Viterbi smoothing with lambda = max(80, 20480/nbytes+2); tf_encode now
+XOR-delta codes the REAL tf_res with the tf_changed-aware select-bit
+condition, then remaps through tf_select_table (the item-2 lesson,
+now exercised on both halves). Importance is uniform 13 (the
+reference's lfe fallback) until dynalloc_analysis lands. Disabled below
+15 bytes/channel like the reference.
+
+Measured (delay-aligned SNR + NMR, 60s stereo): **castanets 96k mean
+NMR 20.1 -> 2.2 (p95 9.5 -> 0.5, audible 8.7 -> 5.2%) — now AHEAD of
+libopus (3.8); 192k 4.8 -> -8.2 (libopus -4.7), audible 3.8 -> 1.3%.**
+SNR also up: 4.3 -> 4.9 / 12.4 -> 13.0 (libopus 5.0/13.0). Piano
+19.1/24.6 unchanged (its gap is tonal resolution -> dynalloc/trim
+next); electronic +0.2/+0.4 dB; quartet hold. Gate 8/8, all streams
+libopus-range-certified. TF was the missing half of transient coding:
+short blocks alone bought ~3 dB NMR, TF bought the next ~18.
