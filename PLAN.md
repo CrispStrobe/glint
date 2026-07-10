@@ -1793,3 +1793,26 @@ the decision is genuinely active (quartet 60% AGGRESSIVE, electronic
 moves our metrics; it should matter for ODG/listening on sparse tonal
 content. Gate 8/8. Remaining O4: intensity stereo, VBR, ODG league
 (compare_encoders --codec opus), listening-pack refresh.
+
+## O4 quality item 7 (2026-07-10): intensity + dual-stereo decisions — done
+
+stereo_analysis (L1 entropy of L/R vs M/S over the first 13 bands,
+0.707107 M/S scale, theta-cost handicap (eBands[13]<<(LM+1))+13 (-8 at
+LM<=1); dual_stereo forced 0 at LM=0) + intensity via
+hysteresis_decision(equiv_rate/1000) over the reference 21-entry
+threshold/hysteresis tables, clamped [start,end], persistent
+intensity_ state. Both flags are wire-coded by compute_allocation (the
+machinery was already conformant); alloc_trim_analysis now gets the
+real intensity for its minXC loop. equiv_rate hoisted for both uses.
+
+Measured: piano SNR 21.7 -> 22.4 (96k) / 27.7 -> 28.5 (192k) AND NMR
+better (mean -3.89 -> -4.25, audible 10.6 -> 9.1%; 192k audible 0.1 ->
+0.0%) — dual_stereo fires on piano where L/R is sparser than M/S.
+**Piano gap vs libopus now -0.5 dB (was -4.4 at the campaign start).**
+Quartet -0.2 SNR / NMR flat; electronic/castanets flat. Gate 8/8.
+At 96k stereo equiv_rate=96 -> intensity band 19 (top two bands
+intensity-coded); 192k -> 21 = off.
+
+O4 remaining: VBR, ODG league (compare_encoders --codec opus),
+listening-pack refresh. Then O5 polish (FEC, multistream, 24k out,
+OPUS_SET_GAIN).

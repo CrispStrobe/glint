@@ -446,6 +446,39 @@ void dynalloc_analysis(const float* band_log_e, const float* band_log_e2,
     }
 }
 
+// Stepped hysteresis: which threshold bucket val falls in, sticky
+// around the previous decision (reference bands.c).
+int hysteresis_decision(float val, const float* thresholds,
+                        const float* hysteresis, int N, int prev) {
+    int i;
+    for (i = 0; i < N; i++)
+        if (val < thresholds[i]) break;
+    if (i > prev && val < thresholds[prev] + hysteresis[prev]) i = prev;
+    if (i < prev && val > thresholds[prev - 1] - hysteresis[prev - 1])
+        i = prev;
+    return i;
+}
+
+// L1-entropy model of L/R vs M/S over the first 13 bands: decide
+// dual_stereo (code channels separately) when L/R is sparser than M/S
+// after accounting for the theta signalling cost. Reference
+// stereo_analysis; policy-only (the allocator wire-codes the flag).
+int stereo_analysis(const float* X, int lm, int n0) {
+    double sum_lr = 1e-15, sum_ms = 1e-15;
+    for (int i = 0; i < 13; i++) {
+        for (int j = kEBands[i] << lm; j < kEBands[i + 1] << lm; j++) {
+            double L = X[j], R = X[n0 + j];
+            sum_lr += std::fabs(L) + std::fabs(R);
+            sum_ms += std::fabs(L + R) + std::fabs(L - R);
+        }
+    }
+    sum_ms *= 0.707107;
+    int thetas = 13;
+    if (lm <= 1) thetas -= 8;  // no thetas for low bands at LM<=1
+    return ((kEBands[13] << (lm + 1)) + thetas) * sum_ms >
+           (kEBands[13] << (lm + 1)) * sum_lr;
+}
+
 // Spreading (rotation) decision from band-coefficient sparsity: a rough
 // CDF of |x|^2*N per band, tonality-weighted by spread_weight, with a
 // recursive average and hysteresis vs the previous decision. Also
@@ -570,6 +603,7 @@ void CeltEncoder::init(int channels) {
     hf_average_ = 0;
     tapset_decision_ = 0;
     spread_decision_ = kSpreadNormal;
+    intensity_ = 0;
     mdct_window_fill(window_, kOverlap);
 }
 
@@ -892,18 +926,39 @@ int CeltEncoder::encode_frame(const float* pcm, int frame_size,
         }
     }
 
+    // equiv_rate: 20ms-equivalent bits/s (shorter frames discount their
+    // fixed per-frame overhead, like the reference).
+    int32_t equiv_rate =
+        ((static_cast<int32_t>(nbytes) * 8 * 50) >> (3 - lm)) -
+        (40 * C + 20) * ((400 >> lm) - 50);
+
+    // Intensity + dual-stereo decisions (the allocator wire-codes both).
+    int dual_stereo = 0;
+    if (C == 2) {
+        static const float kIntensityThresholds[21] = {
+            1,  2,  3,  4,  5,  6,  7,  8,  16, 24, 36,
+            44, 50, 56, 62, 67, 72, 79, 88, 106, 134
+        };
+        static const float kIntensityHisteresis[21] = {
+            1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 3, 3, 4, 5, 6, 8, 8
+        };
+        // Always M/S for 2.5 ms frames (no analysis at LM=0).
+        if (lm != 0) dual_stereo = stereo_analysis(x_norm, lm, n);
+        intensity_ = hysteresis_decision(
+            static_cast<float>(equiv_rate / 1000), kIntensityThresholds,
+            kIntensityHisteresis, 21, intensity_);
+        intensity_ = imin(end, imax(start, intensity_));
+    }
+    int intensity = C == 2 ? intensity_ : end;
+
     // Trim: analyzed when the budget (net of dynalloc boosts) allows
     // the symbol, else the decoder-side default 5.
     int alloc_trim = 5;
     if (static_cast<int32_t>(enc.tell_frac()) + (6 << kBitRes) <=
         (total_bits << kBitRes) - total_boost) {
-        // equiv_rate: 20ms-equivalent bits/s (shorter frames discount
-        // their fixed per-frame overhead, like the reference).
-        int32_t equiv_rate =
-            ((static_cast<int32_t>(nbytes) * 8 * 50) >> (3 - lm)) -
-            (40 * C + 20) * ((400 >> lm) - 50);
-        alloc_trim = alloc_trim_analysis(x_norm, band_log_e, end, lm, C,
-                                         n, tf_estimate, end, equiv_rate);
+        alloc_trim =
+            alloc_trim_analysis(x_norm, band_log_e, end, lm, C, n,
+                                tf_estimate, intensity, equiv_rate);
         enc.enc_icdf(alloc_trim, celt::kTrimIcdf, 7);
     }
 
@@ -916,8 +971,6 @@ int CeltEncoder::encode_frame(const float* pcm, int frame_size,
     bits -= anti_collapse_rsv;
 
     int pulses[kNbEBands], fine_quant[kNbEBands], fine_priority[kNbEBands];
-    int intensity = end;  // no intensity stereo
-    int dual_stereo = 0;
     int32_t balance = 0;
     int coded_bands = compute_allocation_enc(
         start, end, offsets, cap, alloc_trim, &intensity, &dual_stereo,

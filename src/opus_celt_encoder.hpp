@@ -58,6 +58,7 @@ private:
     int hf_average_ = 0;
     int tapset_decision_ = 0;
     int spread_decision_ = 2;  // SPREAD_NORMAL
+    int intensity_ = 0;
     float old_ebands_[2 * 21] = {};
     float energy_error_[2 * 21] = {};
     float delayed_intra_ = 1.0f;
