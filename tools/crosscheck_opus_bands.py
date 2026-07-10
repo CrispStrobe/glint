@@ -35,7 +35,8 @@ def main():
     cxx = os.environ.get("CXX", "c++")
     srcs = ["opus_ec.cpp", "opus_laplace.cpp", "opus_cwrs.cpp",
             "opus_celt_energy.cpp", "opus_celt_rate.cpp",
-            "opus_celt_bands.cpp"]
+            "opus_celt_bands.cpp", "opus_celt_enc_bands.cpp",
+            "opus_celt_enc_vq.cpp"]
     with tempfile.TemporaryDirectory() as tmp:
         ref_bin = os.path.join(tmp, "bands_ref")
         glint_bin = os.path.join(tmp, "bands_glint")
@@ -72,8 +73,10 @@ def main():
             max_delta = max(max_delta, d)
             if d > TOL:
                 sys.exit(f"FAIL (spectrum) line {ln}: {sa} vs {sb}")
+    nenc = sum(1 for l in ref_lines if l.startswith("encb"))
     print(f"PASS: band decode matches libopus over 150 fuzzed frames "
-          f"(masks/seeds/tells exact, max spectrum delta {max_delta:.2e})")
+          f"(masks/seeds/tells exact, max spectrum delta {max_delta:.2e}); "
+          f"band ENCODE byte-identical over {nenc} fuzzed frames")
     return 0
 
 

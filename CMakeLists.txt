@@ -51,6 +51,7 @@ set(GLINT_SOURCES
     src/opus_ogg.cpp
     src/opus_celt_enc_energy.cpp
     src/opus_celt_enc_vq.cpp
+    src/opus_celt_enc_bands.cpp
     src/opus_silk_excitation.cpp
     src/opus_silk_indices.cpp
     src/opus_silk_nlsf.cpp
