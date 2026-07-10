@@ -1346,3 +1346,18 @@ NLSF_decode + NLSF2A chain (agent-suitable, isolated), gains dequant,
 decode_parameters, decode_core (LPC/LTP synthesis — studied, see survey),
 decode_frame + silk_Decode + stereo + resamplers, then hybrid + PLC +
 RFC test vectors.
+
+## O2 progress 3 (2026-07-10): side-info decode + gains + pitch lags DONE
+
+opus_silk_indices.{hpp,cpp}: DecoderState (set_fs derives subframe/frame/
+ltp-mem lengths, per-rate pitch iCDFs, NLSF codebook + LPC order),
+SideInfoIndices (ZERO-INIT matters: fields not decoded for a frame type
+persist, mirroring the reference state — the fuzz gate caught stale
+garbage immediately), decode_indices (types, gains MSB+LSB / delta, two-
+stage NLSF indices with rail escapes, interp factor, pitch abs/delta +
+contour, LTP per-index + per-subframe + scaling, seed), nlsf_unpack,
+gains_dequant (chain-limited, double-step escape, log2lin), decode_pitch
+(contour codebooks, clamped). Gate: tools/crosscheck_opus_silk_indices.py
+— 400 fuzzed sequences x 3 chained frames (cond coding, prev lag/type
+carry), byte-identical incl. tells. NLSF chain (dequant/stabilize/NLSF2A)
+in flight with its own gate.

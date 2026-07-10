@@ -49,6 +49,7 @@ set(GLINT_SOURCES
     src/opus_decoder.cpp
     src/opus_mdct.cpp
     src/opus_silk_excitation.cpp
+    src/opus_silk_indices.cpp
 )
 
 # Static library
