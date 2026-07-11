@@ -2131,3 +2131,49 @@ positions) and the gate checks glint == ffmpeg on 5 variants
 (whole-spectrum + mid-band bounds, MS+IS combined, is_pos=7 fallback)
 at ~126 dB. Gate is now 19/19. Next: D2 AAC-LC decoder, then C ABI +
 wrappers for both.
+
+## D2 AAC-LC decoder — done (2026-07-11)
+
+src/aac_decoder.{hpp,cpp}: full ADTS AAC-LC decoder. ADTS parse,
+raw_data_block (SCE/CPE/FIL/END), ics_info (all 4 window sequences +
+short grouping), section_data, scale_factor_data (three interleaved
+DPCM chains: normal / intensity positions / PNS noise energies), TNS
+data, spectral Huffman (books 1-11 via runtime trees from the ENCODER's
+code tables, book-11 escape), inverse quant (|ix|^4/3 * 2^(0.25(sf-100))),
+PNS (book 13, decoder-random noise normalized to band energy),
+intensity stereo (books 14/15), M/S, TNS synthesis (all-pole inverse of
+the encoder's forward FIR), and the IMDCT/window/overlap-add for long,
+start, eight-short and stop sequences. Output normalized 1/32768 to +-1
+(the encoder works in int16 PCM scale — the first smoke test showed the
+exact 32768x ratio, same tell as MP3's 32x).
+
+Gate: tools/test_aac_decoder.py (ctest: aac_decoder_vs_ffmpeg), two
+tiers because AAC PNS samples are decoder-random by design:
+- **glint roundtrip** (glint never emits PNS/IS): SNR vs ffmpeg,
+  excluding 2 warm-up + 6 flush-tail frames (the encoder-flush tail's
+  exact reconstruction is flush-dependent). **noise/short-heavy 134.9
+  dB, stereo tonal 109.8, mono 94.1, transient 86.4** — essentially
+  bit-accurate across long/start/short/stop, M/S and TNS.
+- **foreign streams** (ffmpeg / fdkaac / afconvert, which DO use PNS):
+  zero decode errors + mean-log-magnitude-spectrum correlation
+  (0.95/0.999/0.995 — PNS preserves per-band energy so the time-
+  averaged spectrum matches) + a loose total-energy ratio (0.4-2.5;
+  FDK lands at 1.85 — a decoder-defined PNS-energy-convention
+  difference, not a structural bug: its spectrum correlates at 0.994).
+
+Hard-won details:
+- ffmpeg/fdk/apple emit PNS (book 13) and all window sequences even on
+  simple content; glint's own encoder uses books 1-11 only, so the
+  roundtrip tier is the precision oracle and foreign streams validate
+  structure under PNS randomness.
+- M/S flags are in the CPE ELEMENT header (right after ms_mask_present),
+  BEFORE the two channel bodies — not after. Decode order undoes M/S
+  before TNS (encoder did TNS on L/R then M/S) and before intensity
+  (right IS band = sign * 2^(0.25*is_pos) * left, sign from book
+  15/14 flipped by M/S).
+- Per-frame SNR localizes edge effects: 137 dB steady, one bad tail
+  frame dominated the naive global SNR (5 dB) until the flush tail was
+  excluded.
+
+Next: C ABI (glint_mp3_dec_* / glint_aac_dec_*) + Python/Rust/Dart
+wrappers, mirroring the Opus decoder pattern.

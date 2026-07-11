@@ -50,6 +50,7 @@ set(GLINT_SOURCES
     src/opus_ms_decoder.cpp
     src/opus_c_api.cpp
     src/mp3_decoder.cpp
+    src/aac_decoder.cpp
     src/opus_mdct.cpp
     src/opus_ogg.cpp
     src/opus_celt_enc_energy.cpp
@@ -135,6 +136,12 @@ if(Python3_FOUND)
         add_test(NAME mp3_decoder_vs_ffmpeg
                  COMMAND ${Python3_EXECUTABLE}
                          ${CMAKE_CURRENT_SOURCE_DIR}/tools/test_mp3_decoder.py
+                         $<TARGET_FILE:glint_cli>)
+        # AAC-LC DECODER gate: glint roundtrip by SNR + foreign (ffmpeg/
+        # fdk/apple) PNS streams by spectral-envelope + energy.
+        add_test(NAME aac_decoder_vs_ffmpeg
+                 COMMAND ${Python3_EXECUTABLE}
+                         ${CMAKE_CURRENT_SOURCE_DIR}/tools/test_aac_decoder.py
                          $<TARGET_FILE:glint_cli>)
     else()
         message(STATUS "m2_decode_quality test skipped (needs python3+numpy and ffmpeg)")
