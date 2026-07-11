@@ -407,6 +407,23 @@ class TestBucketsAB(unittest.TestCase):
         frames = out.shape[0] if hasattr(out, "shape") else len(out) // dch
         self.assertGreater(frames, 40000)
 
+    def test_encode_audio_all_codecs_odd_rate(self):
+        if not hasattr(self.lib, "glint_encode_audio"):
+            self.skipTest("libglint has no one-call encode")
+        # 37 kHz (invalid for MP3/AAC) float PCM -> each codec, decode back.
+        sr, ch, n = 37000, 2, 37000
+        pcm = []
+        for i in range(n):
+            v = 0.4 * math.sin(2 * math.pi * 440 * i / sr)
+            pcm.extend([v] * ch)
+        for codec, want_sr in [("mp3", 32000), ("aac", 32000),
+                               ("opus", 48000)]:
+            data = glint.encode_audio(pcm, ch, sr, codec, bitrate=128)
+            self.assertGreater(len(data), 1000, codec)
+            out, dsr, dch = glint.decode_bytes(data)
+            self.assertEqual(dsr, want_sr, f"{codec} rate")
+            self.assertEqual(dch, 2, f"{codec} channels")
+
     def test_transcode_to_opus(self):
         if not hasattr(self.lib, "glint_opus_encode_file"):
             self.skipTest("libglint has no Opus file encoder")

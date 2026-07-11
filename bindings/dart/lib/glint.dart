@@ -755,6 +755,10 @@ typedef _WavWriteNative = Pointer<Uint8> Function(Pointer<Float>, Int32,
     Int32, Int32, Int32, Int32, Pointer<Int32>);
 typedef _WavWrite = Pointer<Uint8> Function(Pointer<Float>, int, int, int,
     int, int, Pointer<Int32>);
+typedef _EncAudioNative = Pointer<Uint8> Function(Pointer<Float>, Int32,
+    Int32, Int32, Int32, Int32, Int32, Int32, Pointer<Int32>);
+typedef _EncAudio = Pointer<Uint8> Function(Pointer<Float>, int, int, int,
+    int, int, int, int, Pointer<Int32>);
 
 /// Decoded audio: interleaved float PCM plus its stream parameters.
 class GlintDecodedAudio {
@@ -900,6 +904,42 @@ Uint8List glintWriteWav(Float32List pcm, int channels, int sampleRate,
         floatFmt ? 1 : 0, outSize);
     if (ptr == nullptr || outSize.value <= 0) {
       throw StateError('WAV write failed');
+    }
+    final out = Uint8List.fromList(ptr.asTypedList(outSize.value));
+    free(ptr.cast<Void>());
+    return out;
+  } finally {
+    calloc.free(inPtr);
+    calloc.free(outSize);
+  }
+}
+
+/// Output codec for [glintEncodeAudio].
+enum GlintCodec { mp3, aac, opus }
+
+/// One-call encode: interleaved float PCM (±1.0) at any rate / 1-2
+/// channels -> a complete MP3 / AAC-LC / Ogg-Opus stream. The input is
+/// auto-resampled to a codec-valid rate (Opus->48k, MP3/AAC->nearest
+/// supported). [bitrate] in kbps; [vbrQuality] 0..9 selects VBR.
+Uint8List glintEncodeAudio(Float32List pcm, int channels, int sampleRate,
+    GlintCodec codec,
+    {int bitrate = 128, int? vbrQuality, int quality = 1}) {
+  if (channels < 1 || channels > 2 || pcm.isEmpty) {
+    throw StateError('encode: bad channels/empty input');
+  }
+  final lib = _loadLibrary();
+  final fn = lib.lookupFunction<_EncAudioNative, _EncAudio>(
+      'glint_encode_audio');
+  final free = lib.lookupFunction<_FreeNative, _Free>('glint_free');
+  final inPtr = calloc<Float>(pcm.length);
+  inPtr.asTypedList(pcm.length).setAll(0, pcm);
+  final outSize = calloc<Int32>();
+  try {
+    final frames = pcm.length ~/ channels;
+    final ptr = fn(inPtr, frames, channels, sampleRate, codec.index, bitrate,
+        vbrQuality ?? -1, quality, outSize);
+    if (ptr == nullptr || outSize.value <= 0) {
+      throw StateError('encode failed');
     }
     final out = Uint8List.fromList(ptr.asTypedList(outSize.value));
     free(ptr.cast<Void>());

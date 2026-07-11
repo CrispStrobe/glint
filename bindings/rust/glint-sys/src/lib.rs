@@ -167,6 +167,17 @@ extern "C" {
         is_float: c_int,
         out_size: *mut c_int,
     ) -> *mut u8;
+    pub fn glint_encode_audio(
+        pcm: *const f32,
+        frames: c_int,
+        channels: c_int,
+        sample_rate: c_int,
+        format: c_int,
+        bitrate_kbps: c_int,
+        vbr_quality: c_int,
+        quality: c_int,
+        out_size: *mut c_int,
+    ) -> *mut u8;
 }
 
 #[repr(C)]

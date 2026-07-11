@@ -650,6 +650,42 @@ pub fn encode_opus_file(pcm: &[f32], channels: u32, bitrate_bps: u32,
     Some(data)
 }
 
+/// Output codec for [`encode_audio`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Codec {
+    Mp3 = 0,
+    Aac = 1,
+    Opus = 2,
+}
+
+/// One-call encode: interleaved f32 PCM (±1.0) at any rate / 1-2 channels
+/// -> a complete MP3 / AAC-LC / Ogg-Opus stream. The input is auto-
+/// resampled to a codec-valid rate (Opus->48k, MP3/AAC->nearest
+/// supported). `bitrate_kbps` is the CBR/target rate; `vbr_quality`
+/// Some(0..9) selects VBR. Returns `None` on error.
+pub fn encode_audio(pcm: &[f32], channels: u32, sample_rate: u32,
+    codec: Codec, bitrate_kbps: u32, vbr_quality: Option<u32>,
+    quality: u32) -> Option<Vec<u8>> {
+    if channels == 0 || channels > 2 || pcm.is_empty() {
+        return None;
+    }
+    let frames = pcm.len() as i32 / channels as i32;
+    let mut out_size: core::ffi::c_int = 0;
+    let ptr = unsafe {
+        glint_sys::glint_encode_audio(pcm.as_ptr(), frames, channels as i32,
+            sample_rate as i32, codec as i32, bitrate_kbps as i32,
+            vbr_quality.map(|q| q as i32).unwrap_or(-1), quality as i32,
+            &mut out_size)
+    };
+    if ptr.is_null() || out_size <= 0 {
+        return None;
+    }
+    let data = unsafe { std::slice::from_raw_parts(ptr, out_size as usize) }
+        .to_vec();
+    unsafe { glint_sys::glint_free(ptr as *mut core::ffi::c_void) };
+    Some(data)
+}
+
 /// Read a WAV buffer (PCM 8/16/24/32, IEEE float 32/64, A-law, mu-law,
 /// EXTENSIBLE) into interleaved f32 PCM. Returns `None` on malformed or
 /// unsupported input.
@@ -759,6 +795,27 @@ mod buckets_ab_tests {
         let d2 = decode_audio(&aac).expect("aac decodes");
         assert_eq!(d2.channels, 2);
         assert!(d2.pcm.len() > 40000, "aac {} samples", d2.pcm.len());
+    }
+
+    #[test]
+    fn encode_audio_all_codecs_odd_rate() {
+        // 37 kHz (invalid for MP3/AAC) sine -> each codec, decode back.
+        let (sr, ch, n) = (37000u32, 2usize, 37000usize);
+        let mut pcm = vec![0f32; n * ch];
+        for i in 0..n {
+            let v = 0.4 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / sr as f32).sin();
+            pcm[i * 2] = v;
+            pcm[i * 2 + 1] = v;
+        }
+        for (codec, want) in [(Codec::Mp3, 32000u32), (Codec::Aac, 32000),
+            (Codec::Opus, 48000)] {
+            let data = encode_audio(&pcm, ch as u32, sr, codec, 128, None, 1)
+                .expect("encode");
+            assert!(data.len() > 1000, "{:?} {}", codec, data.len());
+            let d = decode_audio(&data).expect("decode");
+            assert_eq!(d.sample_rate, want, "{:?} rate", codec);
+            assert_eq!(d.channels, 2, "{:?} ch", codec);
+        }
     }
 
     #[test]

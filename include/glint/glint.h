@@ -167,6 +167,24 @@ float* glint_resample(const float* in, int in_frames, int channels,
                       int sr_in, int sr_out, int* out_frames);
 void   glint_free(void* p);
 
+// Output codec selector for glint_encode_audio.
+enum glint_enc_format {
+    GLINT_ENC_MP3  = 0,
+    GLINT_ENC_AAC  = 1,
+    GLINT_ENC_OPUS = 2,
+};
+
+// One-call encode: interleaved float PCM (±1.0, `frames` per channel, 1-2
+// channels, at `sample_rate`) -> a complete MP3 / AAC-LC / Ogg-Opus
+// stream. The input is auto-resampled to a codec-valid rate (Opus -> 48k;
+// MP3/AAC -> nearest supported rate). bitrate_kbps is the CBR/target rate;
+// vbr_quality 0..9 selects VBR (-1 = CBR); quality is GLINT_QUALITY_*.
+// Returns a malloc'd buffer of *out_size bytes — free with glint_free —
+// or NULL on error.
+uint8_t* glint_encode_audio(const float* pcm, int frames, int channels,
+                            int sample_rate, int format, int bitrate_kbps,
+                            int vbr_quality, int quality, int* out_size);
+
 // Read a WAV file (PCM 8/16/24/32, IEEE float 32/64, A-law, mu-law,
 // WAVE_FORMAT_EXTENSIBLE) into interleaved float PCM (±1.0). Returns a
 // malloc'd buffer of *out_frames*out_ch floats — free with glint_free —

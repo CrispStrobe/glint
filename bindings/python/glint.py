@@ -284,6 +284,10 @@ def _setup_signatures(lib):
             f32p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
             ctypes.c_int, ip]
         lib.glint_wav_write.restype = ctypes.POINTER(ctypes.c_uint8)
+        lib.glint_encode_audio.argtypes = [
+            f32p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int, ip]
+        lib.glint_encode_audio.restype = ctypes.POINTER(ctypes.c_uint8)
     except AttributeError:
         pass
 
@@ -300,6 +304,12 @@ MODE_STEREO = 3
 QUALITY_SPEED = 0
 QUALITY_NORMAL = 1
 QUALITY_BEST = 2
+
+# Output codecs for encode_audio / one-call encode.
+FORMAT_MP3 = 0
+FORMAT_AAC = 1
+FORMAT_OPUS = 2
+_FORMAT_BY_NAME = {"mp3": FORMAT_MP3, "aac": FORMAT_AAC, "opus": FORMAT_OPUS}
 
 PATH_DEFAULT = 0
 PATH_DOUBLE = 1
@@ -1253,6 +1263,42 @@ def _encode_int16(enc, i16, channels):
     return bytes(out)
 
 
+def encode_audio(pcm, channels: int, sample_rate: int, codec="mp3", *,
+                 bitrate: int = 128, vbr_quality: Optional[int] = None,
+                 quality: int = QUALITY_NORMAL, lib=None):
+    """One-call encode: interleaved float PCM (±1.0) at any rate/1-2 ch ->
+    a complete MP3 / AAC-LC / Ogg-Opus stream (bytes). The input is
+    auto-resampled to a codec-valid rate (Opus->48k, MP3/AAC->nearest
+    supported). *codec* is 'mp3'|'aac'|'opus' or a FORMAT_* constant;
+    bitrate in kbps; vbr_quality 0..9 selects VBR."""
+    _lib = lib or load_library()
+    fmt = _FORMAT_BY_NAME.get(codec, codec) if isinstance(codec, str) \
+        else codec
+    if fmt not in (FORMAT_MP3, FORMAT_AAC, FORMAT_OPUS):
+        raise GlintError(f"unknown codec {codec!r}")
+    if _HAS_NUMPY and isinstance(pcm, np.ndarray):
+        flat = np.ascontiguousarray(pcm.reshape(-1), dtype=np.float32)
+        buf = flat.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+        n = flat.size
+    else:
+        flat = list(pcm)
+        n = len(flat)
+        buf = (ctypes.c_float * n)(*flat)
+    frames = n // channels
+    out_size = ctypes.c_int(0)
+    ptr = _lib.glint_encode_audio(
+        buf, frames, channels, sample_rate, fmt, bitrate,
+        -1 if vbr_quality is None else int(vbr_quality), quality,
+        ctypes.byref(out_size))
+    if not ptr or out_size.value <= 0:
+        raise GlintError("encode failed")
+    try:
+        data = ctypes.string_at(ptr, out_size.value)
+    finally:
+        _lib.glint_free(ctypes.cast(ptr, ctypes.c_void_p))
+    return data
+
+
 def encode_opus_file(pcm, channels: int, *, bitrate: int = 96000,
                      vbr: bool = False, lib=None):
     """Encode interleaved 48 kHz float PCM (±1.0) to a complete Ogg-Opus
@@ -1306,28 +1352,10 @@ def transcode_file(in_path: str, out_path: str, *, bitrate: int = 128,
     if ext == "wav":
         write_wav(out_path, flat, sr, ch)
         return
-    if ext == "opus":
-        # Opus is 48 kHz only — resample float PCM if needed, no int16 trip.
-        if sr != 48000:
-            flat = resample(flat, sr, 48000, ch)
-            sr = 48000
-        br = bitrate * 1000 if bitrate < 10000 else bitrate
-        data = encode_opus_file(flat, ch, bitrate=br)
-        with open(out_path, "wb") as f:
-            f.write(data)
-        return
-    # float PCM (±1) -> int16 for the encoders
-    if _HAS_NUMPY and isinstance(flat, np.ndarray):
-        i16 = np.round(np.clip(flat, -1, 1) * 32767.0).astype(np.int16)
-    else:
-        i16 = [int(round(max(-1.0, min(1.0, x)) * 32767.0)) for x in flat]
-    if ext == "aac":
-        enc = AacEncoder(sample_rate=sr, channels=ch, bitrate=bitrate,
-                         lib_path=lib_path)
-    else:
-        enc = Encoder(sample_rate=sr, channels=ch, bitrate=bitrate,
-                      lib_path=lib_path)
-    with enc:
-        data = _encode_int16(enc, i16, ch)
+    if ext not in _FORMAT_BY_NAME:
+        raise GlintError(f"unsupported output extension .{ext}")
+    # encode_audio auto-resamples to a codec-valid rate; one call for all.
+    data = encode_audio(flat, ch, sr, ext, bitrate=bitrate,
+                        lib=(load_library(lib_path) if lib_path else None))
     with open(out_path, "wb") as f:
         f.write(data)

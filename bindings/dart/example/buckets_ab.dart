@@ -131,5 +131,29 @@ void main() {
   }
   print('dart glintReadWav/glintWriteWav: 8/16/24/32-int + float OK');
 
+  // 6. One-call encode from an odd rate (37 kHz) to each codec.
+  const en = 37000;
+  final esrc = Float32List(en * 2);
+  for (var i = 0; i < en; i++) {
+    final v = 0.4 * math.sin(2 * math.pi * 440 * i / 37000);
+    esrc[i * 2] = v;
+    esrc[i * 2 + 1] = v;
+  }
+  for (final spec in [
+    [GlintCodec.mp3, 32000],
+    [GlintCodec.aac, 32000],
+    [GlintCodec.opus, 48000],
+  ]) {
+    final codec = spec[0] as GlintCodec;
+    final want = spec[1] as int;
+    final enc = glintEncodeAudio(esrc, 2, 37000, codec, bitrate: 128);
+    if (enc.length < 1000) throw StateError('encode $codec too small');
+    final back = glintDecodeAudio(enc);
+    if (back.sampleRate != want || back.channels != 2) {
+      throw StateError('$codec -> ${back.sampleRate}/${back.channels}');
+    }
+  }
+  print('dart glintEncodeAudio: 37k -> mp3/aac@32k, opus@48k OK');
+
   print('OK');
 }

@@ -35,6 +35,7 @@ fn main() {
             "../../../src/resample.cpp",
             "../../../src/wav_io.cpp",
             "../../../src/wav_c_api.cpp",
+            "../../../src/encode_audio_c_api.cpp",
             "../../../src/opus_mdct.cpp",
             "../../../src/opus_ogg.cpp",
             "../../../src/opus_celt_enc_energy.cpp",
