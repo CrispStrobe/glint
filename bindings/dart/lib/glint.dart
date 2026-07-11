@@ -743,6 +743,10 @@ typedef _DecodeAudioNative = Pointer<Float> Function(Pointer<Uint8>, Int32,
     Pointer<Int32>, Pointer<Int32>, Pointer<Int32>);
 typedef _DecodeAudio = Pointer<Float> Function(Pointer<Uint8>, int,
     Pointer<Int32>, Pointer<Int32>, Pointer<Int32>);
+typedef _OpusEncFileNative = Pointer<Uint8> Function(Pointer<Float>, Int32,
+    Int32, Int32, Int32, Pointer<Int32>);
+typedef _OpusEncFile = Pointer<Uint8> Function(Pointer<Float>, int, int, int,
+    int, Pointer<Int32>);
 
 /// Decoded audio: interleaved float PCM plus its stream parameters.
 class GlintDecodedAudio {
@@ -806,5 +810,36 @@ GlintDecodedAudio glintDecodeAudio(Uint8List data) {
     calloc.free(sr);
     calloc.free(ch);
     calloc.free(fr);
+  }
+}
+
+/// Encode interleaved 48 kHz float PCM (±1.0, [channels] = 1 or 2) to a
+/// complete Ogg-Opus file (CELT-only, 20 ms frames). [vbr] selects
+/// unconstrained VBR. Input MUST be 48 kHz — resample first with
+/// [glintResample]. Returns the .opus file bytes.
+Uint8List glintEncodeOpus(Float32List pcm, int channels,
+    {int bitrate = 96000, bool vbr = false}) {
+  if (channels < 1 || channels > 2 || pcm.isEmpty) {
+    throw StateError('opus encode: bad channels/empty input');
+  }
+  final lib = _loadLibrary();
+  final fn = lib.lookupFunction<_OpusEncFileNative, _OpusEncFile>(
+      'glint_opus_encode_file');
+  final free = lib.lookupFunction<_FreeNative, _Free>('glint_free');
+  final inPtr = calloc<Float>(pcm.length);
+  inPtr.asTypedList(pcm.length).setAll(0, pcm);
+  final outSize = calloc<Int32>();
+  try {
+    final frames = pcm.length ~/ channels;
+    final ptr = fn(inPtr, frames, channels, bitrate, vbr ? 1 : 0, outSize);
+    if (ptr == nullptr || outSize.value <= 0) {
+      throw StateError('opus encode failed');
+    }
+    final out = Uint8List.fromList(ptr.asTypedList(outSize.value));
+    free(ptr.cast<Void>());
+    return out;
+  } finally {
+    calloc.free(inPtr);
+    calloc.free(outSize);
   }
 }

@@ -233,6 +233,14 @@ int      glint_opus_encode(glint_opus_enc_t enc, const float* pcm,
 uint32_t glint_opus_enc_final_range(glint_opus_enc_t enc);
 void     glint_opus_enc_destroy(glint_opus_enc_t enc);
 
+// One-shot: encode interleaved 48 kHz float PCM (±1.0, `frames` per
+// channel, 1-2 channels) to a complete Ogg-Opus file (CELT-only, 20 ms
+// frames, pre-skip 120). vbr!=0 selects unconstrained VBR at bitrate_bps.
+// Returns a malloc'd buffer of *out_size bytes — free with glint_free —
+// or NULL on error.
+uint8_t* glint_opus_encode_file(const float* pcm, int frames, int channels,
+                                int bitrate_bps, int vbr, int* out_size);
+
 #ifdef __cplusplus
 }
 #endif

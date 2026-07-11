@@ -371,6 +371,34 @@ class TestBucketsAB(unittest.TestCase):
             pcm, sr, ch = glint.decode_file(out)
             self.assertEqual(sr, 48000)
 
+    def test_encode_opus_and_roundtrip(self):
+        if not hasattr(self.lib, "glint_opus_encode_file"):
+            self.skipTest("libglint has no Opus file encoder")
+        # 48 kHz float sine -> encode_opus_file -> decode_audio
+        n, ch = 48000, 2
+        pcm = []
+        for i in range(n):
+            v = 0.4 * math.sin(2 * math.pi * 440 * i / 48000)
+            pcm.extend([v] * ch)
+        data = glint.encode_opus_file(pcm, ch, bitrate=96000)
+        self.assertTrue(data[:4] == b"OggS" and len(data) > 1000)
+        out, sr, dch = glint.decode_bytes(data)
+        self.assertEqual((sr, dch), (48000, 2))
+        frames = out.shape[0] if hasattr(out, "shape") else len(out) // dch
+        self.assertGreater(frames, 40000)
+
+    def test_transcode_to_opus(self):
+        if not hasattr(self.lib, "glint_opus_encode_file"):
+            self.skipTest("libglint has no Opus file encoder")
+        with tempfile.TemporaryDirectory() as d:
+            wav = os.path.join(d, "s.wav")
+            self._sine_wav(wav, sr=44100, ch=2)  # 44.1k -> auto 48k
+            out = os.path.join(d, "a.opus")
+            glint.transcode_file(wav, out, bitrate=96)
+            self.assertGreater(os.path.getsize(out), 1000)
+            pcm, sr, ch = glint.decode_file(out)
+            self.assertEqual((sr, ch), (48000, 2))
+
 
 if __name__ == "__main__":
     # Strip our custom argv before unittest parses it

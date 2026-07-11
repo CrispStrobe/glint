@@ -626,6 +626,30 @@ pub fn decode_audio(data: &[u8]) -> Option<DecodedAudio> {
     Some(DecodedAudio { pcm, sample_rate: sr as u32, channels: ch as u32 })
 }
 
+/// Encode interleaved 48 kHz f32 PCM (±1.0, `frames` per channel, 1-2
+/// channels) to a complete Ogg-Opus file (CELT-only, 20 ms frames). `vbr`
+/// selects unconstrained VBR. Input MUST be 48 kHz — resample first with
+/// [`resample`]. Returns `None` on error.
+pub fn encode_opus_file(pcm: &[f32], channels: u32, bitrate_bps: u32,
+    vbr: bool) -> Option<Vec<u8>> {
+    if channels == 0 || channels > 2 || pcm.is_empty() {
+        return None;
+    }
+    let frames = pcm.len() as i32 / channels as i32;
+    let mut out_size: core::ffi::c_int = 0;
+    let ptr = unsafe {
+        glint_sys::glint_opus_encode_file(pcm.as_ptr(), frames,
+            channels as i32, bitrate_bps as i32, vbr as i32, &mut out_size)
+    };
+    if ptr.is_null() || out_size <= 0 {
+        return None;
+    }
+    let data = unsafe { std::slice::from_raw_parts(ptr, out_size as usize) }
+        .to_vec();
+    unsafe { glint_sys::glint_free(ptr as *mut core::ffi::c_void) };
+    Some(data)
+}
+
 #[cfg(test)]
 mod buckets_ab_tests {
     use super::*;
@@ -689,5 +713,22 @@ mod buckets_ab_tests {
         let d2 = decode_audio(&aac).expect("aac decodes");
         assert_eq!(d2.channels, 2);
         assert!(d2.pcm.len() > 40000, "aac {} samples", d2.pcm.len());
+    }
+
+    #[test]
+    fn opus_file_encode_decode() {
+        // 48 kHz f32 sine -> encode_opus_file -> decode_audio.
+        let n = 48000usize;
+        let mut pcm = vec![0f32; n * 2];
+        for i in 0..n {
+            let v = 0.4 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 48000.0).sin();
+            pcm[i * 2] = v;
+            pcm[i * 2 + 1] = v;
+        }
+        let opus = encode_opus_file(&pcm, 2, 96000, false).expect("opus encodes");
+        assert_eq!(&opus[..4], b"OggS");
+        let dec = decode_audio(&opus).expect("opus decodes");
+        assert_eq!((dec.sample_rate, dec.channels), (48000, 2));
+        assert!(dec.pcm.len() > 40000 * 2, "opus {} samples", dec.pcm.len());
     }
 }

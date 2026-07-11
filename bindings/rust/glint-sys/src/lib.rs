@@ -143,6 +143,14 @@ extern "C" {
         out_ch: *mut c_int,
         out_frames: *mut c_int,
     ) -> *mut f32;
+    pub fn glint_opus_encode_file(
+        pcm: *const f32,
+        frames: c_int,
+        channels: c_int,
+        bitrate_bps: c_int,
+        vbr: c_int,
+        out_size: *mut c_int,
+    ) -> *mut u8;
 }
 
 #[repr(C)]

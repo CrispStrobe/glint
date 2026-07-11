@@ -203,8 +203,9 @@ import glint
 glint.encode_pcm(...)                        # MP3 encode
 enc = glint.AacEncoder(44100, 2, 128)        # AAC (vbr_quality= for VBR)
 pcm, sr, ch = glint.decode_file("in.aac")    # any codec -> float PCM
-glint.transcode_file("in.mp3", "out.aac", bitrate=128, rate=48000)
+glint.transcode_file("in.mp3", "out.opus", bitrate=96)   # incl. Opus out
 out = glint.resample(pcm, sr, 48000, ch)     # Kaiser sinc
+opus = glint.encode_opus_file(out, ch, bitrate=96000)    # 48k float -> Ogg-Opus
 ```
 
 ```rust

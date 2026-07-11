@@ -78,5 +78,28 @@ void main() {
         'frames/ch @ ${dec.sampleRate} Hz');
   }
 
+  // 4. Opus: 48 kHz float sine -> glintEncodeOpus -> glintDecodeAudio.
+  const on = 48000;
+  final opcm = Float32List(on * 2);
+  for (var i = 0; i < on; i++) {
+    final v = 0.4 * math.sin(2 * math.pi * 440 * i / 48000);
+    opcm[i * 2] = v;
+    opcm[i * 2 + 1] = v;
+  }
+  final opus = glintEncodeOpus(opcm, 2, bitrate: 96000);
+  if (opus.length < 1000 ||
+      !(opus[0] == 0x4F && opus[1] == 0x67 && opus[2] == 0x67)) {
+    throw StateError('opus output not an Ogg stream');
+  }
+  final od = glintDecodeAudio(opus);
+  if (od.sampleRate != 48000 || od.channels != 2) {
+    throw StateError('opus decode ${od.sampleRate}/${od.channels}');
+  }
+  if (od.pcm.length < 40000 * 2) {
+    throw StateError('opus too few samples ${od.pcm.length}');
+  }
+  print('dart glintEncodeOpus: ${opus.length} B -> '
+      '${od.pcm.length ~/ od.channels} frames/ch @ ${od.sampleRate} Hz');
+
   print('OK');
 }

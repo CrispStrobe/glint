@@ -2363,5 +2363,13 @@ Wrappers (each with unit + live tests, all green):
 - Dart (bindings/dart/lib/glint.dart): `glintResample`, `glintDecodeAudio`
   -> `GlintDecodedAudio`. Live test example/buckets_ab.dart.
 
-Not routed through transcode helpers: Opus ENCODE from the wrappers (use
-OpusEncoder + the Ogg muxer directly) — the CLI covers Opus output.
+Opus ENCODE is wired in the wrappers too (2026-07-11): C ABI
+`glint_opus_encode_file(pcm48k, frames, ch, bitrate_bps, vbr, *out_size)`
+(src/opus_c_api.cpp; CeltEncoder + OggOpusWriter, mirrors the CLI
+encode_opus) → Python `encode_opus_file` (+ `.opus` output in
+transcode_file, auto-resamples to 48k), Rust `encode_opus_file`, Dart
+`glintEncodeOpus`. Input must be 48 kHz float; each wrapper's live test
+does 48k sine → encode → decode_audio round-trip. GOTCHA: `cargo clean -p
+glint-sys` does NOT force a C recompile of the changed .cpp — a full
+`cargo clean` does (cc tracks source mtime on normal incremental builds,
+so plain edits are fine; only the partial-clean path is stale).

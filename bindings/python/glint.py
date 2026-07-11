@@ -275,6 +275,9 @@ def _setup_signatures(lib):
         lib.glint_decode_audio.argtypes = [
             u8p, ctypes.c_int, ip, ip, ip]
         lib.glint_decode_audio.restype = f32p
+        lib.glint_opus_encode_file.argtypes = [
+            f32p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ip]
+        lib.glint_opus_encode_file.restype = ctypes.POINTER(ctypes.c_uint8)
     except AttributeError:
         pass
 
@@ -1197,13 +1200,41 @@ def _encode_int16(enc, i16, channels):
     return bytes(out)
 
 
+def encode_opus_file(pcm, channels: int, *, bitrate: int = 96000,
+                     vbr: bool = False, lib=None):
+    """Encode interleaved 48 kHz float PCM (±1.0) to a complete Ogg-Opus
+    file (CELT-only, 20 ms frames). *pcm* is a numpy float array or a flat
+    sequence; returns the .opus file bytes. Input MUST be 48 kHz (resample
+    first with resample())."""
+    _lib = lib or load_library()
+    if _HAS_NUMPY and isinstance(pcm, np.ndarray):
+        flat = np.ascontiguousarray(pcm.reshape(-1), dtype=np.float32)
+        buf = flat.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+        n = flat.size
+    else:
+        flat = list(pcm)
+        n = len(flat)
+        buf = (ctypes.c_float * n)(*flat)
+    frames = n // channels
+    out_size = ctypes.c_int(0)
+    ptr = _lib.glint_opus_encode_file(buf, frames, channels, bitrate,
+                                      1 if vbr else 0, ctypes.byref(out_size))
+    if not ptr or out_size.value <= 0:
+        raise GlintError("opus encode failed")
+    try:
+        data = ctypes.string_at(ptr, out_size.value)
+    finally:
+        _lib.glint_free(ctypes.cast(ptr, ctypes.c_void_p))
+    return data
+
+
 def transcode_file(in_path: str, out_path: str, *, bitrate: int = 128,
                    rate: Optional[int] = None, gain_db: float = 0.0,
                    lib_path: Optional[str] = None):
     """Decode *in_path* (MP3/AAC/Opus/WAV), optionally resample (*rate*)
     and apply *gain_db*, then encode to *out_path*. The output codec is
-    chosen from the extension (.mp3 / .aac / .wav). Opus output is not
-    routed here — use OpusEncoder + the Ogg muxer directly."""
+    chosen from the extension (.mp3 / .aac / .opus / .wav). Opus output is
+    always at 48 kHz (auto-resampled)."""
     pcm, sr, ch = decode_file(in_path)
     if _HAS_NUMPY and isinstance(pcm, np.ndarray):
         flat = pcm.reshape(-1)
@@ -1221,6 +1252,16 @@ def transcode_file(in_path: str, out_path: str, *, bitrate: int = 128,
     ext = out_path.lower().rsplit(".", 1)[-1]
     if ext == "wav":
         write_wav(out_path, flat, sr, ch)
+        return
+    if ext == "opus":
+        # Opus is 48 kHz only — resample float PCM if needed, no int16 trip.
+        if sr != 48000:
+            flat = resample(flat, sr, 48000, ch)
+            sr = 48000
+        br = bitrate * 1000 if bitrate < 10000 else bitrate
+        data = encode_opus_file(flat, ch, bitrate=br)
+        with open(out_path, "wb") as f:
+            f.write(data)
         return
     # float PCM (±1) -> int16 for the encoders
     if _HAS_NUMPY and isinstance(flat, np.ndarray):
