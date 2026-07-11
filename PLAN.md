@@ -2124,6 +2124,10 @@ Hard-won details:
 - MPEG-1 window-switching region0 ends at 36 LINES for all rates and
   block types; LSF start/stop granules use 54 (matches the encoder
   invariant).
-Intensity-stereo paths are implemented but not yet exercised by the
-gate (LAME defaults never emit it) — finding/making IS streams is a
-follow-up. Next: D2 AAC-LC decoder, then C ABI + wrappers for both.
+Intensity stereo is now covered (2026-07-11): no encoder in the wild
+emits IS, so tools/gen_mp3_intensity.py hand-builds VALID IS frames
+(dynamic part2_3, table-1 big_values, right scalefactors as intensity
+positions) and the gate checks glint == ffmpeg on 5 variants
+(whole-spectrum + mid-band bounds, MS+IS combined, is_pos=7 fallback)
+at ~126 dB. Gate is now 19/19. Next: D2 AAC-LC decoder, then C ABI +
+wrappers for both.

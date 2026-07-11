@@ -187,9 +187,37 @@ def main():
             print(f"{'OK' if ok else 'FAIL'} {name}: SNR vs ffmpeg "
                   f"{snr:.1f} dB (floor {floor}) [{stats}]")
 
+        # Intensity stereo: no encoder emits it, so hand-build valid
+        # IS frames and check glint == ffmpeg (the reference for the ISO
+        # intensity formulas). Covers whole-spectrum + mid-band bounds,
+        # MS+intensity, and the is_pos=7 "no intensity" fallback.
+        gen = os.path.join(REPO, "tools", "gen_mp3_intensity.py")
+        is_cases = [
+            ("is-bound0", ["0"]),
+            ("is-bound4", ["4"]),
+            ("is-bound8", ["8"]),
+            ("is-ms+is", ["4", "--ms-is"]),
+            ("is-pos7", ["4", "--pos7"]),
+        ]
+        for name, gen_args in is_cases:
+            mp3 = os.path.join(tmp, name + ".mp3")
+            run([sys.executable, gen, mp3] + gen_args)
+            try:
+                snr, stats = snr_vs_ffmpeg(dec_bin, mp3, tmp)
+            except subprocess.CalledProcessError as e:
+                print(f"FAIL {name}: decoder errored: "
+                      f"{(e.stdout or b'').decode()[:80]}")
+                failures += 1
+                continue
+            ok = snr >= 100
+            failures += 0 if ok else 1
+            print(f"{'OK' if ok else 'FAIL'} {name}: SNR vs ffmpeg "
+                  f"{snr:.1f} dB (floor 100) [{stats}]")
+
     if failures:
         sys.exit(f"FAIL: {failures} cases")
-    print("PASS: glint MP3 decoder matches ffmpeg on every stream")
+    print("PASS: glint MP3 decoder matches ffmpeg on every stream "
+          "(incl. hand-built intensity-stereo frames)")
 
 
 if __name__ == "__main__":
