@@ -275,6 +275,9 @@ def _setup_signatures(lib):
         lib.glint_decode_audio.argtypes = [
             u8p, ctypes.c_int, ip, ip, ip]
         lib.glint_decode_audio.restype = f32p
+        lib.glint_decode_audio_ex.argtypes = [
+            u8p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ip, ip, ip]
+        lib.glint_decode_audio_ex.restype = ctypes.c_void_p
         lib.glint_opus_encode_file.argtypes = [
             f32p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ip]
         lib.glint_opus_encode_file.restype = ctypes.POINTER(ctypes.c_uint8)
@@ -1132,29 +1135,39 @@ def resample(pcm, sr_in: int, sr_out: int, channels: int = 1, *, lib=None):
     return out
 
 
-def decode_bytes(data: bytes, *, lib=None):
+def decode_bytes(data: bytes, *, rate: int = 0, dtype: str = "float",
+                 lib=None):
     """Decode an in-memory MP3 / AAC-LC / Ogg-Opus stream (format auto-
-    detected) to interleaved float PCM. Returns (pcm, sample_rate,
-    channels); pcm is numpy float32 (frames, channels) when numpy is
-    present, else a flat list."""
+    detected, Opus surround included) to interleaved PCM. Returns (pcm,
+    sample_rate, channels). *rate* resamples the output (0 = native);
+    *dtype* is 'float' (±1.0) or 'int16'. pcm is a numpy array (frames,
+    channels) of the matching dtype when numpy is present, else a flat
+    list."""
+    if dtype not in ("float", "int16"):
+        raise GlintError("dtype must be 'float' or 'int16'")
     _lib = lib or load_library()
+    want_i16 = 1 if dtype == "int16" else 0
     buf = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
     sr = ctypes.c_int(0)
     ch = ctypes.c_int(0)
     fr = ctypes.c_int(0)
-    ptr = _lib.glint_decode_audio(buf, len(data), ctypes.byref(sr),
-                                  ctypes.byref(ch), ctypes.byref(fr))
-    if not ptr:
+    vptr = _lib.glint_decode_audio_ex(buf, len(data), rate, want_i16,
+                                      ctypes.byref(sr), ctypes.byref(ch),
+                                      ctypes.byref(fr))
+    if not vptr:
         raise GlintError("decode failed (unrecognized or corrupt input)")
     total = fr.value * ch.value
+    ctype = ctypes.c_int16 if want_i16 else ctypes.c_float
+    ptr = ctypes.cast(vptr, ctypes.POINTER(ctype))
     try:
         if _HAS_NUMPY:
+            npdt = np.int16 if want_i16 else np.float32
             flat = np.ctypeslib.as_array(ptr, shape=(total,)).copy()
-            pcm = flat.reshape(fr.value, ch.value)
+            pcm = flat.astype(npdt).reshape(fr.value, ch.value)
         else:
             pcm = [ptr[i] for i in range(total)]
     finally:
-        _lib.glint_free(ctypes.cast(ptr, ctypes.c_void_p))
+        _lib.glint_free(ctypes.c_void_p(vptr))
     return pcm, sr.value, ch.value
 
 
@@ -1185,15 +1198,29 @@ def read_wav_bytes(data: bytes, *, lib=None):
     raise GlintError("libglint too old for flexible WAV read (< 0.9)")
 
 
-def decode_file(path: str, *, lib=None):
-    """Decode an MP3 / AAC / Opus / WAV file to interleaved float PCM.
-    Returns (pcm, sample_rate, channels). WAV inputs of any bit depth
-    (8/16/24/32-int, 32/64-float, A-law, mu-law) are supported."""
+def decode_file(path: str, *, rate: int = 0, dtype: str = "float", lib=None):
+    """Decode an MP3 / AAC / Opus / WAV file to interleaved PCM. Returns
+    (pcm, sample_rate, channels). WAV inputs of any bit depth are
+    supported; *rate* resamples the output, *dtype* is 'float'|'int16'."""
     with open(path, "rb") as f:
         data = f.read()
     if data[:4] == b"RIFF" and data[8:12] == b"WAVE":
-        return read_wav_bytes(data, lib=lib)
-    return decode_bytes(data, lib=lib)
+        pcm, sr, ch = read_wav_bytes(data, lib=lib)
+        if rate and rate != sr:
+            flat = pcm.reshape(-1) if _HAS_NUMPY and hasattr(pcm, "reshape") \
+                else pcm
+            flat = resample(flat, sr, rate, ch, lib=lib)
+            sr = rate
+            pcm = flat.reshape(-1, ch) if _HAS_NUMPY and \
+                hasattr(flat, "reshape") else flat
+        if dtype == "int16":
+            if _HAS_NUMPY and hasattr(pcm, "astype"):
+                pcm = np.round(np.clip(pcm, -1, 1) * 32767.0).astype(np.int16)
+            else:
+                pcm = [int(round(max(-1.0, min(1.0, x)) * 32767.0))
+                       for x in pcm]
+        return pcm, sr, ch
+    return decode_bytes(data, rate=rate, dtype=dtype, lib=lib)
 
 
 def read_wav_float(path: str, *, lib=None):

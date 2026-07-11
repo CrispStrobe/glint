@@ -11,6 +11,7 @@ build_dir defaults to ../../build relative to this script.
 import math
 import os
 import struct
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -423,6 +424,47 @@ class TestBucketsAB(unittest.TestCase):
             out, dsr, dch = glint.decode_bytes(data)
             self.assertEqual(dsr, want_sr, f"{codec} rate")
             self.assertEqual(dch, 2, f"{codec} channels")
+
+    def test_decode_dtype_and_rate(self):
+        # Encode a sine to MP3, then decode float/int16 and resampled.
+        n, ch = 44100, 2
+        pcm = []
+        for i in range(n):
+            v = 0.4 * math.sin(2 * math.pi * 440 * i / 44100)
+            pcm.extend([v] * ch)
+        mp3 = glint.encode_audio(pcm, ch, 44100, "mp3", bitrate=128)
+        fpcm, sr, c = glint.decode_bytes(mp3)  # float native
+        self.assertEqual((sr, c), (44100, 2))
+        ipcm, sr2, c2 = glint.decode_bytes(mp3, dtype="int16")
+        self.assertEqual((sr2, c2), (44100, 2))
+        if hasattr(ipcm, "dtype"):
+            self.assertEqual(str(ipcm.dtype), "int16")
+        rpcm, sr3, c3 = glint.decode_bytes(mp3, rate=24000)
+        self.assertEqual(sr3, 24000)
+        rframes = rpcm.shape[0] if hasattr(rpcm, "shape") else len(rpcm) // c3
+        exp = (fpcm.shape[0] if hasattr(fpcm, "shape") else len(fpcm) // c)
+        self.assertLess(abs(rframes - exp * 24000 / 44100), 50)
+
+    def test_decode_opus_surround(self):
+        # 5.1 Opus via ffmpeg+libopus -> glint decodes 6 channels.
+        import shutil
+        if not shutil.which("ffmpeg"):
+            self.skipTest("ffmpeg not available")
+        with tempfile.TemporaryDirectory() as d:
+            op = os.path.join(d, "s.opus")
+            r = subprocess.run(
+                ["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+                 "-i", "sine=440:d=1",
+                 "-af", "aformat=channel_layouts=5.1",
+                 "-c:a", "libopus", "-mapping_family", "1", op],
+                capture_output=True)
+            if r.returncode != 0 or not os.path.exists(op):
+                self.skipTest("ffmpeg has no libopus / 5.1 encode failed")
+            pcm, sr, ch = glint.decode_file(op)
+            self.assertEqual(sr, 48000)
+            self.assertEqual(ch, 6)
+            frames = pcm.shape[0] if hasattr(pcm, "shape") else len(pcm) // ch
+            self.assertGreater(frames, 40000)
 
     def test_transcode_to_opus(self):
         if not hasattr(self.lib, "glint_opus_encode_file"):

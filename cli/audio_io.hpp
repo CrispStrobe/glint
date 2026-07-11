@@ -13,6 +13,7 @@
 
 #include "glint/glint.h"
 #include "opus_decoder.hpp"
+#include "opus_ms_decoder.hpp"
 #include "opus_celt_encoder.hpp"
 #include "opus_ogg.hpp"
 #include "resample.hpp"
@@ -162,20 +163,34 @@ inline bool decode_aac(const uint8_t* d, size_t n, Audio& a) {
 inline bool decode_opus(const uint8_t* d, size_t n, Audio& a) {
     glint::opus::OggOpusReader r;
     if (r.parse(d, n) != 0) return false;
-    int ch = r.head().channels;
-    if (ch < 1 || ch > 2) return false;
-    glint::opus::OpusDecoder dec;
-    dec.init(ch);
-    std::vector<float> pcm(2 * 5760);
+    const auto& h = r.head();
+    int ch = h.channels;
+    if (ch < 1 || ch > 8) return false;
+    std::vector<float> pcm(static_cast<size_t>(5760) * ch);
     a.ch = ch;
     a.sr = 48000;
     a.pcm.clear();
-    for (int i = 0; i < r.packet_count(); i++) {
-        const auto& p = r.packet(i);
-        int s = dec.decode(p.data(), (int)p.size(), pcm.data(), 5760);
-        if (s > 0)
-            a.pcm.insert(a.pcm.end(), pcm.data(),
-                         pcm.data() + (size_t)s * ch);
+    if (h.mapping_family == 0) {  // mono/stereo
+        glint::opus::OpusDecoder dec;
+        dec.init(ch);
+        for (int i = 0; i < r.packet_count(); i++) {
+            const auto& p = r.packet(i);
+            int s = dec.decode(p.data(), (int)p.size(), pcm.data(), 5760);
+            if (s > 0)
+                a.pcm.insert(a.pcm.end(), pcm.data(),
+                             pcm.data() + (size_t)s * ch);
+        }
+    } else {  // family 1 surround
+        glint::opus::OpusMsDecoder dec;
+        if (dec.init(ch, h.stream_count, h.coupled_count, h.mapping) != 0)
+            return false;
+        for (int i = 0; i < r.packet_count(); i++) {
+            const auto& p = r.packet(i);
+            int s = dec.decode(p.data(), (int)p.size(), pcm.data(), 5760);
+            if (s > 0)
+                a.pcm.insert(a.pcm.end(), pcm.data(),
+                             pcm.data() + (size_t)s * ch);
+        }
     }
     // Apply the OpusHead edit list: drop pre-skip, trim to granule end.
     int pre = r.head().pre_skip;

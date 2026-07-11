@@ -178,6 +178,15 @@ extern "C" {
         quality: c_int,
         out_size: *mut c_int,
     ) -> *mut u8;
+    pub fn glint_decode_audio_ex(
+        data: *const u8,
+        len: c_int,
+        out_rate: c_int,
+        want_int16: c_int,
+        out_sr: *mut c_int,
+        out_ch: *mut c_int,
+        out_frames: *mut c_int,
+    ) -> *mut core::ffi::c_void;
 }
 
 #[repr(C)]

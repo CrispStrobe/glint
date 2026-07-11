@@ -207,6 +207,15 @@ uint8_t* glint_wav_write(const float* pcm, int frames, int channels,
 float* glint_decode_audio(const uint8_t* data, int len, int* out_sr,
                           int* out_ch, int* out_frames);
 
+// Like glint_decode_audio with two optional knobs: out_rate resamples the
+// decoded PCM (0 = keep native rate), and want_int16 chooses the output
+// sample format — the returned buffer is int16_t* when want_int16!=0, else
+// float*. Opus surround (mapping family 1, up to 8 channels) is decoded.
+// Returns a malloc'd buffer (free with glint_free) or NULL on error.
+void* glint_decode_audio_ex(const uint8_t* data, int len, int out_rate,
+                            int want_int16, int* out_sr, int* out_ch,
+                            int* out_frames);
+
 glint_mp3_dec_t glint_mp3_dec_create(void);
 // Decode ONE frame at data[0]. pcm must hold samples*channels floats
 // (1152*2 is always enough for MP3, 1024*2 for AAC). Returns samples per

@@ -155,5 +155,14 @@ void main() {
   }
   print('dart glintEncodeAudio: 37k -> mp3/aac@32k, opus@48k OK');
 
+  // 7. Decoder output flexibility: int16 + resample-on-decode.
+  final mp3 = glintEncodeAudio(esrc, 2, 37000, GlintCodec.mp3, bitrate: 128);
+  final i16 = glintDecodeAudioI16(mp3);
+  if (i16.channels != 2) throw StateError('i16 ch ${i16.channels}');
+  final rr = glintDecodeAudio(mp3, rate: 24000);
+  if (rr.sampleRate != 24000) throw StateError('rate ${rr.sampleRate}');
+  print('dart glintDecodeAudioI16 + rate=24000 OK '
+      '(${i16.pcm.length ~/ i16.channels} i16 frames/ch)');
+
   print('OK');
 }

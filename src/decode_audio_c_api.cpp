@@ -1,6 +1,7 @@
 // glint - whole-file decode C ABI (auto-detects MP3 / AAC-LC / Opus).
 // Mirrors the CLI decode pipeline (cli/audio_io.hpp) so every language
-// wrapper gets decode_file / transcode_file for free.
+// wrapper gets decode_file / transcode_file for free. glint_decode_audio_ex
+// adds an output rate, an int16 option, and Opus surround (family 1).
 // MIT License - Clean-room implementation.
 
 #include <cstdint>
@@ -12,7 +13,9 @@
 #include "glint/glint.h"
 #include "mp3_decoder.hpp"
 #include "opus_decoder.hpp"
+#include "opus_ms_decoder.hpp"
 #include "opus_ogg.hpp"
+#include "resample.hpp"
 
 namespace {
 
@@ -84,23 +87,42 @@ bool decode_aac(const uint8_t* d, size_t n, std::vector<float>& out,
     return ch > 0;
 }
 
+// Decode Ogg-Opus (mono/stereo via OpusDecoder, surround via the family-1
+// multistream decoder) at the native 48 kHz, applying the edit list.
 bool decode_opus(const uint8_t* d, size_t n, std::vector<float>& out,
                  int& sr, int& ch) {
     glint::opus::OggOpusReader r;
     if (r.parse(d, n) != 0) return false;
-    ch = r.head().channels;
-    if (ch < 1 || ch > 2) return false;
-    glint::opus::OpusDecoder dec;
-    dec.init(ch);
-    std::vector<float> pcm(2 * 5760);
+    const auto& h = r.head();
+    ch = h.channels;
+    if (ch < 1 || ch > 8) return false;
     sr = 48000;
-    for (int i = 0; i < r.packet_count(); i++) {
-        const auto& p = r.packet(i);
-        int s = dec.decode(p.data(), (int)p.size(), pcm.data(), 5760);
-        if (s > 0)
-            out.insert(out.end(), pcm.data(), pcm.data() + (size_t)s * ch);
+    std::vector<float> pcm(static_cast<size_t>(5760) * ch);
+
+    if (h.mapping_family == 0) {
+        glint::opus::OpusDecoder dec;
+        dec.init(ch);
+        for (int i = 0; i < r.packet_count(); i++) {
+            const auto& p = r.packet(i);
+            int s = dec.decode(p.data(), (int)p.size(), pcm.data(), 5760);
+            if (s > 0)
+                out.insert(out.end(), pcm.data(),
+                           pcm.data() + (size_t)s * ch);
+        }
+    } else {
+        glint::opus::OpusMsDecoder dec;
+        if (dec.init(ch, h.stream_count, h.coupled_count, h.mapping) != 0)
+            return false;
+        for (int i = 0; i < r.packet_count(); i++) {
+            const auto& p = r.packet(i);
+            int s = dec.decode(p.data(), (int)p.size(), pcm.data(), 5760);
+            if (s > 0)
+                out.insert(out.end(), pcm.data(),
+                           pcm.data() + (size_t)s * ch);
+        }
     }
-    int pre = r.head().pre_skip;
+
+    int pre = h.pre_skip;
     double gain = r.output_gain();
     if (gain != 1.0)
         for (auto& x : out) x = static_cast<float>(x * gain);
@@ -112,12 +134,24 @@ bool decode_opus(const uint8_t* d, size_t n, std::vector<float>& out,
     return true;
 }
 
+// Decode any supported stream to interleaved float at the native rate.
+bool decode_native(const uint8_t* data, size_t len, std::vector<float>& out,
+                   int& sr, int& ch) {
+    switch (detect(data, len)) {
+    case Fmt::Mp3: return decode_mp3(data, len, out, sr, ch);
+    case Fmt::Aac: return decode_aac(data, len, out, sr, ch);
+    case Fmt::Opus: return decode_opus(data, len, out, sr, ch);
+    default: return false;
+    }
+}
+
 }  // namespace
 
 extern "C" {
 
-float* glint_decode_audio(const uint8_t* data, int len, int* out_sr,
-                          int* out_ch, int* out_frames) {
+void* glint_decode_audio_ex(const uint8_t* data, int len, int out_rate,
+                            int want_int16, int* out_sr, int* out_ch,
+                            int* out_frames) {
     if (out_sr) *out_sr = 0;
     if (out_ch) *out_ch = 0;
     if (out_frames) *out_frames = 0;
@@ -125,23 +159,54 @@ float* glint_decode_audio(const uint8_t* data, int len, int* out_sr,
 
     std::vector<float> pcm;
     int sr = 0, ch = 0;
-    bool ok = false;
-    switch (detect(data, (size_t)len)) {
-    case Fmt::Mp3: ok = decode_mp3(data, (size_t)len, pcm, sr, ch); break;
-    case Fmt::Aac: ok = decode_aac(data, (size_t)len, pcm, sr, ch); break;
-    case Fmt::Opus: ok = decode_opus(data, (size_t)len, pcm, sr, ch); break;
-    default: return nullptr;
+    if (!decode_native(data, (size_t)len, pcm, sr, ch) || ch <= 0)
+        return nullptr;
+
+    // Optional resample to a requested output rate.
+    if (out_rate > 0 && out_rate != sr && !pcm.empty()) {
+        int in_frames = (int)(pcm.size() / (size_t)ch);
+        int nf = 0;
+        std::vector<float> rs = glint::resample(pcm.data(), in_frames, ch,
+                                                sr, out_rate, &nf);
+        pcm.swap(rs);
+        sr = out_rate;
     }
-    if (!ok || ch <= 0) return nullptr;
 
     int frames = (int)(pcm.size() / (size_t)ch);
-    float* buf = static_cast<float*>(std::malloc(sizeof(float) * pcm.size()));
-    if (!buf) return nullptr;
-    if (!pcm.empty()) std::memcpy(buf, pcm.data(), sizeof(float) * pcm.size());
+    void* buf = nullptr;
+    if (want_int16) {
+        int16_t* b = static_cast<int16_t*>(
+            std::malloc(sizeof(int16_t) * (pcm.empty() ? 1 : pcm.size())));
+        if (!b) return nullptr;
+        for (size_t i = 0; i < pcm.size(); i++) {
+            double s = pcm[i];
+            if (s > 1.0) s = 1.0;
+            if (s < -1.0) s = -1.0;
+            int v = (int)(s * 32767.0 + (s >= 0 ? 0.5 : -0.5));
+            if (v > 32767) v = 32767;
+            if (v < -32768) v = -32768;
+            b[i] = (int16_t)v;
+        }
+        buf = b;
+    } else {
+        float* b = static_cast<float*>(
+            std::malloc(sizeof(float) * (pcm.empty() ? 1 : pcm.size())));
+        if (!b) return nullptr;
+        if (!pcm.empty())
+            std::memcpy(b, pcm.data(), sizeof(float) * pcm.size());
+        buf = b;
+    }
     if (out_sr) *out_sr = sr;
     if (out_ch) *out_ch = ch;
     if (out_frames) *out_frames = frames;
     return buf;
+}
+
+float* glint_decode_audio(const uint8_t* data, int len, int* out_sr,
+                          int* out_ch, int* out_frames) {
+    // Simple default: float, native rate, whatever channel count decodes.
+    return static_cast<float*>(glint_decode_audio_ex(
+        data, len, 0, 0, out_sr, out_ch, out_frames));
 }
 
 }  // extern "C"

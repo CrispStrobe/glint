@@ -1,4 +1,11 @@
 fn main() {
+    // Rebuild when any C++ source or header changes. cc's own
+    // rerun-if-changed proved unreliable across the target volume, so
+    // watch the whole src/include trees (cargo scans dirs recursively).
+    println!("cargo:rerun-if-changed=../../../src");
+    println!("cargo:rerun-if-changed=../../../include");
+    println!("cargo:rerun-if-changed=build.rs");
+
     cc::Build::new()
         .cpp(true)
         .std("c++17")

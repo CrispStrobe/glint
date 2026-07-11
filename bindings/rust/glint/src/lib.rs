@@ -650,6 +650,47 @@ pub fn encode_opus_file(pcm: &[f32], channels: u32, bitrate_bps: u32,
     Some(data)
 }
 
+/// Decode a whole stream to interleaved f32 PCM, resampled to `out_rate`
+/// (0 = keep native). Auto-detects MP3/AAC/Opus (incl. Opus surround).
+pub fn decode_audio_rate(data: &[u8], out_rate: u32) -> Option<DecodedAudio> {
+    if data.is_empty() {
+        return None;
+    }
+    let (mut sr, mut ch, mut fr) = (0i32, 0i32, 0i32);
+    let ptr = unsafe {
+        glint_sys::glint_decode_audio_ex(data.as_ptr(), data.len() as i32,
+            out_rate as i32, 0, &mut sr, &mut ch, &mut fr)
+    } as *mut f32;
+    if ptr.is_null() || ch <= 0 {
+        return None;
+    }
+    let total = fr as usize * ch as usize;
+    let pcm = unsafe { std::slice::from_raw_parts(ptr, total) }.to_vec();
+    unsafe { glint_sys::glint_free(ptr as *mut core::ffi::c_void) };
+    Some(DecodedAudio { pcm, sample_rate: sr as u32, channels: ch as u32 })
+}
+
+/// Decode a whole stream to interleaved i16 PCM, resampled to `out_rate`
+/// (0 = keep native). Returns (pcm, sample_rate, channels).
+pub fn decode_audio_i16(data: &[u8], out_rate: u32)
+    -> Option<(Vec<i16>, u32, u32)> {
+    if data.is_empty() {
+        return None;
+    }
+    let (mut sr, mut ch, mut fr) = (0i32, 0i32, 0i32);
+    let ptr = unsafe {
+        glint_sys::glint_decode_audio_ex(data.as_ptr(), data.len() as i32,
+            out_rate as i32, 1, &mut sr, &mut ch, &mut fr)
+    } as *mut i16;
+    if ptr.is_null() || ch <= 0 {
+        return None;
+    }
+    let total = fr as usize * ch as usize;
+    let pcm = unsafe { std::slice::from_raw_parts(ptr, total) }.to_vec();
+    unsafe { glint_sys::glint_free(ptr as *mut core::ffi::c_void) };
+    Some((pcm, sr as u32, ch as u32))
+}
+
 /// Output codec for [`encode_audio`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Codec {
@@ -795,6 +836,26 @@ mod buckets_ab_tests {
         let d2 = decode_audio(&aac).expect("aac decodes");
         assert_eq!(d2.channels, 2);
         assert!(d2.pcm.len() > 40000, "aac {} samples", d2.pcm.len());
+    }
+
+    #[test]
+    fn decode_dtype_and_rate() {
+        let (sr, ch, n) = (44100u32, 2usize, 44100usize);
+        let mut pcm = vec![0f32; n * ch];
+        for i in 0..n {
+            let v = 0.4 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / sr as f32).sin();
+            pcm[i * 2] = v;
+            pcm[i * 2 + 1] = v;
+        }
+        let mp3 = encode_audio(&pcm, ch as u32, sr, Codec::Mp3, 128, None, 1)
+            .expect("encode");
+        let f = decode_audio_rate(&mp3, 0).expect("float");
+        assert_eq!((f.sample_rate, f.channels), (44100, 2));
+        let (i16pcm, isr, ich) = decode_audio_i16(&mp3, 0).expect("i16");
+        assert_eq!((isr, ich), (44100, 2));
+        assert_eq!(i16pcm.len(), f.pcm.len());
+        let r = decode_audio_rate(&mp3, 24000).expect("resampled");
+        assert_eq!(r.sample_rate, 24000);
     }
 
     #[test]
