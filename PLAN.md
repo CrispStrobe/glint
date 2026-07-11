@@ -2006,3 +2006,36 @@ over libopus, torture +5.0, quartet +1.5) and glint-vbr ties or beats
 libopus-vbr on ODG everywhere. Bottom line: **4 wins / 4 ties / 2
 narrow losses at 96k; parity-or-better at 192k** — a clean-room
 encoder written in four days trading blows with libopus 1.5.2.
+
+## O5.4 (2026-07-11): multistream/surround decode — done (O5 COMPLETE)
+
+- opus_packet_parse_ext(data, len, self_delimited, pkt, &packet_offset):
+  RFC 6716 appendix B self-delimited framing (explicit last-frame size;
+  for CBR it applies to every frame; packet_offset = header + frames +
+  padding so the next stream's packet starts there). Regular parse is
+  now a wrapper — vectors/e2e confirm no regression.
+- src/opus_ms_decoder.{hpp,cpp}: OpusMsDecoder (RFC 7845 mapping family
+  1, up to 8 channels): streams 0..N-2 self-delimited, coupled stream s
+  feeds mapping indices {2s, 2s+1}, mono stream s feeds coupled+s,
+  mapping 255 mutes; final_range = XOR across streams (reference
+  convention). Reuses OpusDecoder via the new decode_parsed() (decode a
+  pre-parsed packet — the reference threads self_delimited into
+  opus_decode_native instead).
+- OggOpusReader: family-1 header fully parsed (stream/coupled counts +
+  mapping table, channels <= 8); family 0 fills the trivial layout.
+  opus_ms_extract tool dumps layout+packets for the gate.
+
+Gate: tools/crosscheck_opus_ms.py — ffmpeg-encoded 5.1 and quad
+family-1 files, dual-compiled driver vs libopus
+opus_multistream_decode_float: **XOR'd final ranges identical (201
+packets each — exact proof the self-delimited split and per-stream
+decode match), PCM within 1 LSB.** Per-channel distinct tones make
+mapping mistakes loud. Full decoder regression green (12/12 vectors,
+e2e, FEC, rates, ogg).
+
+**The Opus roadmap (O0-O5) is COMPLETE**: RFC-conformant decoder
+(SILK+CELT+hybrid, PLC/CNG, FEC, multistream, 8-48k output, Ogg
+read/write, output gain) + a CELT encoder trading blows with libopus
+(4 wins / 4 ties / 2 narrow losses at 96k ODG). Possible future work
+is quality iteration (piano/torture tonality gap), SILK/hybrid
+ENCODING, DTX, and multistream encode — all beyond the original scope.

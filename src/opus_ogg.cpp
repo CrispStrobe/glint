@@ -133,16 +133,28 @@ int OggOpusReader::parse(const uint8_t* data, size_t len) {
                         head_.output_gain_q8 = static_cast<int16_t>(
                             pending[16] | (pending[17] << 8));
                         head_.mapping_family = pending[18];
-                        if (head_.channels < 1 || head_.channels > 2 ||
-                            head_.mapping_family > 1)
-                            return -3;  // multistream deferred
-                        if (head_.mapping_family == 1) {
-                            // Trivial mono/stereo mapping only.
+                        if (head_.channels < 1 || head_.mapping_family > 1)
+                            return -3;
+                        if (head_.mapping_family == 0) {
+                            if (head_.channels > 2) return -2;  // RFC 7845
+                            head_.stream_count = 1;
+                            head_.coupled_count = head_.channels - 1;
+                            for (int c = 0; c < head_.channels; c++)
+                                head_.mapping[c] =
+                                    static_cast<uint8_t>(c);
+                        } else {
+                            // Family 1: stream/coupled counts + mapping
+                            // table (up to 8 channels).
+                            if (head_.channels > 8) return -3;
                             if (pending.size() < 21u + head_.channels)
                                 return -2;
-                            if (pending[19] != 1 ||
-                                pending[20] != head_.channels - 1)
-                                return -3;
+                            head_.stream_count = pending[19];
+                            head_.coupled_count = pending[20];
+                            if (head_.stream_count < 1 ||
+                                head_.coupled_count > head_.stream_count)
+                                return -2;
+                            for (int c = 0; c < head_.channels; c++)
+                                head_.mapping[c] = pending[21 + c];
                         }
                         header_packets = 1;
                     } else if (header_packets == 1) {

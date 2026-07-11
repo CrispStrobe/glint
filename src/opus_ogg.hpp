@@ -25,6 +25,11 @@ struct OpusHead {
     uint32_t input_sample_rate = 0;
     int output_gain_q8 = 0;  // Q7.8 dB, applied by the decoder
     int mapping_family = 0;
+    // Family 1 (surround): stream layout + per-channel mapping table.
+    // Family 0 fills the equivalent trivial layout.
+    int stream_count = 0;
+    int coupled_count = 0;
+    uint8_t mapping[8] = {};
 };
 
 class OggOpusReader {

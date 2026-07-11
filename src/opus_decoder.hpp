@@ -34,6 +34,15 @@ struct OpusPacket {
 // Parse TOC + framing. Returns 0 or a negative error.
 int opus_packet_parse(const uint8_t* data, int32_t len, OpusPacket* pkt);
 
+// Multistream variant: self_delimited packets (all but the last stream
+// in a multistream payload) carry an explicit size for their last frame
+// (RFC 6716 appendix B). packet_offset (if non-null) receives the bytes
+// this stream's packet consumed, including padding — the next stream's
+// packet starts there.
+int opus_packet_parse_ext(const uint8_t* data, int32_t len,
+                          bool self_delimited, OpusPacket* pkt,
+                          int32_t* packet_offset);
+
 class OpusDecoder {
 public:
     // channels: 1 or 2 (must match the streams fed in for now).
@@ -58,6 +67,10 @@ public:
     // guards the output buffer (per channel).
     int decode(const uint8_t* data, int32_t len, float* pcm,
                int max_samples);
+
+    // Decode a packet that was already parsed (multistream feeds
+    // self-delimited sub-packets through opus_packet_parse_ext).
+    int decode_parsed(const OpusPacket& pkt, float* pcm, int max_samples);
 
     // Conceal a LOST packet of frame_size samples per channel. data (the
     // packet FOLLOWING the loss) may carry SILK in-band FEC (LBRR): its

@@ -109,7 +109,10 @@ int parse_size(const uint8_t* data, int32_t len, int16_t* size) {
 
 }  // namespace
 
-int opus_packet_parse(const uint8_t* data, int32_t len, OpusPacket* pkt) {
+int opus_packet_parse_ext(const uint8_t* data, int32_t len,
+                          bool self_delimited, OpusPacket* pkt,
+                          int32_t* packet_offset) {
+    const uint8_t* data0 = data;
     if (len < 1) return -1;
     const uint8_t toc = data[0];
     pkt->config = toc >> 3;
@@ -140,9 +143,11 @@ int opus_packet_parse(const uint8_t* data, int32_t len, OpusPacket* pkt) {
         pkt->sizes[0] = static_cast<int16_t>(len);
         break;
     case 1:
-        if (len & 1) return -4;
         count = 2;
-        pkt->sizes[0] = pkt->sizes[1] = static_cast<int16_t>(len / 2);
+        if (!self_delimited) {
+            if (len & 1) return -4;
+            pkt->sizes[0] = pkt->sizes[1] = static_cast<int16_t>(len / 2);
+        }
         break;
     case 2: {
         count = 2;
@@ -192,13 +197,34 @@ int opus_packet_parse(const uint8_t* data, int32_t len, OpusPacket* pkt) {
             }
             pkt->sizes[count - 1] = static_cast<int16_t>(len - total);
         }
-        if (cbr) {
+        if (cbr && !self_delimited) {
             if (len % count) return -4;
             for (int i = 0; i < count; i++)
                 pkt->sizes[i] = static_cast<int16_t>(len / count);
         }
         break;
     }
+    }
+
+    // Self-delimited framing: an explicit size for the LAST frame (for
+    // CBR it applies to every frame); the packet may end before `len`.
+    if (self_delimited) {
+        int16_t last;
+        int used = parse_size(data, len, &last);
+        if (used < 0 || last > len - used) return -4;
+        data += used;
+        len -= used;
+        if (cbr) {
+            if (static_cast<int32_t>(last) * count > len) return -4;
+            for (int i = 0; i < count; i++) pkt->sizes[i] = last;
+        } else {
+            // VBR: sizes[0..count-2] already parsed; the last frame's
+            // explicit size must fit in what remains.
+            int32_t rest = len;
+            for (int i = 0; i < count - 1; i++) rest -= pkt->sizes[i];
+            if (last > rest) return -4;
+            pkt->sizes[count - 1] = last;
+        }
     }
 
     // A frame must not exceed the 1275-byte cap.
@@ -210,7 +236,14 @@ int opus_packet_parse(const uint8_t* data, int32_t len, OpusPacket* pkt) {
     }
     if (offset > len) return -4;
     pkt->frame_count = count;
+    if (packet_offset)
+        *packet_offset =
+            pad + static_cast<int32_t>(data - data0) + offset;
     return 0;
+}
+
+int opus_packet_parse(const uint8_t* data, int32_t len, OpusPacket* pkt) {
+    return opus_packet_parse_ext(data, len, false, pkt, nullptr);
 }
 
 namespace {
@@ -508,6 +541,11 @@ int OpusDecoder::decode(const uint8_t* data, int32_t len, float* pcm,
     OpusPacket pkt;
     int err = opus_packet_parse(data, len, &pkt);
     if (err) return err;
+    return decode_parsed(pkt, pcm, max_samples);
+}
+
+int OpusDecoder::decode_parsed(const OpusPacket& pkt, float* pcm,
+                               int max_samples) {
     const int ds = 48000 / fs_;
     if (pkt.frame_count * pkt.frame_size / ds > max_samples) return -2;
 
