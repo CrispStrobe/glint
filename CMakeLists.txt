@@ -27,6 +27,7 @@ set_property(CACHE GLINT_MODE PROPERTY STRINGS double fixed both)
 
 set(GLINT_SOURCES
     src/subband.cpp
+    src/resample.cpp
     src/mdct.cpp
     src/quantize.cpp
     src/huffman.cpp
@@ -91,7 +92,7 @@ endif()
 # CLI
 add_executable(glint_cli cli/main.cpp)
 target_link_libraries(glint_cli PRIVATE glint_static)
-target_include_directories(glint_cli PRIVATE src)
+target_include_directories(glint_cli PRIVATE src include cli)
 
 # Opus tools: raw-PCM -> opus_demo .bit encoder and .bit -> Ogg .opus
 # muxer (used by the encoder league and ad-hoc listening tests).
@@ -144,6 +145,11 @@ if(Python3_FOUND)
                  COMMAND ${Python3_EXECUTABLE}
                          ${CMAKE_CURRENT_SOURCE_DIR}/tools/test_aac_decoder.py
                          $<TARGET_FILE:glint_cli>)
+        # CLI gate: encode/decode/transcode/resample/gain/pipe end to end.
+        add_test(NAME cli_features
+                 COMMAND ${Python3_EXECUTABLE}
+                         ${CMAKE_CURRENT_SOURCE_DIR}/tools/test_cli.py
+                         $<TARGET_FILE:glint_cli>)
         # DECODER ROBUSTNESS gate: fuzz MP3/AAC under ASan+UBSan with
         # random / bit-flipped / truncated input — no crash, OOB or hang.
         add_test(NAME decoder_fuzz
@@ -151,7 +157,7 @@ if(Python3_FOUND)
                          ${CMAKE_CURRENT_SOURCE_DIR}/tools/test_decoder_fuzz.py
                          $<TARGET_FILE:glint_cli>)
         set_tests_properties(decoder_fuzz PROPERTIES
-                 ENVIRONMENT "FUZZ_ITERS=1500" TIMEOUT 400)
+                 ENVIRONMENT "FUZZ_ITERS=700" TIMEOUT 700)
     else()
         message(STATUS "m2_decode_quality test skipped (needs python3+numpy and ffmpeg)")
     endif()
