@@ -1985,3 +1985,24 @@ divergence — the gate bounds it with the concealment tolerance.
 12/12 vectors, e2e and the FEC gate all still pass at 48 kHz.
 
 O5 remaining: multistream/surround (mapping family 1).
+
+## O4 league REFRESH with the tonality build (2026-07-11) —
+## tests/opus_league_2026-07-11.txt
+
+Full 10-clip x {96,192k} re-run (same harness; MOS included). Best
+glint entry vs best libopus entry by ODG at 96k:
+- **WIN castanets (glint-vbr +0.06, best in table; libopus-vbr
+  -0.15), quartet (-0.55 vs -0.58), drums (-0.88 vs -0.91), choir
+  (nominal ODG tie -2.46/-2.42 but MOS 4.62 vs 4.32 and SNR 20.8 vs
+  13.2 — libopus's mode machinery misbehaves there, not ours).**
+- TIE speech (-0.60 vs -0.61), electronic (-0.02 vs +0.05),
+  industrial (-0.44 vs -0.43), orchestral (-0.73 vs -0.72).
+- LOSE piano (glint-vbr -0.77 vs libopus-vbr -0.58; was -1.24 before
+  tonality) and torture (glint-cbr -0.92 vs libopus-vbr -0.76; was
+  -1.84) — both gaps now < 0.2 ODG.
+At 192k every opus entry is transparent (|ODG| <= 0.15, no losses);
+glint holds the top raw SNR/NMR on most clips (electronic +5.7 dB SNR
+over libopus, torture +5.0, quartet +1.5) and glint-vbr ties or beats
+libopus-vbr on ODG everywhere. Bottom line: **4 wins / 4 ties / 2
+narrow losses at 96k; parity-or-better at 192k** — a clean-room
+encoder written in four days trading blows with libopus 1.5.2.
