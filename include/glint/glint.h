@@ -167,6 +167,20 @@ float* glint_resample(const float* in, int in_frames, int channels,
                       int sr_in, int sr_out, int* out_frames);
 void   glint_free(void* p);
 
+// Read a WAV file (PCM 8/16/24/32, IEEE float 32/64, A-law, mu-law,
+// WAVE_FORMAT_EXTENSIBLE) into interleaved float PCM (±1.0). Returns a
+// malloc'd buffer of *out_frames*out_ch floats — free with glint_free —
+// or NULL on malformed / unsupported input.
+float* glint_wav_read(const uint8_t* data, int len, int* out_sr,
+                      int* out_ch, int* out_frames);
+// Encode interleaved float PCM (±1.0) to a WAV buffer. bits: 8/16/24/32
+// integer PCM, or 32/64 with is_float!=0 for IEEE float; invalid combos
+// fall back to 16-bit. Returns a malloc'd buffer of *out_size bytes —
+// free with glint_free — or NULL on error.
+uint8_t* glint_wav_write(const float* pcm, int frames, int channels,
+                         int sample_rate, int bits, int is_float,
+                         int* out_size);
+
 // Decode a whole encoded stream (MP3 / AAC-LC / Ogg-Opus, auto-detected
 // from the header) to interleaved float PCM (±1.0). Returns a malloc'd
 // buffer of *out_frames*out_ch floats — free with glint_free — and writes

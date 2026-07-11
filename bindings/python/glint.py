@@ -278,6 +278,12 @@ def _setup_signatures(lib):
         lib.glint_opus_encode_file.argtypes = [
             f32p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ip]
         lib.glint_opus_encode_file.restype = ctypes.POINTER(ctypes.c_uint8)
+        lib.glint_wav_read.argtypes = [u8p, ctypes.c_int, ip, ip, ip]
+        lib.glint_wav_read.restype = f32p
+        lib.glint_wav_write.argtypes = [
+            f32p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            ctypes.c_int, ip]
+        lib.glint_wav_write.restype = ctypes.POINTER(ctypes.c_uint8)
     except AttributeError:
         pass
 
@@ -1142,38 +1148,85 @@ def decode_bytes(data: bytes, *, lib=None):
     return pcm, sr.value, ch.value
 
 
+def read_wav_bytes(data: bytes, *, lib=None):
+    """Parse a WAV buffer (PCM 8/16/24/32, IEEE float 32/64, A-law,
+    mu-law, EXTENSIBLE) to interleaved float PCM. Returns (pcm, sr, ch).
+    Falls back to a pure-Python 16-bit reader on older libraries."""
+    _lib = lib or load_library()
+    if hasattr(_lib, "glint_wav_read"):
+        buf = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
+        sr = ctypes.c_int(0)
+        ch = ctypes.c_int(0)
+        fr = ctypes.c_int(0)
+        ptr = _lib.glint_wav_read(buf, len(data), ctypes.byref(sr),
+                                  ctypes.byref(ch), ctypes.byref(fr))
+        if not ptr:
+            raise GlintError("WAV read failed (unsupported format?)")
+        total = fr.value * ch.value
+        try:
+            if _HAS_NUMPY:
+                flat = np.ctypeslib.as_array(ptr, shape=(total,)).copy()
+                pcm = flat.reshape(fr.value, ch.value)
+            else:
+                pcm = [ptr[i] for i in range(total)]
+        finally:
+            _lib.glint_free(ctypes.cast(ptr, ctypes.c_void_p))
+        return pcm, sr.value, ch.value
+    raise GlintError("libglint too old for flexible WAV read (< 0.9)")
+
+
 def decode_file(path: str, *, lib=None):
-    """Decode an MP3 / AAC / Opus file to interleaved float PCM. Returns
-    (pcm, sample_rate, channels). WAV inputs are read directly."""
-    if path.lower().endswith(".wav"):
-        sr, ch, raw = _read_wav(path)
-        i16 = struct.unpack(f"<{len(raw)//2}h", raw)
-        if _HAS_NUMPY:
-            pcm = (np.asarray(i16, dtype=np.float32) / 32768.0)
-            pcm = pcm.reshape(-1, ch) if ch else pcm
-        else:
-            pcm = [v / 32768.0 for v in i16]
-        return pcm, sr, ch
+    """Decode an MP3 / AAC / Opus / WAV file to interleaved float PCM.
+    Returns (pcm, sample_rate, channels). WAV inputs of any bit depth
+    (8/16/24/32-int, 32/64-float, A-law, mu-law) are supported."""
     with open(path, "rb") as f:
-        return decode_bytes(f.read(), lib=lib)
+        data = f.read()
+    if data[:4] == b"RIFF" and data[8:12] == b"WAVE":
+        return read_wav_bytes(data, lib=lib)
+    return decode_bytes(data, lib=lib)
 
 
-def read_wav_float(path: str):
-    """Read a 16-bit PCM WAV file as float PCM. Returns (pcm, sr, ch)."""
-    return decode_file(path)
+def read_wav_float(path: str, *, lib=None):
+    """Read a WAV file of any supported bit depth as float PCM. Returns
+    (pcm, sr, ch)."""
+    with open(path, "rb") as f:
+        return read_wav_bytes(f.read(), lib=lib)
 
 
-def write_wav(path: str, pcm, sample_rate: int, channels: int):
-    """Write interleaved float PCM (±1.0) to a 16-bit PCM WAV file. *pcm*
-    is a numpy float array or a flat sequence of floats."""
+def write_wav(path: str, pcm, sample_rate: int, channels: int, *,
+              bits: int = 16, float_fmt: bool = False, lib=None):
+    """Write interleaved float PCM (±1.0) to a WAV file. *pcm* is a numpy
+    float array or a flat sequence. bits: 8/16/24/32 integer, or 32/64
+    with float_fmt for IEEE float (default 16-bit PCM)."""
+    _lib = lib or load_library()
     if _HAS_NUMPY and isinstance(pcm, np.ndarray):
-        flat = np.clip(pcm.reshape(-1), -1.0, 1.0)
-        i16 = np.round(flat * 32767.0).astype("<i2").tobytes()
+        flat = np.ascontiguousarray(pcm.reshape(-1), dtype=np.float32)
+        buf = flat.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+        n = flat.size
     else:
         flat = list(pcm)
-        clipped = [max(-1.0, min(1.0, float(x))) for x in flat]
-        i16 = struct.pack(f"<{len(clipped)}h",
-                          *[int(round(x * 32767.0)) for x in clipped])
+        n = len(flat)
+        buf = (ctypes.c_float * n)(*flat)
+    frames = n // channels
+    if hasattr(_lib, "glint_wav_write"):
+        out_size = ctypes.c_int(0)
+        ptr = _lib.glint_wav_write(buf, frames, channels, sample_rate,
+                                   bits, 1 if float_fmt else 0,
+                                   ctypes.byref(out_size))
+        if not ptr or out_size.value <= 0:
+            raise GlintError("WAV write failed")
+        try:
+            data = ctypes.string_at(ptr, out_size.value)
+        finally:
+            _lib.glint_free(ctypes.cast(ptr, ctypes.c_void_p))
+        with open(path, "wb") as f:
+            f.write(data)
+        return
+    # Fallback: pure-Python 16-bit writer.
+    vals = flat.tolist() if hasattr(flat, "tolist") else flat
+    clipped = [max(-1.0, min(1.0, float(x))) for x in vals]
+    i16 = struct.pack(f"<{len(clipped)}h",
+                      *[int(round(x * 32767.0)) for x in clipped])
     with open(path, "wb") as f:
         f.write(b"RIFF" + struct.pack("<I", 36 + len(i16)) + b"WAVEfmt ")
         f.write(struct.pack("<IHHIIHH", 16, 1, channels, sample_rate,

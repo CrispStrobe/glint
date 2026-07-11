@@ -650,6 +650,52 @@ pub fn encode_opus_file(pcm: &[f32], channels: u32, bitrate_bps: u32,
     Some(data)
 }
 
+/// Read a WAV buffer (PCM 8/16/24/32, IEEE float 32/64, A-law, mu-law,
+/// EXTENSIBLE) into interleaved f32 PCM. Returns `None` on malformed or
+/// unsupported input.
+pub fn read_wav(data: &[u8]) -> Option<DecodedAudio> {
+    if data.is_empty() {
+        return None;
+    }
+    let mut sr: core::ffi::c_int = 0;
+    let mut ch: core::ffi::c_int = 0;
+    let mut frames: core::ffi::c_int = 0;
+    let ptr = unsafe {
+        glint_sys::glint_wav_read(data.as_ptr(), data.len() as i32,
+            &mut sr, &mut ch, &mut frames)
+    };
+    if ptr.is_null() || ch <= 0 {
+        return None;
+    }
+    let total = frames as usize * ch as usize;
+    let pcm = unsafe { std::slice::from_raw_parts(ptr, total) }.to_vec();
+    unsafe { glint_sys::glint_free(ptr as *mut core::ffi::c_void) };
+    Some(DecodedAudio { pcm, sample_rate: sr as u32, channels: ch as u32 })
+}
+
+/// Encode interleaved f32 PCM (±1.0) to a WAV file buffer. `bits`:
+/// 8/16/24/32 integer PCM, or 32/64 with `float_fmt` for IEEE float
+/// (invalid combos fall back to 16-bit). Returns `None` on error.
+pub fn write_wav(pcm: &[f32], channels: u32, sample_rate: u32, bits: u32,
+    float_fmt: bool) -> Option<Vec<u8>> {
+    if channels == 0 {
+        return None;
+    }
+    let frames = pcm.len() as i32 / channels as i32;
+    let mut out_size: core::ffi::c_int = 0;
+    let ptr = unsafe {
+        glint_sys::glint_wav_write(pcm.as_ptr(), frames, channels as i32,
+            sample_rate as i32, bits as i32, float_fmt as i32, &mut out_size)
+    };
+    if ptr.is_null() || out_size <= 0 {
+        return None;
+    }
+    let data = unsafe { std::slice::from_raw_parts(ptr, out_size as usize) }
+        .to_vec();
+    unsafe { glint_sys::glint_free(ptr as *mut core::ffi::c_void) };
+    Some(data)
+}
+
 #[cfg(test)]
 mod buckets_ab_tests {
     use super::*;
@@ -713,6 +759,23 @@ mod buckets_ab_tests {
         let d2 = decode_audio(&aac).expect("aac decodes");
         assert_eq!(d2.channels, 2);
         assert!(d2.pcm.len() > 40000, "aac {} samples", d2.pcm.len());
+    }
+
+    #[test]
+    fn wav_bit_depths_roundtrip() {
+        let n = 4096usize;
+        let pcm: Vec<f32> = (0..n)
+            .map(|i| 0.5 * (2.0 * std::f32::consts::PI * 300.0 * i as f32 / 44100.0).sin())
+            .collect();
+        for &(bits, flt, tol) in &[(8u32, false, 0.02f32), (16, false, 2e-4),
+            (24, false, 1e-5), (32, false, 1e-6), (32, true, 1e-6)] {
+            let wav = write_wav(&pcm, 1, 44100, bits, flt).expect("write");
+            let a = read_wav(&wav).expect("read");
+            assert_eq!((a.sample_rate, a.channels), (44100, 1));
+            let err = pcm.iter().zip(a.pcm.iter())
+                .map(|(x, y)| (x - y).abs()).fold(0f32, f32::max);
+            assert!(err < tol, "{}-bit err {}", bits, err);
+        }
     }
 
     #[test]

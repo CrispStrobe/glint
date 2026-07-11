@@ -101,5 +101,35 @@ void main() {
   print('dart glintEncodeOpus: ${opus.length} B -> '
       '${od.pcm.length ~/ od.channels} frames/ch @ ${od.sampleRate} Hz');
 
+  // 5. WAV I/O at multiple bit depths (round-trip amplitude survives).
+  const wn = 4096;
+  final wsrc = Float32List(wn);
+  for (var i = 0; i < wn; i++) {
+    wsrc[i] = 0.5 * math.sin(2 * math.pi * 300 * i / 44100);
+  }
+  for (final spec in [
+    [8, 0, 0.02],
+    [16, 0, 2e-4],
+    [24, 0, 1e-5],
+    [32, 0, 1e-6],
+    [32, 1, 1e-6],
+  ]) {
+    final bits = spec[0] as int;
+    final flt = (spec[1] as int) == 1;
+    final tol = spec[2] as double;
+    final wav = glintWriteWav(wsrc, 1, 44100, bits: bits, floatFmt: flt);
+    final rd = glintReadWav(wav);
+    if (rd.sampleRate != 44100 || rd.channels != 1) {
+      throw StateError('wav $bits meta ${rd.sampleRate}/${rd.channels}');
+    }
+    var err = 0.0;
+    for (var i = 0; i < wn; i++) {
+      final e = (wsrc[i] - rd.pcm[i]).abs();
+      if (e > err) err = e;
+    }
+    if (err > tol) throw StateError('wav ${bits}bit err $err > $tol');
+  }
+  print('dart glintReadWav/glintWriteWav: 8/16/24/32-int + float OK');
+
   print('OK');
 }

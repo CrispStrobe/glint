@@ -344,6 +344,26 @@ class TestBucketsAB(unittest.TestCase):
             frames = pcm.shape[0] if hasattr(pcm, "shape") else len(pcm) // ch
             self.assertEqual(frames, 44100)
 
+    def test_wav_bit_depths(self):
+        # Write 8/16/24/32-int and 32/64-float; read each back and check
+        # the round-trip amplitude survives (24-bit/float lossless-ish).
+        n, ch = 4096, 1
+        pcm = [0.5 * math.sin(2 * math.pi * 300 * i / 44100)
+               for i in range(n)]
+        with tempfile.TemporaryDirectory() as d:
+            for bits, flt, tol in [(8, False, 0.02), (16, False, 2e-4),
+                                   (24, False, 1e-5), (32, False, 1e-6),
+                                   (32, True, 1e-6), (64, True, 1e-6)]:
+                p = os.path.join(d, f"w{bits}{'f' if flt else ''}.wav")
+                glint.write_wav(p, pcm, 44100, ch, bits=bits, float_fmt=flt)
+                back, sr, bch = glint.read_wav_float(p)
+                self.assertEqual((sr, bch), (44100, 1))
+                vals = back.reshape(-1).tolist() if hasattr(back, "reshape") \
+                    else list(back)
+                err = max(abs(a - b) for a, b in zip(pcm, vals))
+                self.assertLess(err, tol,
+                                f"{bits}-bit{'f' if flt else ''} err {err}")
+
     def test_decode_file_mp3_and_aac(self):
         with tempfile.TemporaryDirectory() as d:
             wav = os.path.join(d, "s.wav")

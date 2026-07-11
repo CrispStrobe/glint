@@ -747,6 +747,14 @@ typedef _OpusEncFileNative = Pointer<Uint8> Function(Pointer<Float>, Int32,
     Int32, Int32, Int32, Pointer<Int32>);
 typedef _OpusEncFile = Pointer<Uint8> Function(Pointer<Float>, int, int, int,
     int, Pointer<Int32>);
+typedef _WavReadNative = Pointer<Float> Function(Pointer<Uint8>, Int32,
+    Pointer<Int32>, Pointer<Int32>, Pointer<Int32>);
+typedef _WavRead = Pointer<Float> Function(Pointer<Uint8>, int,
+    Pointer<Int32>, Pointer<Int32>, Pointer<Int32>);
+typedef _WavWriteNative = Pointer<Uint8> Function(Pointer<Float>, Int32,
+    Int32, Int32, Int32, Int32, Pointer<Int32>);
+typedef _WavWrite = Pointer<Uint8> Function(Pointer<Float>, int, int, int,
+    int, int, Pointer<Int32>);
 
 /// Decoded audio: interleaved float PCM plus its stream parameters.
 class GlintDecodedAudio {
@@ -834,6 +842,64 @@ Uint8List glintEncodeOpus(Float32List pcm, int channels,
     final ptr = fn(inPtr, frames, channels, bitrate, vbr ? 1 : 0, outSize);
     if (ptr == nullptr || outSize.value <= 0) {
       throw StateError('opus encode failed');
+    }
+    final out = Uint8List.fromList(ptr.asTypedList(outSize.value));
+    free(ptr.cast<Void>());
+    return out;
+  } finally {
+    calloc.free(inPtr);
+    calloc.free(outSize);
+  }
+}
+
+/// Read a WAV buffer (PCM 8/16/24/32, IEEE float 32/64, A-law, mu-law,
+/// EXTENSIBLE) into interleaved float PCM. Throws [StateError] on
+/// malformed or unsupported input.
+GlintDecodedAudio glintReadWav(Uint8List data) {
+  if (data.isEmpty) throw StateError('empty WAV');
+  final lib = _loadLibrary();
+  final fn = lib.lookupFunction<_WavReadNative, _WavRead>('glint_wav_read');
+  final free = lib.lookupFunction<_FreeNative, _Free>('glint_free');
+  final inPtr = calloc<Uint8>(data.length);
+  inPtr.asTypedList(data.length).setAll(0, data);
+  final sr = calloc<Int32>();
+  final ch = calloc<Int32>();
+  final fr = calloc<Int32>();
+  try {
+    final ptr = fn(inPtr, data.length, sr, ch, fr);
+    if (ptr == nullptr || ch.value <= 0) {
+      throw StateError('WAV read failed (unsupported format?)');
+    }
+    final total = fr.value * ch.value;
+    final pcm = Float32List.fromList(ptr.asTypedList(total));
+    free(ptr.cast<Void>());
+    return GlintDecodedAudio(pcm, sr.value, ch.value);
+  } finally {
+    calloc.free(inPtr);
+    calloc.free(sr);
+    calloc.free(ch);
+    calloc.free(fr);
+  }
+}
+
+/// Encode interleaved float PCM (±1.0) to a WAV file buffer. [bits]:
+/// 8/16/24/32 integer PCM, or 32/64 with [floatFmt] for IEEE float
+/// (invalid combos fall back to 16-bit).
+Uint8List glintWriteWav(Float32List pcm, int channels, int sampleRate,
+    {int bits = 16, bool floatFmt = false}) {
+  if (channels < 1) throw StateError('bad channels');
+  final lib = _loadLibrary();
+  final fn = lib.lookupFunction<_WavWriteNative, _WavWrite>('glint_wav_write');
+  final free = lib.lookupFunction<_FreeNative, _Free>('glint_free');
+  final inPtr = calloc<Float>(pcm.length);
+  inPtr.asTypedList(pcm.length).setAll(0, pcm);
+  final outSize = calloc<Int32>();
+  try {
+    final frames = pcm.length ~/ channels;
+    final ptr = fn(inPtr, frames, channels, sampleRate, bits,
+        floatFmt ? 1 : 0, outSize);
+    if (ptr == nullptr || outSize.value <= 0) {
+      throw StateError('WAV write failed');
     }
     final out = Uint8List.fromList(ptr.asTypedList(outSize.value));
     free(ptr.cast<Void>());

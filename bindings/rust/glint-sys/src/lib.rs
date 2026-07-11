@@ -151,6 +151,22 @@ extern "C" {
         vbr: c_int,
         out_size: *mut c_int,
     ) -> *mut u8;
+    pub fn glint_wav_read(
+        data: *const u8,
+        len: c_int,
+        out_sr: *mut c_int,
+        out_ch: *mut c_int,
+        out_frames: *mut c_int,
+    ) -> *mut f32;
+    pub fn glint_wav_write(
+        pcm: *const f32,
+        frames: c_int,
+        channels: c_int,
+        sample_rate: c_int,
+        bits: c_int,
+        is_float: c_int,
+        out_size: *mut c_int,
+    ) -> *mut u8;
 }
 
 #[repr(C)]

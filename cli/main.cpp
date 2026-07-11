@@ -31,6 +31,8 @@ static void usage(const char* prog) {
         "  -p PATH      double|fixed signal path (build-dependent)\n"
         "  -j N         encoder worker threads\n"
         "  --rate HZ    resample to HZ before encoding\n"
+        "  --bits N     WAV/raw output bit depth: 8|16|24|32 (default 16)\n"
+        "  --wav-float  write float WAV/raw (--bits 32 or 64)\n"
         "  --gain DB    apply gain in dB\n"
         "  --norm[=DB]  peak-normalize (default -1 dBFS)\n"
         "  --info       print input file info and exit\n",
@@ -50,6 +52,8 @@ static const char* fmt_str(Fmt f) {
 
 int main(int argc, char** argv) {
     int bitrate = 128, vbr_q = -1, threads = 1, out_rate = 0;
+    int out_bits = 16;
+    bool wav_float = false;
     const char* out_fmt_flag = nullptr;
     const char* mode_str = nullptr;
     const char* quality_str = nullptr;
@@ -78,6 +82,8 @@ int main(int argc, char** argv) {
         else if (a == "-s") next("-s");  // accepted, no-op in this build
         else if (a == "-j") threads = std::atoi(next("-j"));
         else if (a == "--rate") out_rate = std::atoi(next("--rate"));
+        else if (a == "--bits") out_bits = std::atoi(next("--bits"));
+        else if (a == "--wav-float") wav_float = true;
         else if (a == "--gain") gain_db = std::atof(next("--gain"));
         else if (a == "--info") do_info = true;
         else if (a == "--norm") { do_norm = true; }
@@ -193,10 +199,10 @@ int main(int argc, char** argv) {
     std::vector<uint8_t> outbytes;
     switch (ofmt) {
     case Fmt::Wav:
-        outbytes = write_wav(audio, 16, false);
+        outbytes = write_wav(audio, out_bits, wav_float);
         break;
     case Fmt::Raw:
-        outbytes = write_wav(audio, 16, false);
+        outbytes = write_wav(audio, out_bits, wav_float);
         outbytes.erase(outbytes.begin(), outbytes.begin() + 44);
         break;
     case Fmt::Mp3:
