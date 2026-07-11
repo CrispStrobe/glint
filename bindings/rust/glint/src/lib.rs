@@ -565,3 +565,129 @@ mod decoder_tests {
         assert!(out.len() > 40000, "decoded {} samples", out.len());
     }
 }
+
+
+// ---------------------------------------------------------------------------
+// High-level convenience: resample + whole-file decode (PLAN buckets A+B)
+// ---------------------------------------------------------------------------
+
+/// Resample interleaved f32 PCM (±1.0) from `sr_in` to `sr_out` with a
+/// Kaiser-windowed sinc kernel (anti-aliased, unity passband). `pcm` is
+/// `frames * channels` interleaved samples; returns the resampled buffer.
+/// Pass-through (a clone) when the rates match.
+pub fn resample(pcm: &[f32], channels: u32, sr_in: u32, sr_out: u32) -> Vec<f32> {
+    if channels == 0 || pcm.is_empty() {
+        return Vec::new();
+    }
+    let ch = channels as i32;
+    let in_frames = pcm.len() as i32 / ch;
+    let mut out_frames: core::ffi::c_int = 0;
+    let ptr = unsafe {
+        glint_sys::glint_resample(pcm.as_ptr(), in_frames, ch,
+            sr_in as i32, sr_out as i32, &mut out_frames)
+    };
+    if ptr.is_null() {
+        return Vec::new();
+    }
+    let total = out_frames as usize * channels as usize;
+    let out = unsafe { std::slice::from_raw_parts(ptr, total) }.to_vec();
+    unsafe { glint_sys::glint_free(ptr as *mut core::ffi::c_void) };
+    out
+}
+
+/// Decoded audio: interleaved f32 PCM plus its stream parameters.
+#[derive(Debug, Clone)]
+pub struct DecodedAudio {
+    pub pcm: Vec<f32>,
+    pub sample_rate: u32,
+    pub channels: u32,
+}
+
+/// Decode a whole encoded stream (MP3 / AAC-LC / Ogg-Opus, format auto-
+/// detected from the header) to interleaved f32 PCM. Returns `None` on
+/// unrecognized or corrupt input.
+pub fn decode_audio(data: &[u8]) -> Option<DecodedAudio> {
+    if data.is_empty() {
+        return None;
+    }
+    let mut sr: core::ffi::c_int = 0;
+    let mut ch: core::ffi::c_int = 0;
+    let mut frames: core::ffi::c_int = 0;
+    let ptr = unsafe {
+        glint_sys::glint_decode_audio(data.as_ptr(), data.len() as i32,
+            &mut sr, &mut ch, &mut frames)
+    };
+    if ptr.is_null() || ch <= 0 {
+        return None;
+    }
+    let total = frames as usize * ch as usize;
+    let pcm = unsafe { std::slice::from_raw_parts(ptr, total) }.to_vec();
+    unsafe { glint_sys::glint_free(ptr as *mut core::ffi::c_void) };
+    Some(DecodedAudio { pcm, sample_rate: sr as u32, channels: ch as u32 })
+}
+
+#[cfg(test)]
+mod buckets_ab_tests {
+    use super::*;
+
+    #[test]
+    fn resample_length_and_passthrough() {
+        let n = 4410usize;
+        let pcm: Vec<f32> = (0..n)
+            .map(|i| (2.0 * std::f32::consts::PI * 200.0 * i as f32 / 44100.0).sin())
+            .collect();
+        let up = resample(&pcm, 1, 44100, 48000);
+        let expect = (n as f64 * 48000.0 / 44100.0).round() as usize;
+        assert!((up.len() as i64 - expect as i64).abs() <= 2,
+            "got {} want ~{}", up.len(), expect);
+        let same = resample(&pcm, 1, 44100, 44100);
+        assert_eq!(same.len(), n);
+    }
+
+    #[test]
+    fn resample_preserves_amplitude() {
+        let n = 8820usize;
+        let pcm: Vec<f32> = (0..n)
+            .map(|i| 0.5 * (2.0 * std::f32::consts::PI * 300.0 * i as f32 / 44100.0).sin())
+            .collect();
+        let out = resample(&pcm, 1, 44100, 22050);
+        let peak = out[100..out.len() - 100].iter().fold(0f32, |m, &x| m.max(x.abs()));
+        assert!(peak > 0.45 && peak < 0.55, "peak {}", peak);
+    }
+
+    #[test]
+    fn decode_audio_mp3_and_aac() {
+        // Build a short sine, encode to MP3 and AAC, decode both back.
+        let spf = 1152usize;
+        let mut mp3enc = Encoder::new(44100, 2, 128).unwrap();
+        let mut mp3 = Vec::new();
+        let mut aacenc = AacEncoder::new(44100, 2, 128, 1).unwrap();
+        let mut aac = Vec::new();
+        let mut phase = 0.0f64;
+        for _ in 0..50 {
+            let mut pcm = vec![0i16; spf * 2];
+            for i in 0..spf {
+                let s = (0.4 * (2.0 * std::f64::consts::PI * 440.0 * phase / 44100.0).sin()
+                    * 20000.0) as i16;
+                phase += 1.0;
+                pcm[i * 2] = s;
+                pcm[i * 2 + 1] = s;
+            }
+            mp3.extend_from_slice(&mp3enc.encode(&pcm));
+            // AAC frame is 1024; feed the first 1024 of this 1152 block.
+            let mut af = vec![0i16; 1024 * 2];
+            af.copy_from_slice(&pcm[..1024 * 2]);
+            aac.extend_from_slice(&aacenc.encode(&af));
+        }
+        mp3.extend_from_slice(&mp3enc.flush());
+        aac.extend_from_slice(&aacenc.flush());
+
+        let d1 = decode_audio(&mp3).expect("mp3 decodes");
+        assert_eq!(d1.channels, 2);
+        assert!(d1.pcm.len() > 40000, "mp3 {} samples", d1.pcm.len());
+
+        let d2 = decode_audio(&aac).expect("aac decodes");
+        assert_eq!(d2.channels, 2);
+        assert!(d2.pcm.len() > 40000, "aac {} samples", d2.pcm.len());
+    }
+}

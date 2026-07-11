@@ -262,6 +262,22 @@ def _setup_signatures(lib):
     except AttributeError:
         pass
 
+    # Resampler + whole-file decode (guard for older shared libraries)
+    try:
+        f32p = ctypes.POINTER(ctypes.c_float)
+        u8p = ctypes.POINTER(ctypes.c_uint8)
+        ip = ctypes.POINTER(ctypes.c_int)
+        lib.glint_resample.argtypes = [
+            f32p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ip]
+        lib.glint_resample.restype = f32p
+        lib.glint_free.argtypes = [ctypes.c_void_p]
+        lib.glint_free.restype = None
+        lib.glint_decode_audio.argtypes = [
+            u8p, ctypes.c_int, ip, ip, ip]
+        lib.glint_decode_audio.restype = f32p
+    except AttributeError:
+        pass
+
 
 # ---------------------------------------------------------------------------
 # Constants (mirror the C enums)
@@ -1059,3 +1075,165 @@ class Mp3Decoder(_FrameDecoder):
 class AacDecoder(_FrameDecoder):
     """ADTS AAC-LC decoder."""
     _prefix = "aac"
+
+
+# ---------------------------------------------------------------------------
+# High-level convenience: resample, whole-file decode, transcode, WAV I/O
+# (PLAN buckets A+B — mirrors the CLI over the shared C ABI)
+# ---------------------------------------------------------------------------
+
+def resample(pcm, sr_in: int, sr_out: int, channels: int = 1, *, lib=None):
+    """Resample interleaved float PCM (±1.0) from *sr_in* to *sr_out* with
+    a Kaiser-windowed sinc kernel (anti-aliased, unity passband). *pcm* is
+    a numpy float array or a flat sequence of floats; returns the same kind
+    (numpy when available). Pass-through when the rates match."""
+    _lib = lib or load_library()
+    if _HAS_NUMPY and isinstance(pcm, np.ndarray):
+        flat = np.ascontiguousarray(pcm.reshape(-1), dtype=np.float32)
+        buf = flat.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+        n = flat.size
+    else:
+        flat = list(pcm)
+        n = len(flat)
+        buf = (ctypes.c_float * n)(*flat)
+    n_in = n // channels
+    out_frames = ctypes.c_int(0)
+    ptr = _lib.glint_resample(buf, n_in, channels, sr_in, sr_out,
+                              ctypes.byref(out_frames))
+    if not ptr:
+        raise GlintError("resample failed")
+    total = out_frames.value * channels
+    try:
+        if _HAS_NUMPY:
+            out = np.ctypeslib.as_array(ptr, shape=(total,)).copy()
+        else:
+            out = [ptr[i] for i in range(total)]
+    finally:
+        _lib.glint_free(ctypes.cast(ptr, ctypes.c_void_p))
+    return out
+
+
+def decode_bytes(data: bytes, *, lib=None):
+    """Decode an in-memory MP3 / AAC-LC / Ogg-Opus stream (format auto-
+    detected) to interleaved float PCM. Returns (pcm, sample_rate,
+    channels); pcm is numpy float32 (frames, channels) when numpy is
+    present, else a flat list."""
+    _lib = lib or load_library()
+    buf = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
+    sr = ctypes.c_int(0)
+    ch = ctypes.c_int(0)
+    fr = ctypes.c_int(0)
+    ptr = _lib.glint_decode_audio(buf, len(data), ctypes.byref(sr),
+                                  ctypes.byref(ch), ctypes.byref(fr))
+    if not ptr:
+        raise GlintError("decode failed (unrecognized or corrupt input)")
+    total = fr.value * ch.value
+    try:
+        if _HAS_NUMPY:
+            flat = np.ctypeslib.as_array(ptr, shape=(total,)).copy()
+            pcm = flat.reshape(fr.value, ch.value)
+        else:
+            pcm = [ptr[i] for i in range(total)]
+    finally:
+        _lib.glint_free(ctypes.cast(ptr, ctypes.c_void_p))
+    return pcm, sr.value, ch.value
+
+
+def decode_file(path: str, *, lib=None):
+    """Decode an MP3 / AAC / Opus file to interleaved float PCM. Returns
+    (pcm, sample_rate, channels). WAV inputs are read directly."""
+    if path.lower().endswith(".wav"):
+        sr, ch, raw = _read_wav(path)
+        i16 = struct.unpack(f"<{len(raw)//2}h", raw)
+        if _HAS_NUMPY:
+            pcm = (np.asarray(i16, dtype=np.float32) / 32768.0)
+            pcm = pcm.reshape(-1, ch) if ch else pcm
+        else:
+            pcm = [v / 32768.0 for v in i16]
+        return pcm, sr, ch
+    with open(path, "rb") as f:
+        return decode_bytes(f.read(), lib=lib)
+
+
+def read_wav_float(path: str):
+    """Read a 16-bit PCM WAV file as float PCM. Returns (pcm, sr, ch)."""
+    return decode_file(path)
+
+
+def write_wav(path: str, pcm, sample_rate: int, channels: int):
+    """Write interleaved float PCM (±1.0) to a 16-bit PCM WAV file. *pcm*
+    is a numpy float array or a flat sequence of floats."""
+    if _HAS_NUMPY and isinstance(pcm, np.ndarray):
+        flat = np.clip(pcm.reshape(-1), -1.0, 1.0)
+        i16 = np.round(flat * 32767.0).astype("<i2").tobytes()
+    else:
+        flat = list(pcm)
+        clipped = [max(-1.0, min(1.0, float(x))) for x in flat]
+        i16 = struct.pack(f"<{len(clipped)}h",
+                          *[int(round(x * 32767.0)) for x in clipped])
+    with open(path, "wb") as f:
+        f.write(b"RIFF" + struct.pack("<I", 36 + len(i16)) + b"WAVEfmt ")
+        f.write(struct.pack("<IHHIIHH", 16, 1, channels, sample_rate,
+                            sample_rate * 2 * channels, 2 * channels, 16))
+        f.write(b"data" + struct.pack("<I", len(i16)) + i16)
+
+
+def _encode_int16(enc, i16, channels):
+    """Feed interleaved int16 through an Encoder/AacEncoder frame by frame
+    (zero-padding the final partial frame) and return the coded bytes."""
+    spf = enc.samples_per_frame
+    step = spf * channels
+    total = len(i16)
+    out = bytearray()
+    off = 0
+    while off + step <= total:
+        out.extend(enc.encode(i16[off:off + step]))
+        off += step
+    if off < total:
+        tail = list(i16[off:total])
+        tail.extend([0] * (step - len(tail)))
+        out.extend(enc.encode(tail))
+    out.extend(enc.flush())
+    return bytes(out)
+
+
+def transcode_file(in_path: str, out_path: str, *, bitrate: int = 128,
+                   rate: Optional[int] = None, gain_db: float = 0.0,
+                   lib_path: Optional[str] = None):
+    """Decode *in_path* (MP3/AAC/Opus/WAV), optionally resample (*rate*)
+    and apply *gain_db*, then encode to *out_path*. The output codec is
+    chosen from the extension (.mp3 / .aac / .wav). Opus output is not
+    routed here — use OpusEncoder + the Ogg muxer directly."""
+    pcm, sr, ch = decode_file(in_path)
+    if _HAS_NUMPY and isinstance(pcm, np.ndarray):
+        flat = pcm.reshape(-1)
+    else:
+        flat = list(pcm)
+    if rate and rate != sr:
+        flat = resample(flat, sr, rate, ch)
+        sr = rate
+    if gain_db != 0.0:
+        g = 10.0 ** (gain_db / 20.0)
+        if _HAS_NUMPY and isinstance(flat, np.ndarray):
+            flat = flat * g
+        else:
+            flat = [x * g for x in flat]
+    ext = out_path.lower().rsplit(".", 1)[-1]
+    if ext == "wav":
+        write_wav(out_path, flat, sr, ch)
+        return
+    # float PCM (±1) -> int16 for the encoders
+    if _HAS_NUMPY and isinstance(flat, np.ndarray):
+        i16 = np.round(np.clip(flat, -1, 1) * 32767.0).astype(np.int16)
+    else:
+        i16 = [int(round(max(-1.0, min(1.0, x)) * 32767.0)) for x in flat]
+    if ext == "aac":
+        enc = AacEncoder(sample_rate=sr, channels=ch, bitrate=bitrate,
+                         lib_path=lib_path)
+    else:
+        enc = Encoder(sample_rate=sr, channels=ch, bitrate=bitrate,
+                      lib_path=lib_path)
+    with enc:
+        data = _encode_int16(enc, i16, ch)
+    with open(out_path, "wb") as f:
+        f.write(data)

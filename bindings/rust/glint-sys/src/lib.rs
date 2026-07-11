@@ -126,6 +126,23 @@ extern "C" {
     pub fn glint_aac_dec_create() -> glint_t;
     pub fn glint_aac_decode(dec: glint_t, data: *const u8, len: c_int, pcm: *mut f32, info: *mut GlintDecFrameInfo) -> c_int;
     pub fn glint_aac_dec_destroy(dec: glint_t);
+
+    pub fn glint_resample(
+        input: *const f32,
+        in_frames: c_int,
+        channels: c_int,
+        sr_in: c_int,
+        sr_out: c_int,
+        out_frames: *mut c_int,
+    ) -> *mut f32;
+    pub fn glint_free(p: *mut core::ffi::c_void);
+    pub fn glint_decode_audio(
+        data: *const u8,
+        len: c_int,
+        out_sr: *mut c_int,
+        out_ch: *mut c_int,
+        out_frames: *mut c_int,
+    ) -> *mut f32;
 }
 
 #[repr(C)]

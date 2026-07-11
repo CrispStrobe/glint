@@ -728,3 +728,83 @@ class GlintAacDecoder extends _FrameDecoder {
   @override
   String get _prefix => 'aac';
 }
+
+// ---------------------------------------------------------------------------
+// High-level convenience: resample + whole-file decode (PLAN buckets A+B)
+// ---------------------------------------------------------------------------
+
+typedef _ResampleNative = Pointer<Float> Function(Pointer<Float>, Int32,
+    Int32, Int32, Int32, Pointer<Int32>);
+typedef _Resample = Pointer<Float> Function(Pointer<Float>, int, int, int,
+    int, Pointer<Int32>);
+typedef _FreeNative = Void Function(Pointer<Void>);
+typedef _Free = void Function(Pointer<Void>);
+typedef _DecodeAudioNative = Pointer<Float> Function(Pointer<Uint8>, Int32,
+    Pointer<Int32>, Pointer<Int32>, Pointer<Int32>);
+typedef _DecodeAudio = Pointer<Float> Function(Pointer<Uint8>, int,
+    Pointer<Int32>, Pointer<Int32>, Pointer<Int32>);
+
+/// Decoded audio: interleaved float PCM plus its stream parameters.
+class GlintDecodedAudio {
+  final Float32List pcm;
+  final int sampleRate;
+  final int channels;
+  GlintDecodedAudio(this.pcm, this.sampleRate, this.channels);
+}
+
+/// Resample interleaved float PCM (±1.0) from [srIn] to [srOut] with a
+/// Kaiser-windowed sinc kernel (anti-aliased, unity passband). [pcm] is
+/// `frames * channels` interleaved samples. Pass-through (a copy) when the
+/// rates match.
+Float32List glintResample(Float32List pcm, int channels, int srIn, int srOut) {
+  if (channels <= 0 || pcm.isEmpty) return Float32List(0);
+  final lib = _loadLibrary();
+  final fn = lib.lookupFunction<_ResampleNative, _Resample>('glint_resample');
+  final free = lib.lookupFunction<_FreeNative, _Free>('glint_free');
+  final inPtr = calloc<Float>(pcm.length);
+  inPtr.asTypedList(pcm.length).setAll(0, pcm);
+  final outFrames = calloc<Int32>();
+  try {
+    final inFrames = pcm.length ~/ channels;
+    final ptr = fn(inPtr, inFrames, channels, srIn, srOut, outFrames);
+    if (ptr == nullptr) return Float32List(0);
+    final total = outFrames.value * channels;
+    final out = Float32List.fromList(ptr.asTypedList(total));
+    free(ptr.cast<Void>());
+    return out;
+  } finally {
+    calloc.free(inPtr);
+    calloc.free(outFrames);
+  }
+}
+
+/// Decode a whole encoded stream (MP3 / AAC-LC / Ogg-Opus, format auto-
+/// detected from the header) to interleaved float PCM. Throws
+/// [StateError] on unrecognized or corrupt input.
+GlintDecodedAudio glintDecodeAudio(Uint8List data) {
+  if (data.isEmpty) throw StateError('empty input');
+  final lib = _loadLibrary();
+  final fn = lib.lookupFunction<_DecodeAudioNative, _DecodeAudio>(
+      'glint_decode_audio');
+  final free = lib.lookupFunction<_FreeNative, _Free>('glint_free');
+  final inPtr = calloc<Uint8>(data.length);
+  inPtr.asTypedList(data.length).setAll(0, data);
+  final sr = calloc<Int32>();
+  final ch = calloc<Int32>();
+  final fr = calloc<Int32>();
+  try {
+    final ptr = fn(inPtr, data.length, sr, ch, fr);
+    if (ptr == nullptr || ch.value <= 0) {
+      throw StateError('decode failed (unrecognized or corrupt input)');
+    }
+    final total = fr.value * ch.value;
+    final pcm = Float32List.fromList(ptr.asTypedList(total));
+    free(ptr.cast<Void>());
+    return GlintDecodedAudio(pcm, sr.value, ch.value);
+  } finally {
+    calloc.free(inPtr);
+    calloc.free(sr);
+    calloc.free(ch);
+    calloc.free(fr);
+  }
+}

@@ -53,6 +53,7 @@ set(GLINT_SOURCES
     src/mp3_decoder.cpp
     src/aac_decoder.cpp
     src/decoder_c_api.cpp
+    src/decode_audio_c_api.cpp
     src/opus_mdct.cpp
     src/opus_ogg.cpp
     src/opus_celt_enc_energy.cpp
@@ -118,6 +119,14 @@ add_test(NAME unit_tests COMMAND glint_test)
 # with numpy and an ffmpeg binary are available.
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_FOUND)
+    # Python wrapper gate: encoder/decoder classes + the buckets A+B
+    # convenience helpers (resample, decode_file, transcode_file, WAV I/O)
+    # against the freshly built shared library.
+    add_test(NAME python_bindings
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/bindings/python/test_bindings.py
+                     $<TARGET_FILE_DIR:glint_shared>)
+
     execute_process(COMMAND ${Python3_EXECUTABLE} -c "import numpy"
                     RESULT_VARIABLE GLINT_PY_NUMPY_RC
                     OUTPUT_QUIET ERROR_QUIET)

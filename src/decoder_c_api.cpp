@@ -7,6 +7,11 @@
 #include "aac_decoder.hpp"
 #include "glint/glint.h"
 #include "mp3_decoder.hpp"
+#include "resample.hpp"
+
+#include <cstdlib>
+#include <cstring>
+#include <vector>
 
 struct glint_mp3_dec_context {
     glint::mp3::Mp3Decoder dec;
@@ -81,5 +86,28 @@ int glint_aac_decode(glint_aac_dec_t dec, const uint8_t* data, int len,
 }
 
 void glint_aac_dec_destroy(glint_aac_dec_t dec) { delete dec; }
+
+float* glint_resample(const float* in, int in_frames, int channels,
+                      int sr_in, int sr_out, int* out_frames) {
+    if (!in || in_frames <= 0 || channels <= 0) {
+        if (out_frames) *out_frames = 0;
+        return nullptr;
+    }
+    int nf = 0;
+    std::vector<float> r =
+        glint::resample(in, in_frames, channels, sr_in, sr_out, &nf);
+    float* buf = static_cast<float*>(
+        std::malloc(sizeof(float) * static_cast<size_t>(nf) * channels));
+    if (!buf) {
+        if (out_frames) *out_frames = 0;
+        return nullptr;
+    }
+    std::memcpy(buf, r.data(),
+                sizeof(float) * static_cast<size_t>(nf) * channels);
+    if (out_frames) *out_frames = nf;
+    return buf;
+}
+
+void glint_free(void* p) { std::free(p); }
 
 }  // extern "C"

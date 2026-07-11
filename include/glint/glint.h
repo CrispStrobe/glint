@@ -159,6 +159,22 @@ int glint_mp3_frame_info(const uint8_t* data, int len,
 int glint_aac_frame_info(const uint8_t* data, int len,
                          struct glint_dec_frame_info* info);
 
+// Resample interleaved float PCM (±1.0) from sr_in to sr_out with a
+// Kaiser-windowed sinc kernel (anti-aliased, unity passband). Returns a
+// malloc'd interleaved buffer of *out_frames*channels floats — free it
+// with glint_free — or NULL on bad arguments.
+float* glint_resample(const float* in, int in_frames, int channels,
+                      int sr_in, int sr_out, int* out_frames);
+void   glint_free(void* p);
+
+// Decode a whole encoded stream (MP3 / AAC-LC / Ogg-Opus, auto-detected
+// from the header) to interleaved float PCM (±1.0). Returns a malloc'd
+// buffer of *out_frames*out_ch floats — free with glint_free — and writes
+// the sample rate, channel count and per-channel frame count. NULL on
+// error or unrecognized input.
+float* glint_decode_audio(const uint8_t* data, int len, int* out_sr,
+                          int* out_ch, int* out_frames);
+
 glint_mp3_dec_t glint_mp3_dec_create(void);
 // Decode ONE frame at data[0]. pcm must hold samples*channels floats
 // (1152*2 is always enough for MP3, 1024*2 for AAC). Returns samples per

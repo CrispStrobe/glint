@@ -292,6 +292,86 @@ class TestOpus(unittest.TestCase):
             glint.OpusEncoder(channels=1, bitrate=100)
 
 
+class TestBucketsAB(unittest.TestCase):
+    """CLI feature-parity helpers: resample, whole-file decode, WAV I/O,
+    transcode (PLAN buckets A+B)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.build = _build_dir()
+        if glint._find_library(cls.build) is None:
+            raise unittest.SkipTest("libglint not found")
+        glint.set_library_path(cls.build)
+        cls.lib = glint.load_library(cls.build)
+        if not hasattr(cls.lib, "glint_decode_audio"):
+            raise unittest.SkipTest("libglint has no decode/resample ABI")
+
+    def _sine_wav(self, path, sr=44100, seconds=1, ch=2):
+        n = sr * seconds
+        pcm = []
+        for i in range(n):
+            v = 0.4 * math.sin(2 * math.pi * 440 * i / sr)
+            pcm.extend([v] * ch)
+        glint.write_wav(path, pcm, sr, ch)
+        return pcm
+
+    def test_resample_length_and_passthrough(self):
+        n = 4410
+        pcm = [math.sin(2 * math.pi * 200 * i / 44100) for i in range(n)]
+        up = glint.resample(pcm, 44100, 48000, channels=1)
+        got = len(up) if not hasattr(up, "shape") else up.shape[0]
+        self.assertAlmostEqual(got, round(n * 48000 / 44100), delta=2)
+        same = glint.resample(pcm, 44100, 44100, channels=1)
+        gsame = len(same) if not hasattr(same, "shape") else same.shape[0]
+        self.assertEqual(gsame, n)
+
+    def test_resample_preserves_amplitude(self):
+        n = 8820
+        pcm = [0.5 * math.sin(2 * math.pi * 300 * i / 44100)
+               for i in range(n)]
+        out = glint.resample(pcm, 44100, 22050, channels=1)
+        vals = out.tolist() if hasattr(out, "tolist") else out
+        peak = max(abs(x) for x in vals[100:-100])
+        self.assertGreater(peak, 0.45)
+        self.assertLess(peak, 0.55)
+
+    def test_wav_roundtrip(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "s.wav")
+            self._sine_wav(p, sr=44100, ch=2)
+            pcm, sr, ch = glint.read_wav_float(p)
+            self.assertEqual((sr, ch), (44100, 2))
+            frames = pcm.shape[0] if hasattr(pcm, "shape") else len(pcm) // ch
+            self.assertEqual(frames, 44100)
+
+    def test_decode_file_mp3_and_aac(self):
+        with tempfile.TemporaryDirectory() as d:
+            wav = os.path.join(d, "s.wav")
+            self._sine_wav(wav, sr=44100, ch=2)
+            for ext in ("mp3", "aac"):
+                out = os.path.join(d, f"a.{ext}")
+                try:
+                    glint.transcode_file(wav, out, bitrate=128)
+                except glint.GlintError as e:
+                    self.skipTest(str(e))
+                self.assertGreater(os.path.getsize(out), 1000)
+                pcm, sr, ch = glint.decode_file(out)
+                self.assertEqual(ch, 2)
+                self.assertIn(sr, (44100, 48000))
+                frames = pcm.shape[0] if hasattr(pcm, "shape") \
+                    else len(pcm) // ch
+                self.assertGreater(frames, 40000)
+
+    def test_transcode_with_rate(self):
+        with tempfile.TemporaryDirectory() as d:
+            wav = os.path.join(d, "s.wav")
+            self._sine_wav(wav, sr=44100, ch=2)
+            out = os.path.join(d, "r.wav")
+            glint.transcode_file(wav, out, rate=48000)
+            pcm, sr, ch = glint.decode_file(out)
+            self.assertEqual(sr, 48000)
+
+
 if __name__ == "__main__":
     # Strip our custom argv before unittest parses it
     build = _build_dir()

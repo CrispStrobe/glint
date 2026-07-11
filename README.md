@@ -132,17 +132,31 @@ identical). Transient stack use: ~30 KB — size RTOS stacks accordingly.
 
 ### CLI
 
+A codec Swiss-army-knife over a universal float-PCM pipeline: encode,
+decode and transcode MP3 / AAC-LC / Opus, plus WAV/raw I/O, resampling,
+gain and peak-normalize. Input/output format is chosen by extension
+(`.wav .mp3 .aac .opus .raw`) or `-F`; use `-` for stdin/stdout.
+
 ```
-glint_cli [options] input output.{mp3,aac}
-  -F FORMAT         mp3|aac (default: by output extension)
+glint_cli [options] <input> <output>
+glint_cli --info <input>
+
+  encode     in.wav  out.mp3 | out.aac | out.opus
+  decode     in.mp3  out.wav              (any codec -> WAV/raw)
+  transcode  in.mp3  out.aac              (decode + re-encode)
+
+  -F FORMAT         wav|mp3|aac|opus|raw output (override extension)
   -b BITRATE        CBR bitrate in kbps (default: 128)
   -V QUALITY        VBR quality 0-9 (0=best, 9=smallest)
   -m MODE           mono|stereo|joint (default: auto)
   -q QUALITY        speed|normal|best (default: normal)
-  -s SIMD           auto|avx|sse2|neon|none (MP3; default: auto)
+  -r RATE:CH:BITS   treat raw input as PCM (e.g., 44100:1:16)
   -p PATH           double|fixed (MP3, both-mode builds only)
-  -r RATE:CH:BITS   Raw PCM input (e.g., 44100:1:16)
-  -j N              Worker threads, MP3 scale search (byte-identical output)
+  -j N              worker threads, MP3 scale search (byte-identical output)
+  --rate HZ         resample before encoding (Opus auto-resamples to 48k)
+  --gain DB         apply gain in dB
+  --norm[=DB]       peak-normalize (default -1 dBFS)
+  --info            print format/rate/channels/duration and exit
 ```
 
 ### C API
@@ -176,20 +190,33 @@ glint_aac_destroy` (encoder delay 2048 samples; flush returns two tail
 frames). `glint_version()` reports the library version. AAC VBR: set
 `cfg.vbr = 1; cfg.vbr_quality = 0..9`.
 
+Decode + DSP: `glint_mp3_dec_* / glint_aac_dec_*` (frame decoders),
+`glint_decode_audio(data, len, &sr, &ch, &frames)` (whole stream, auto-
+detects MP3/AAC/Ogg-Opus, returns malloc'd interleaved float — free with
+`glint_free`), and `glint_resample(in, in_frames, ch, sr_in, sr_out,
+&out_frames)` (Kaiser-windowed sinc).
+
 ### Bindings
 
 ```python
 import glint
-glint.encode_pcm(...)                      # MP3
-enc = glint.AacEncoder(44100, 2, 128)      # AAC (vbr_quality= for VBR)
+glint.encode_pcm(...)                        # MP3 encode
+enc = glint.AacEncoder(44100, 2, 128)        # AAC (vbr_quality= for VBR)
+pcm, sr, ch = glint.decode_file("in.aac")    # any codec -> float PCM
+glint.transcode_file("in.mp3", "out.aac", bitrate=128, rate=48000)
+out = glint.resample(pcm, sr, 48000, ch)     # Kaiser sinc
 ```
 
 ```rust
 let mp3 = glint::encode_pcm(&pcm, 44100, 2, 128);
 let aac = glint::encode_pcm_aac(&pcm, 44100, 2, 128, 1);
+let audio = glint::decode_audio(&bytes).unwrap();   // -> DecodedAudio
+let up = glint::resample(&audio.pcm, audio.channels, audio.sample_rate, 48000);
 ```
 
-Dart/Flutter: `GlintEncoder` / `GlintAacEncoder` (FFI).
+Dart/Flutter (FFI): `GlintEncoder` / `GlintAacEncoder` encode,
+`GlintMp3Decoder` / `GlintAacDecoder` and `glintDecodeAudio` decode,
+`glintResample` resample.
 
 ## Embedded and no-FPU
 

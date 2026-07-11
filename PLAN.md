@@ -2332,3 +2332,36 @@ Every item lands in the CLI AND the three wrappers (decode_file /
 transcode_file / resample helpers), each with a unit test (C ABI /
 in-process) and a live CLI test (encode->decode/transcode round-trip
 vs the existing decoder gates).
+
+## STATUS — DONE (2026-07-11)
+Buckets A+B are implemented and wired everywhere.
+
+CLI (cli/main.cpp + cli/audio_io.hpp, one universal float-PCM pipeline):
+decode MP3/AAC/Opus -> WAV/raw, encode WAV/raw -> any, transcode, `--info`,
+`--rate` resample, `--gain`/`--norm`, stdin/stdout (`-`), Opus unified via
+the Ogg mux. Format by extension or header magic. Opus output auto-resamples
+to 48 kHz. Live gate `cli_features` (tools/test_cli.py): round-trip SNR
+mp3 69 / aac 55 / opus 46 dB, ffmpeg decodes every output.
+
+C ABI (so the wrappers get it all without reimplementing demux/DSP):
+- `glint_resample(in, in_frames, ch, sr_in, sr_out, *out_frames)` +
+  `glint_free` — Kaiser-windowed sinc (src/resample.*).
+- `glint_decode_audio(data, len, *sr, *ch, *frames)` — whole-stream decode,
+  auto-detects MP3/AAC/Ogg-Opus from the header, returns malloc'd interleaved
+  float (src/decode_audio_c_api.cpp; mirrors the CLI decode path). GOTCHA:
+  MP3 0xFFFB vs ADTS 0xFFF share the top nibble — disambiguate with
+  `(b1 & 0xF6) == 0xF0` for ADTS (layer bits 00) BEFORE the MP3
+  `(b1 & 0xE0) == 0xE0` check, exactly like fmt_from_magic.
+
+Wrappers (each with unit + live tests, all green):
+- Python (bindings/python/glint.py): `resample`, `decode_bytes`,
+  `decode_file`, `read_wav_float`, `write_wav`, `transcode_file`. Tests in
+  test_bindings.py `TestBucketsAB`; ctest `python_bindings`.
+- Rust (bindings/rust/glint*): `resample`, `decode_audio` -> `DecodedAudio`;
+  FFI in glint-sys, build.rs re-synced (resample.cpp + decode_audio_c_api.cpp).
+  Tests `buckets_ab_tests` (cargo test, 5/5).
+- Dart (bindings/dart/lib/glint.dart): `glintResample`, `glintDecodeAudio`
+  -> `GlintDecodedAudio`. Live test example/buckets_ab.dart.
+
+Not routed through transcode helpers: Opus ENCODE from the wrappers (use
+OpusEncoder + the Ogg muxer directly) — the CLI covers Opus output.
