@@ -151,7 +151,7 @@ static double cbrt_lut[8192];
 static float cbrt_mant[65];
 static inline double pow43_small(int a) {
     if (a <= 0) return 0.0;
-    int n = 31 - __builtin_clz(static_cast<unsigned>(a));
+    int n = 31 - glint::intmath::clz32(static_cast<unsigned>(a));
     double m = static_cast<double>(a) / static_cast<double>(1 << n);  // [1,2)
     double f = (m - 1.0) * 64.0;
     int i = static_cast<int>(f);

@@ -65,4 +65,4 @@ jobs:
         run: cmake --build build --config Release -j 4
 
       - name: Unit tests
-        run: ctest --test-dir build --config Release -R unit_tests --output-on-failure
+        run: ctest --test-dir build -C Release -R unit_tests --output-on-failure
