@@ -54,6 +54,34 @@ impl Encoder {
         }
     }
 
+    /// Create an MP3 encoder with explicit knobs. `mode`: 0 mono, 1 dual,
+    /// 2 joint, 3 stereo. `quality`: 0 speed / 1 normal / 2 best. `path`:
+    /// 0 default, 1 double, 2 fixed. `vbr_quality` Some(0..9) selects VBR.
+    pub fn with_options(sample_rate: u32, channels: u32, bitrate: u32,
+        mode: u32, quality: u32, path: u32, vbr_quality: Option<u32>)
+        -> Result<Self, &'static str> {
+        unsafe {
+            let cfg = glint_config {
+                sample_rate: sample_rate as i32,
+                num_channels: channels as i32,
+                mode: mode as i32,
+                bitrate: bitrate as i32,
+                path: path as i32,
+                simd: 0,
+                quality: quality as i32,
+                vbr: if vbr_quality.is_some() { 1 } else { 0 },
+                vbr_quality: vbr_quality.unwrap_or(0) as i32,
+            };
+            let handle = glint_create(&cfg);
+            if handle.is_null() {
+                return Err("glint_create returned null");
+            }
+            let spf = glint_samples_per_frame(handle) as usize;
+            Ok(Encoder { handle, samples_per_frame: spf,
+                channels: channels as usize })
+        }
+    }
+
     /// Number of samples per channel expected by each call to `encode`.
     pub fn samples_per_frame(&self) -> usize {
         self.samples_per_frame
@@ -174,6 +202,29 @@ impl AacEncoder {
                 quality: quality as i32,
                 vbr: 0,
                 vbr_quality: 0,
+                reserved: [0; 4],
+            };
+            let handle = glint_aac_create(&cfg);
+            if handle.is_null() {
+                return Err("glint_aac_create returned null");
+            }
+            let spf = glint_aac_samples_per_frame(handle) as usize;
+            Ok(AacEncoder { handle, samples_per_frame: spf, channels: channels as usize })
+        }
+    }
+
+    /// Like [`AacEncoder::new`] but with `vbr_quality` Some(0..9) to select
+    /// constant-quality VBR (None = CBR at `bitrate`).
+    pub fn with_options(sample_rate: u32, channels: u32, bitrate: u32,
+        quality: u32, vbr_quality: Option<u32>) -> Result<Self, &'static str> {
+        unsafe {
+            let cfg = glint_aac_config {
+                sample_rate: sample_rate as i32,
+                num_channels: channels as i32,
+                bitrate: bitrate as i32,
+                quality: quality as i32,
+                vbr: if vbr_quality.is_some() { 1 } else { 0 },
+                vbr_quality: vbr_quality.unwrap_or(0) as i32,
                 reserved: [0; 4],
             };
             let handle = glint_aac_create(&cfg);
@@ -836,6 +887,37 @@ mod buckets_ab_tests {
         let d2 = decode_audio(&aac).expect("aac decodes");
         assert_eq!(d2.channels, 2);
         assert!(d2.pcm.len() > 40000, "aac {} samples", d2.pcm.len());
+    }
+
+    #[test]
+    fn encoder_knobs() {
+        // MP3 with explicit mode/quality/VBR and AAC VBR both decode back.
+        let spf = 1152usize;
+        let mut enc = Encoder::with_options(44100, 2, 192, 3, 2, 0, Some(3))
+            .expect("mp3 opts");
+        let mut mp3 = Vec::new();
+        let mut aac_enc = AacEncoder::with_options(44100, 2, 128, 1, Some(2))
+            .expect("aac opts");
+        let mut aac = Vec::new();
+        let mut phase = 0.0f64;
+        for _ in 0..50 {
+            let mut pcm = vec![0i16; spf * 2];
+            for i in 0..spf {
+                let s = (0.4 * (2.0 * std::f64::consts::PI * 440.0 * phase / 44100.0).sin()
+                    * 20000.0) as i16;
+                phase += 1.0;
+                pcm[i * 2] = s;
+                pcm[i * 2 + 1] = s;
+            }
+            mp3.extend_from_slice(&enc.encode(&pcm));
+            let mut af = vec![0i16; 1024 * 2];
+            af.copy_from_slice(&pcm[..1024 * 2]);
+            aac.extend_from_slice(&aac_enc.encode(&af));
+        }
+        mp3.extend_from_slice(&enc.flush());
+        aac.extend_from_slice(&aac_enc.flush());
+        assert_eq!(decode_audio(&mp3).unwrap().channels, 2);
+        assert_eq!(decode_audio(&aac).unwrap().channels, 2);
     }
 
     #[test]

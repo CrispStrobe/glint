@@ -164,5 +164,42 @@ void main() {
   print('dart glintDecodeAudioI16 + rate=24000 OK '
       '(${i16.pcm.length ~/ i16.channels} i16 frames/ch)');
 
+  // 8. Codec knobs: MP3 stereo/best/VBR + AAC VBR both decode back.
+  final mEnc = GlintEncoder(
+      sampleRate: 44100, channels: 2, bitrate: 192,
+      mode: 3, quality: 2, vbrQuality: 3);
+  final aEnc = GlintAacEncoder(
+      sampleRate: 44100, channels: 2, bitrate: 128, vbrQuality: 2);
+  final mp3b = BytesBuilder();
+  final aacb = BytesBuilder();
+  var kphase = 0;
+  for (var f = 0; f < 50; f++) {
+    final mp = Int16List(mEnc.samplesPerFrame * 2);
+    for (var i = 0; i < mEnc.samplesPerFrame; i++) {
+      final s = (0.4 * math.sin(2 * math.pi * 440 * kphase / 44100) * 20000)
+          .toInt();
+      kphase++;
+      mp[i * 2] = s;
+      mp[i * 2 + 1] = s;
+    }
+    mp3b.add(mEnc.encode(mp));
+    final ap = Int16List(aEnc.samplesPerFrame * 2);
+    for (var i = 0; i < aEnc.samplesPerFrame * 2; i++) {
+      ap[i] = mp[i % mp.length];
+    }
+    aacb.add(aEnc.encode(ap));
+  }
+  mp3b.add(mEnc.flush());
+  aacb.add(aEnc.flush());
+  mEnc.dispose();
+  aEnc.dispose();
+  if (glintDecodeAudio(mp3b.toBytes()).channels != 2) {
+    throw StateError('mp3 knobs decode failed');
+  }
+  if (glintDecodeAudio(aacb.toBytes()).channels != 2) {
+    throw StateError('aac knobs decode failed');
+  }
+  print('dart Encoder(mode/quality/vbr) + AacEncoder(vbr) OK');
+
   print('OK');
 }

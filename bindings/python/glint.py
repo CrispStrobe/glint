@@ -383,6 +383,8 @@ class Encoder:
         mode: Optional[int] = None,
         path: int = PATH_DEFAULT,
         simd: int = SIMD_AUTO,
+        quality: int = QUALITY_NORMAL,
+        vbr_quality: Optional[int] = None,
         lib_path: Optional[str] = None,
         write_callback=None,
     ):
@@ -400,7 +402,11 @@ class Encoder:
             bitrate=bitrate,
             path=path,
             simd=simd,
+            quality=quality,
         )
+        if vbr_quality is not None:
+            cfg.vbr = 1
+            cfg.vbr_quality = int(vbr_quality)
 
         if write_callback is not None:
             # Wrap the Python callback into a ctypes callback.

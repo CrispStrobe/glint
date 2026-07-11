@@ -138,10 +138,17 @@ class GlintEncoder {
   ///
   /// Throws [ArgumentError] if the configuration is not supported.
   /// Throws [StateError] if the encoder could not be created.
+  /// [mode]: 0 mono, 1 dual, 2 joint, 3 stereo (default: mono for 1 ch,
+  /// joint for 2). [quality]: 0 speed / 1 normal / 2 best. [path]: 0
+  /// default, 1 double, 2 fixed. [vbrQuality] 0..9 selects VBR.
   GlintEncoder({
     int sampleRate = 44100,
     int channels = 1,
     int bitrate = 128,
+    int? mode,
+    int quality = 1,
+    int path = 0,
+    int? vbrQuality,
   }) : channels = channels {
     _lib = _loadLibrary();
 
@@ -171,12 +178,16 @@ class GlintEncoder {
     final cfgPtr = calloc<GlintConfig>();
     cfgPtr.ref.sampleRate = sampleRate;
     cfgPtr.ref.numChannels = channels;
-    cfgPtr.ref.mode = channels == 1 ? 0 : 2; // MONO or JOINT
+    cfgPtr.ref.mode = mode ?? (channels == 1 ? 0 : 2); // MONO or JOINT
     cfgPtr.ref.bitrate = bitrate;
-    cfgPtr.ref.path = 0;
+    cfgPtr.ref.path = path;
     cfgPtr.ref.simd = 0;
-    cfgPtr.ref.quality = 1; // NORMAL
-    // vbr fields left zero (CBR); calloc zeroed the struct.
+    cfgPtr.ref.quality = quality;
+    if (vbrQuality != null) {
+      cfgPtr.ref.vbr = 1;
+      cfgPtr.ref.vbrQuality = vbrQuality;
+    }
+    // vbr fields otherwise zero (CBR); calloc zeroed the struct.
 
     _handle = create(cfgPtr);
     calloc.free(cfgPtr);
@@ -323,12 +334,14 @@ class GlintAacEncoder {
 
   bool _disposed = false;
 
-  /// [quality]: 0 = speed, 1 = normal (default), 2 = best.
+  /// [quality]: 0 = speed, 1 = normal (default), 2 = best. [vbrQuality]
+  /// 0..9 selects constant-quality VBR (null = CBR at [bitrate]).
   GlintAacEncoder({
     int sampleRate = 44100,
     int channels = 2,
     int bitrate = 128,
     int quality = 1,
+    int? vbrQuality,
   }) : channels = channels {
     _lib = _loadLibrary();
 
@@ -348,6 +361,10 @@ class GlintAacEncoder {
     cfgPtr.ref.numChannels = channels;
     cfgPtr.ref.bitrate = bitrate;
     cfgPtr.ref.quality = quality;
+    if (vbrQuality != null) {
+      cfgPtr.ref.vbr = 1;
+      cfgPtr.ref.vbrQuality = vbrQuality;
+    }
 
     _handle = create(cfgPtr);
     calloc.free(cfgPtr);

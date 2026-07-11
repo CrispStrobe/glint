@@ -408,6 +408,41 @@ class TestBucketsAB(unittest.TestCase):
         frames = out.shape[0] if hasattr(out, "shape") else len(out) // dch
         self.assertGreater(frames, 40000)
 
+    def test_encoder_knobs(self):
+        # MP3 Encoder with explicit mode/quality/VBR must produce a decodable
+        # stream; AAC VBR too.
+        n = 44100
+        sine = [int(30000 * math.sin(2 * math.pi * 440 * i / 44100))
+                for i in range(n)]
+        st = []
+        for s in sine:
+            st.extend([s, s])
+        # MP3: stereo mode, best quality, VBR q3
+        with glint.Encoder(sample_rate=44100, channels=2, bitrate=192,
+                           mode=glint.MODE_STEREO, quality=glint.QUALITY_BEST,
+                           vbr_quality=3, lib_path=self.build) as enc:
+            data = glint._encode_int16(enc, st, 2) \
+                if hasattr(glint, "_encode_int16") else None
+            if data is None:
+                spf = enc.samples_per_frame
+                out = bytearray()
+                for off in range(0, len(st) - spf * 2 + 1, spf * 2):
+                    out.extend(enc.encode(st[off:off + spf * 2]))
+                out.extend(enc.flush())
+                data = bytes(out)
+        pcm, sr, ch = glint.decode_bytes(data)
+        self.assertEqual((sr, ch), (44100, 2))
+        # AAC: VBR quality 2
+        with glint.AacEncoder(sample_rate=44100, channels=2, bitrate=128,
+                              vbr_quality=2, lib_path=self.build) as aac:
+            spf = aac.samples_per_frame
+            out = bytearray()
+            for off in range(0, len(st) - spf * 2 + 1, spf * 2):
+                out.extend(aac.encode(st[off:off + spf * 2]))
+            out.extend(aac.flush())
+        apcm, asr, ach = glint.decode_bytes(bytes(out))
+        self.assertEqual(ach, 2)
+
     def test_encode_audio_all_codecs_odd_rate(self):
         if not hasattr(self.lib, "glint_encode_audio"):
             self.skipTest("libglint has no one-call encode")
