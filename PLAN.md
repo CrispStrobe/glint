@@ -2230,3 +2230,29 @@ afconvert (-f WAVE -d LEF32), which decodes both ADTS AAC and MP3.
   alignment unreliable (MP3 decoders are not bit-exact by spec), so the
   Apple MP3 number is reported, not gated; ffmpeg (130 dB) stays the
   hard MP3 oracle.
+
+## O4 piano/torture tonality gap — investigated, diminishing returns (2026-07-11)
+
+The two 96k ODG losses (piano -0.77 vs libopus -0.58, torture -0.92 vs
+-0.76) were probed after the tonality port. Findings (piano 96k VBR,
+glint 113.7 vs libopus 112.8 kb/s — SAME rate, so it's ALLOCATION
+efficiency, not bits):
+- Per-band: glint under-allocates 0-8 kHz (~-1 dB SNR vs libopus) and
+  over-allocates 8-16 kHz (+1 dB). Looked like an alloc_trim tilt.
+- **alloc_trim probe**: LOWERING trim (more LF bits) made NMR WORSE
+  (-5.84 -> -5.50 at bias -1) — glint's HF bits are well-spent per NMR;
+  trim is not the lever. glint already picks trim 7 (of 10) on 88% of
+  piano frames, matching the reference formula.
+- **Transient sensitivity** (mask_metric threshold 200 -> 120): flat on
+  piano (-5.84 -> -5.82) — onsets aren't the p95 driver.
+- **Dynalloc boost x2**: +0.09 dB piano (-5.84 -> -5.93), quartet
+  unchanged — real but negligible, and deviating from the reference
+  follower*1.0 for 0.09 dB isn't worth the cross-clip regression risk.
+
+Conclusion: the residual ~0.9 dB NMR gap is libopus's mature,
+MLP-refined allocation tuning that no single CELT knob captures (the
+music/speech MLP mainly steers MODE decisions, not CELT allocation, so
+porting it is high-effort/low-CELT-reward). glint is competitive:
+wins/ties 8/10 clips at 96k ODG, transparent at 192k. Every CELT
+analysis block the reference uses IS ported. Marked diminishing-returns;
+the encoder is unchanged (all probes were env-gated and removed).
