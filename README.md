@@ -1,8 +1,9 @@
 # glint
 
-A clean-room **MP3 + AAC-LC encoder** and **RFC-conformant Opus
-decoder** in C++17, MIT licensed. The name nods to integers (*g-lint*)
-and the [Shine](https://github.com/toots/shine) encoder lineage.
+A clean-room **MP3, AAC-LC and Opus codec suite** in C++17, MIT
+licensed: encoders and decoders for all three formats. The name nods to
+integers (*g-lint*) and the [Shine](https://github.com/toots/shine)
+encoder lineage.
 
 Both codecs are implemented from the ISO specs (11172-3 / 13818-3 for
 MP3, 13818-7 / 14496-3 for AAC) with no third-party encoder code
@@ -32,6 +33,16 @@ vo-aacenc (Apache-2.0) is unmaintained and last on quality.
 - **Verified wire format**: every configuration decodes with zero
   errors in both ffmpeg and Apple CoreAudio, which produce metrically
   identical output; decode-based gates run in CI.
+- **MP3 + AAC-LC decoders (clean-room, verified against ffmpeg).**
+  The MPEG-1/2 Layer III decoder (bit reservoir, all window types, M/S +
+  intensity stereo, polyphase synthesis) matches ffmpeg to **128-131 dB**
+  across glint's own output and LAME streams, including hand-built
+  intensity-stereo frames. The ADTS AAC-LC decoder (all four window
+  sequences, M/S, TNS, PNS, intensity stereo) is **86-135 dB** on glint
+  roundtrips and structurally matches ffmpeg/fdkaac/afconvert streams
+  (whose PNS is decoder-random) in the spectral-envelope domain. Both
+  reuse the encoders' own Huffman tables, so encode and decode cannot
+  drift. C ABI + Python/Rust/Dart bindings.
 - **Opus codec: RFC-conformant decoder + a competitive CELT encoder.**
   Clean-room from RFC 6716/7845. Decoder: SILK, CELT and hybrid modes,
   PLC/CNG, SILK in-band FEC (byte-identical recovery vs libopus),
