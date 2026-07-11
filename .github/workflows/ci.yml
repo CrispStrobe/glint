@@ -43,3 +43,26 @@ jobs:
       - name: Full quality suite (fixed path)
         if: matrix.mode == 'both'
         run: python3 tests/test_quality.py build/glint_cli --fixed
+
+  # Windows is built only in the release workflow, so MSVC-only breakers
+  # (M_PI without _USE_MATH_DEFINES, POSIX strcasecmp, ...) used to surface
+  # only at release time. Build all modes and run the dependency-free unit
+  # tests here to catch them on every push. The ffmpeg/numpy-based gates
+  # stay Linux/macOS-only (heavy to provision on Windows).
+  build-windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [double, fixed, both]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DGLINT_MODE=${{ matrix.mode }}
+
+      - name: Build
+        run: cmake --build build --config Release -j 4
+
+      - name: Unit tests
+        run: ctest --test-dir build --config Release -R unit_tests --output-on-failure
