@@ -2177,3 +2177,21 @@ Hard-won details:
 
 Next: C ABI (glint_mp3_dec_* / glint_aac_dec_*) + Python/Rust/Dart
 wrappers, mirroring the Opus decoder pattern.
+
+## Decoder C ABI + wrappers (2026-07-11) — done
+
+- include/glint/glint.h: glint_mp3_dec_* / glint_aac_dec_* +
+  glint_{mp3,aac}_frame_info + a shared glint_dec_frame_info struct.
+  Impl src/decoder_c_api.cpp. Interleaved-float output; the MP3 decoder
+  keeps its reservoir across calls (may return 0 samples early).
+- Unit suite 365 -> 379: encode a tone through the public MP3/AAC
+  ENCODER, walk frames via *_frame_info, decode through *_decode, check
+  the roundtrip sample count + energy.
+- Python: Mp3Decoder/AacDecoder (decode_frame + whole-stream decode,
+  ID3v2 skip, numpy or list output). Rust: Mp3Decoder/AacDecoder via a
+  frame_decoder! macro + cargo test roundtrip (build.rs source list
+  re-synced to 42 files). Dart: GlintMp3Decoder/GlintAacDecoder +
+  example/decoder_roundtrip.dart. All verified end to end.
+
+The MP3+AAC codecs are now COMPLETE both ways (encode + decode) with C
+ABI + Python/Rust/Dart bindings, matching the Opus track's shape.

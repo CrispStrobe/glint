@@ -51,6 +51,7 @@ set(GLINT_SOURCES
     src/opus_c_api.cpp
     src/mp3_decoder.cpp
     src/aac_decoder.cpp
+    src/decoder_c_api.cpp
     src/opus_mdct.cpp
     src/opus_ogg.cpp
     src/opus_celt_enc_energy.cpp

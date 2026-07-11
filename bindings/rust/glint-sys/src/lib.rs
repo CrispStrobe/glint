@@ -116,4 +116,23 @@ extern "C" {
         max_samples: c_int,
     ) -> c_int;
     pub fn glint_opus_ms_dec_destroy(dec: glint_t);
+
+    // MP3 + AAC decoders
+    pub fn glint_mp3_frame_info(data: *const u8, len: c_int, info: *mut GlintDecFrameInfo) -> c_int;
+    pub fn glint_aac_frame_info(data: *const u8, len: c_int, info: *mut GlintDecFrameInfo) -> c_int;
+    pub fn glint_mp3_dec_create() -> glint_t;
+    pub fn glint_mp3_decode(dec: glint_t, data: *const u8, len: c_int, pcm: *mut f32, info: *mut GlintDecFrameInfo) -> c_int;
+    pub fn glint_mp3_dec_destroy(dec: glint_t);
+    pub fn glint_aac_dec_create() -> glint_t;
+    pub fn glint_aac_decode(dec: glint_t, data: *const u8, len: c_int, pcm: *mut f32, info: *mut GlintDecFrameInfo) -> c_int;
+    pub fn glint_aac_dec_destroy(dec: glint_t);
+}
+
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+pub struct GlintDecFrameInfo {
+    pub sample_rate: c_int,
+    pub channels: c_int,
+    pub samples: c_int,
+    pub frame_bytes: c_int,
 }

@@ -420,3 +420,148 @@ mod opus_tests {
         assert_eq!(lost.len(), 960 * 2);
     }
 }
+
+
+/// A decoded frame's stream parameters.
+#[derive(Debug, Clone, Copy)]
+pub struct DecFrameInfo {
+    pub sample_rate: u32,
+    pub channels: u32,
+    pub samples: u32,
+    pub frame_bytes: u32,
+}
+
+macro_rules! frame_decoder {
+    ($name:ident, $create:ident, $decode:ident, $info:ident,
+     $destroy:ident, $doc:literal) => {
+        #[doc = $doc]
+        pub struct $name {
+            handle: glint_sys::glint_t,
+        }
+        unsafe impl Send for $name {}
+        impl $name {
+            pub fn new() -> Result<Self, &'static str> {
+                let handle = unsafe { glint_sys::$create() };
+                if handle.is_null() {
+                    return Err("decoder create failed");
+                }
+                Ok($name { handle })
+            }
+
+            /// Parse one frame header; None if data does not start with a
+            /// valid frame sync.
+            pub fn frame_info(&self, data: &[u8]) -> Option<DecFrameInfo> {
+                let mut fi = glint_sys::GlintDecFrameInfo::default();
+                let ok = unsafe {
+                    glint_sys::$info(data.as_ptr(), data.len() as i32, &mut fi)
+                };
+                if ok < 0 {
+                    return None;
+                }
+                Some(DecFrameInfo {
+                    sample_rate: fi.sample_rate as u32,
+                    channels: fi.channels as u32,
+                    samples: fi.samples as u32,
+                    frame_bytes: fi.frame_bytes as u32,
+                })
+            }
+
+            /// Decode ONE frame at data[0]. Returns interleaved f32 PCM
+            /// (empty while an MP3 reservoir fills) and the frame info.
+            pub fn decode_frame(
+                &mut self,
+                data: &[u8],
+            ) -> Result<(Vec<f32>, DecFrameInfo), &'static str> {
+                let mut pcm = vec![0f32; 2 * 1152];
+                let mut fi = glint_sys::GlintDecFrameInfo::default();
+                let n = unsafe {
+                    glint_sys::$decode(self.handle, data.as_ptr(),
+                        data.len() as i32, pcm.as_mut_ptr(), &mut fi)
+                };
+                if n < 0 {
+                    return Err("decode failed");
+                }
+                let ch = fi.channels.max(1) as usize;
+                pcm.truncate(n as usize * ch);
+                Ok((pcm, DecFrameInfo {
+                    sample_rate: fi.sample_rate as u32,
+                    channels: fi.channels as u32,
+                    samples: n as u32,
+                    frame_bytes: fi.frame_bytes as u32,
+                }))
+            }
+
+            /// Decode a whole stream (walks frames, skips ID3v2). Returns
+            /// interleaved f32 PCM.
+            pub fn decode(&mut self, data: &[u8]) -> Vec<f32> {
+                let mut off = 0usize;
+                if data.len() > 10 && &data[..3] == b"ID3" {
+                    let sz = ((data[6] as usize & 0x7f) << 21)
+                        | ((data[7] as usize & 0x7f) << 14)
+                        | ((data[8] as usize & 0x7f) << 7)
+                        | (data[9] as usize & 0x7f);
+                    off = 10 + sz;
+                }
+                let mut out = Vec::new();
+                while off + 7 <= data.len() {
+                    let info = match self.frame_info(&data[off..]) {
+                        Some(i) => i,
+                        None => {
+                            off += 1;
+                            continue;
+                        }
+                    };
+                    let fb = info.frame_bytes as usize;
+                    if fb == 0 || off + fb > data.len() {
+                        break;
+                    }
+                    if let Ok((pcm, _)) = self.decode_frame(&data[off..off + fb]) {
+                        out.extend_from_slice(&pcm);
+                    }
+                    off += fb;
+                }
+                out
+            }
+        }
+        impl Drop for $name {
+            fn drop(&mut self) {
+                unsafe { glint_sys::$destroy(self.handle) };
+            }
+        }
+    };
+}
+
+frame_decoder!(Mp3Decoder, glint_mp3_dec_create, glint_mp3_decode,
+    glint_mp3_frame_info, glint_mp3_dec_destroy,
+    "MPEG-1/2 Layer III decoder (keeps a bit reservoir across frames).");
+frame_decoder!(AacDecoder, glint_aac_dec_create, glint_aac_decode,
+    glint_aac_frame_info, glint_aac_dec_destroy,
+    "ADTS AAC-LC decoder.");
+
+#[cfg(test)]
+mod decoder_tests {
+    use super::*;
+
+    #[test]
+    fn mp3_encode_decode_roundtrip() {
+        let mut enc = Encoder::new(44100, 2, 128).unwrap();
+        let spf = enc.samples_per_frame();
+        let mut stream = Vec::new();
+        let mut phase = 0.0f64;
+        for _ in 0..40 {
+            let mut pcm = vec![0i16; spf * 2];
+            for i in 0..spf {
+                let s = 0.4 * (2.0 * std::f64::consts::PI * 440.0 * phase
+                    / 44100.0).sin();
+                phase += 1.0;
+                pcm[i * 2] = (s * 20000.0) as i16;
+                pcm[i * 2 + 1] = (s * 15000.0) as i16;
+            }
+            stream.extend_from_slice(&enc.encode(&pcm));
+        }
+        stream.extend_from_slice(&enc.flush());
+        let mut dec = Mp3Decoder::new().unwrap();
+        let out = dec.decode(&stream);
+        assert!(out.len() > 40000, "decoded {} samples", out.len());
+    }
+}

@@ -127,6 +127,15 @@ class _GlintConfig(ctypes.Structure):
         ("vbr_quality", ctypes.c_int),
     ]
 
+class _DecFrameInfo(ctypes.Structure):
+    _fields_ = [
+        ("sample_rate", ctypes.c_int),
+        ("channels", ctypes.c_int),
+        ("samples", ctypes.c_int),
+        ("frame_bytes", ctypes.c_int),
+    ]
+
+
 class _GlintAacConfig(ctypes.Structure):
     # Keep in sync with struct glint_aac_config (zero-init: reserved must be 0)
     _fields_ = [
@@ -231,6 +240,25 @@ def _setup_signatures(lib):
         lib.glint_opus_ms_decode.restype = ctypes.c_int
         lib.glint_opus_ms_dec_destroy.argtypes = [_glint_t]
         lib.glint_opus_ms_dec_destroy.restype = None
+    except AttributeError:
+        pass
+
+    # MP3 + AAC decoders (guard for older shared libraries)
+    try:
+        u8p = ctypes.POINTER(ctypes.c_uint8)
+        f32p = ctypes.POINTER(ctypes.c_float)
+        fip = ctypes.POINTER(_DecFrameInfo)
+        for pfx in ("mp3", "aac"):
+            getattr(lib, f"glint_{pfx}_frame_info").argtypes = [
+                u8p, ctypes.c_int, fip]
+            getattr(lib, f"glint_{pfx}_frame_info").restype = ctypes.c_int
+            getattr(lib, f"glint_{pfx}_dec_create").argtypes = []
+            getattr(lib, f"glint_{pfx}_dec_create").restype = _glint_t
+            getattr(lib, f"glint_{pfx}_decode").argtypes = [
+                _glint_t, u8p, ctypes.c_int, f32p, fip]
+            getattr(lib, f"glint_{pfx}_decode").restype = ctypes.c_int
+            getattr(lib, f"glint_{pfx}_dec_destroy").argtypes = [_glint_t]
+            getattr(lib, f"glint_{pfx}_dec_destroy").restype = None
     except AttributeError:
         pass
 
@@ -920,3 +948,114 @@ class OpusDecoder:
             self.close()
         except Exception:
             pass
+
+
+# ---------------------------------------------------------------------------
+# MP3 + AAC-LC decoders
+# ---------------------------------------------------------------------------
+
+class _FrameDecoder:
+    """Shared MP3/AAC decoder frontend. Subclasses set _prefix."""
+    _prefix = None
+
+    def __init__(self, *, lib=None):
+        self._lib = lib or load_library()
+        self._create = getattr(self._lib, f"glint_{self._prefix}_dec_create")
+        self._decode = getattr(self._lib, f"glint_{self._prefix}_decode")
+        self._info = getattr(self._lib, f"glint_{self._prefix}_frame_info")
+        self._destroy = getattr(
+            self._lib, f"glint_{self._prefix}_dec_destroy")
+        self._dec = self._create()
+        if not self._dec:
+            raise GlintError(f"{self._prefix} decoder create failed")
+        self._pcm = (ctypes.c_float * (2 * 1152))()
+        self._min_hdr = 4 if self._prefix == "mp3" else 7
+
+    def frame_info(self, data: bytes):
+        """Parse one frame header; returns a dict or None if no sync at
+        data[0]."""
+        buf = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
+        fi = _DecFrameInfo()
+        if self._info(buf, len(data), ctypes.byref(fi)) < 0:
+            return None
+        return {"sample_rate": fi.sample_rate, "channels": fi.channels,
+                "samples": fi.samples, "frame_bytes": fi.frame_bytes}
+
+    def decode_frame(self, data: bytes):
+        """Decode ONE frame at data[0]. Returns (pcm, info): pcm is
+        interleaved float (numpy (samples, channels) when numpy is
+        present, else a flat list); info is the frame dict. pcm is empty
+        while the MP3 reservoir fills."""
+        buf = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
+        fi = _DecFrameInfo()
+        n = self._decode(self._dec, buf, len(data), self._pcm,
+                         ctypes.byref(fi))
+        if n < 0:
+            raise GlintError(f"{self._prefix} decode failed ({n})")
+        ch = fi.channels or 1
+        flat = self._pcm[: n * ch]
+        info = {"sample_rate": fi.sample_rate, "channels": fi.channels,
+                "samples": n, "frame_bytes": fi.frame_bytes}
+        if _HAS_NUMPY:
+            arr = np.array(flat, dtype=np.float32).reshape(n, ch) if n \
+                else np.zeros((0, ch), dtype=np.float32)
+            return arr, info
+        return list(flat), info
+
+    def decode(self, data: bytes):
+        """Decode a whole stream (walk frames, skip ID3v2). Returns
+        interleaved float PCM: numpy (total, channels) or a flat list."""
+        off = 0
+        if len(data) > 10 and data[:3] == b"ID3":
+            sz = ((data[6] & 0x7F) << 21) | ((data[7] & 0x7F) << 14) | \
+                 ((data[8] & 0x7F) << 7) | (data[9] & 0x7F)
+            off = 10 + sz
+        chunks = []
+        ch = 0
+        while off + self._min_hdr <= len(data):
+            info = self.frame_info(data[off:off + 16])
+            if info is None:
+                off += 1
+                continue
+            fb = info["frame_bytes"]
+            if off + fb > len(data):
+                break
+            pcm, fi = self.decode_frame(data[off:off + fb])
+            ch = fi["channels"] or ch
+            if _HAS_NUMPY:
+                if len(pcm):
+                    chunks.append(pcm)
+            else:
+                chunks.extend(pcm)
+            off += fb
+        if _HAS_NUMPY:
+            return np.concatenate(chunks) if chunks else \
+                np.zeros((0, ch or 1), dtype=np.float32)
+        return chunks
+
+    def close(self):
+        if getattr(self, "_dec", None):
+            self._destroy(self._dec)
+            self._dec = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
+class Mp3Decoder(_FrameDecoder):
+    """MPEG-1/2 Layer III decoder. Keeps a bit reservoir across frames."""
+    _prefix = "mp3"
+
+
+class AacDecoder(_FrameDecoder):
+    """ADTS AAC-LC decoder."""
+    _prefix = "aac"

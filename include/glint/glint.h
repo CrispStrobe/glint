@@ -134,6 +134,44 @@ void           glint_aac_destroy(glint_aac_t enc);
 // playable as-is (mux with an Ogg layer for .opus files).
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// MP3 + AAC-LC DECODERS. Feed whole frames (locate them with the
+// frame_info helpers, which read one header). Output is interleaved
+// float PCM (±1.0). The MP3 decoder keeps a bit reservoir across calls,
+// so the first frame(s) of a stream may return 0 samples until enough
+// history has accumulated. Both are stateful — one context per stream.
+// ---------------------------------------------------------------------------
+
+typedef struct glint_mp3_dec_context* glint_mp3_dec_t;
+typedef struct glint_aac_dec_context* glint_aac_dec_t;
+
+struct glint_dec_frame_info {
+    int sample_rate;
+    int channels;
+    int samples;      // per channel this frame (0 while MP3 reservoir fills)
+    int frame_bytes;  // whole-frame length incl. header
+};
+
+// Parse one frame header; 0 + fills info, or -1 if data is not a valid
+// frame sync. Use frame_bytes to advance to the next frame.
+int glint_mp3_frame_info(const uint8_t* data, int len,
+                         struct glint_dec_frame_info* info);
+int glint_aac_frame_info(const uint8_t* data, int len,
+                         struct glint_dec_frame_info* info);
+
+glint_mp3_dec_t glint_mp3_dec_create(void);
+// Decode ONE frame at data[0]. pcm must hold samples*channels floats
+// (1152*2 is always enough for MP3, 1024*2 for AAC). Returns samples per
+// channel written (0 or a frame's worth), or a negative error.
+int  glint_mp3_decode(glint_mp3_dec_t dec, const uint8_t* data, int len,
+                      float* pcm, struct glint_dec_frame_info* info);
+void glint_mp3_dec_destroy(glint_mp3_dec_t dec);
+
+glint_aac_dec_t glint_aac_dec_create(void);
+int  glint_aac_decode(glint_aac_dec_t dec, const uint8_t* data, int len,
+                      float* pcm, struct glint_dec_frame_info* info);
+void glint_aac_dec_destroy(glint_aac_dec_t dec);
+
 typedef struct glint_opus_dec_context* glint_opus_dec_t;
 typedef struct glint_opus_ms_dec_context* glint_opus_ms_dec_t;
 typedef struct glint_opus_enc_context* glint_opus_enc_t;

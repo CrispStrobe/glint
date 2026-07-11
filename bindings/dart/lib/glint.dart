@@ -607,3 +607,124 @@ class GlintOpusDecoder {
     if (_disposed) throw StateError('GlintOpusDecoder has been disposed');
   }
 }
+
+
+// --- MP3 + AAC-LC decoders ---
+
+final class GlintDecFrameInfo extends Struct {
+  @Int32()
+  external int sampleRate;
+  @Int32()
+  external int channels;
+  @Int32()
+  external int samples;
+  @Int32()
+  external int frameBytes;
+}
+
+typedef _DecCreateNative = Pointer<Void> Function();
+typedef _DecCreate = Pointer<Void> Function();
+typedef _DecodeNative = Int32 Function(Pointer<Void>, Pointer<Uint8>, Int32,
+    Pointer<Float>, Pointer<GlintDecFrameInfo>);
+typedef _Decode = int Function(Pointer<Void>, Pointer<Uint8>, int,
+    Pointer<Float>, Pointer<GlintDecFrameInfo>);
+typedef _FrameInfoNative = Int32 Function(
+    Pointer<Uint8>, Int32, Pointer<GlintDecFrameInfo>);
+typedef _FrameInfo = int Function(
+    Pointer<Uint8>, int, Pointer<GlintDecFrameInfo>);
+
+/// Shared MP3/AAC decoder frontend. Feed a whole stream to [decode] or
+/// one frame at a time to [decodeFrame]; output is interleaved float PCM.
+abstract class _FrameDecoder {
+  late final DynamicLibrary _lib;
+  late final Pointer<Void> _handle;
+  late final _Decode _decode;
+  late final _FrameInfo _frameInfo;
+  late final _DecCreate _create;
+  late final void Function(Pointer<Void>) _destroy;
+  bool _disposed = false;
+
+  String get _prefix;
+
+  _FrameDecoder() {
+    _lib = _loadLibrary();
+    _create = _lib.lookupFunction<_DecCreateNative, _DecCreate>(
+        'glint_${_prefix}_dec_create');
+    _decode = _lib.lookupFunction<_DecodeNative, _Decode>(
+        'glint_${_prefix}_decode');
+    _frameInfo = _lib.lookupFunction<_FrameInfoNative, _FrameInfo>(
+        'glint_${_prefix}_frame_info');
+    _destroy = _lib.lookupFunction<
+        Void Function(Pointer<Void>),
+        void Function(Pointer<Void>)>('glint_${_prefix}_dec_destroy');
+    _handle = _create();
+    if (_handle == nullptr) {
+      throw StateError('glint_${_prefix}_dec_create returned null');
+    }
+  }
+
+  /// Decode a whole stream (walks frames, skips ID3v2). Returns
+  /// interleaved float PCM.
+  Float32List decode(Uint8List data) {
+    _checkNotDisposed();
+    var off = 0;
+    if (data.length > 10 &&
+        data[0] == 0x49 && data[1] == 0x44 && data[2] == 0x33) {
+      final sz = ((data[6] & 0x7F) << 21) |
+          ((data[7] & 0x7F) << 14) |
+          ((data[8] & 0x7F) << 7) |
+          (data[9] & 0x7F);
+      off = 10 + sz;
+    }
+    final inPtr = calloc<Uint8>(data.length);
+    inPtr.asTypedList(data.length).setAll(0, data);
+    final outPtr = calloc<Float>(2 * 1152);
+    final fi = calloc<GlintDecFrameInfo>();
+    final acc = <double>[];
+    try {
+      while (off + 7 <= data.length) {
+        if (_frameInfo((inPtr + off), data.length - off, fi) < 0) {
+          off++;
+          continue;
+        }
+        final fb = fi.ref.frameBytes;
+        if (fb == 0 || off + fb > data.length) break;
+        final n = _decode(_handle, (inPtr + off),
+            data.length - off, outPtr, fi);
+        if (n > 0) {
+          final ch = fi.ref.channels == 0 ? 1 : fi.ref.channels;
+          acc.addAll(outPtr.asTypedList(n * ch));
+        }
+        off += fb;
+      }
+    } finally {
+      calloc.free(inPtr);
+      calloc.free(outPtr);
+      calloc.free(fi);
+    }
+    return Float32List.fromList(acc);
+  }
+
+  void dispose() {
+    if (!_disposed) {
+      _destroy(_handle);
+      _disposed = true;
+    }
+  }
+
+  void _checkNotDisposed() {
+    if (_disposed) throw StateError('decoder has been disposed');
+  }
+}
+
+/// MPEG-1/2 Layer III decoder.
+class GlintMp3Decoder extends _FrameDecoder {
+  @override
+  String get _prefix => 'mp3';
+}
+
+/// ADTS AAC-LC decoder.
+class GlintAacDecoder extends _FrameDecoder {
+  @override
+  String get _prefix => 'aac';
+}

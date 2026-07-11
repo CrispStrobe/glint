@@ -999,6 +999,145 @@ static void test_opus_packet_parse() {
           "self-delimited size larger than the buffer rejected");
 }
 
+// ---------------------------------------------------------------------
+// Decoder C ABI: encode a tone through the public MP3/AAC encoder, decode
+// it back through the public decoder ABI, and check the roundtrip energy
+// and sample count. Validates the frame_info walkers + decode wiring.
+static void test_mp3_decoder_api() {
+    std::printf("[mp3 decoder API] encode -> decode roundtrip...\n");
+    const int sr = 44100, spf_hint = 1152, nframes = 40, ch = 2;
+    glint_config cfg;
+    std::memset(&cfg, 0, sizeof(cfg));
+    cfg.sample_rate = sr;
+    cfg.num_channels = ch;
+    cfg.mode = GLINT_JOINT;
+    cfg.bitrate = 128;
+    cfg.quality = GLINT_QUALITY_NORMAL;
+    glint_t enc = glint_create(&cfg);
+    CHECK(enc != nullptr, "mp3 encoder create");
+    int spf = glint_samples_per_frame(enc);
+    CHECK(spf == spf_hint, "mp3 1152 samples/frame");
+
+    std::vector<uint8_t> stream;
+    std::vector<int16_t> l(spf), r(spf);
+    double in_energy = 0;
+    long phase = 0;
+    for (int f = 0; f < nframes; f++) {
+        for (int i = 0; i < spf; i++, phase++) {
+            double s = 0.4 * std::sin(2 * M_PI * 440.0 * phase / sr);
+            l[i] = (int16_t)(s * 20000);
+            r[i] = (int16_t)(s * 15000);
+            in_energy += (l[i] / 32768.0) * (l[i] / 32768.0);
+        }
+        const int16_t* chd[2] = { l.data(), r.data() };
+        int n = 0;
+        const uint8_t* out = glint_encode(enc, chd, &n);
+        stream.insert(stream.end(), out, out + n);
+    }
+    int n = 0;
+    const uint8_t* tail = glint_flush(enc, &n);
+    stream.insert(stream.end(), tail, tail + n);
+    glint_destroy(enc);
+    CHECK(stream.size() > 1000, "mp3 stream produced");
+
+    glint_mp3_dec_t dec = glint_mp3_dec_create();
+    CHECK(dec != nullptr, "mp3 decoder create");
+    std::vector<float> pcm(2 * 1152);
+    size_t off = 0;
+    double out_energy = 0;
+    int got = 0, frames = 0;
+    glint_dec_frame_info fi;
+    while (off + 4 <= stream.size()) {
+        if (glint_mp3_frame_info(stream.data() + off,
+                                 (int)(stream.size() - off), &fi) < 0) {
+            off++;
+            continue;
+        }
+        if (off + (size_t)fi.frame_bytes > stream.size()) break;
+        int s = glint_mp3_decode(dec, stream.data() + off,
+                                 (int)(stream.size() - off), pcm.data(),
+                                 &fi);
+        if (s > 0) {
+            for (int i = 0; i < s; i++)
+                out_energy += pcm[i * fi.channels] * pcm[i * fi.channels];
+            got += s;
+            frames++;
+        }
+        off += fi.frame_bytes;
+    }
+    glint_mp3_dec_destroy(dec);
+    CHECK(frames > 30, "decoded most frames");
+    CHECK(got > nframes * spf / 2, "decoded a stream's worth of samples");
+    // Energy within a factor of 2 (lossy, plus reservoir warm-up).
+    double ratio = out_energy / (in_energy * 0.5 /*L only*/ + 1e-9);
+    CHECK(ratio > 0.3 && ratio < 3.0, "mp3 roundtrip energy sane");
+}
+
+static void test_aac_decoder_api() {
+    std::printf("[aac decoder API] encode -> decode roundtrip...\n");
+    const int sr = 44100, ch = 2, nframes = 40;
+    glint_aac_config cfg;
+    std::memset(&cfg, 0, sizeof(cfg));
+    cfg.sample_rate = sr;
+    cfg.num_channels = ch;
+    cfg.bitrate = 128;
+    cfg.quality = GLINT_QUALITY_NORMAL;
+    glint_aac_t enc = glint_aac_create(&cfg);
+    CHECK(enc != nullptr, "aac encoder create");
+    int spf = glint_aac_samples_per_frame(enc);
+    CHECK(spf == 1024, "aac 1024 samples/frame");
+
+    std::vector<uint8_t> stream;
+    std::vector<int16_t> l(spf), r(spf);
+    long phase = 0;
+    for (int f = 0; f < nframes; f++) {
+        for (int i = 0; i < spf; i++, phase++) {
+            double s = 0.4 * std::sin(2 * M_PI * 440.0 * phase / sr);
+            l[i] = (int16_t)(s * 20000);
+            r[i] = (int16_t)(s * 15000);
+        }
+        const int16_t* chd[2] = { l.data(), r.data() };
+        int n = 0;
+        const uint8_t* out = glint_aac_encode(enc, chd, &n);
+        if (out && n > 0) stream.insert(stream.end(), out, out + n);
+    }
+    int n = 0;
+    const uint8_t* tail = glint_aac_flush(enc, &n);
+    if (tail && n > 0) stream.insert(stream.end(), tail, tail + n);
+    glint_aac_destroy(enc);
+    CHECK(stream.size() > 1000, "aac stream produced");
+
+    glint_aac_dec_t dec = glint_aac_dec_create();
+    CHECK(dec != nullptr, "aac decoder create");
+    std::vector<float> pcm(2 * 1024);
+    size_t off = 0;
+    int got = 0, frames = 0;
+    double out_energy = 0;
+    glint_dec_frame_info fi;
+    while (off + 7 <= stream.size()) {
+        if (glint_aac_frame_info(stream.data() + off,
+                                 (int)(stream.size() - off), &fi) < 0) {
+            off++;
+            continue;
+        }
+        if (off + (size_t)fi.frame_bytes > stream.size()) break;
+        int s = glint_aac_decode(dec, stream.data() + off,
+                                 (int)(stream.size() - off), pcm.data(),
+                                 &fi);
+        if (s > 0) {
+            for (int i = 0; i < s; i++)
+                out_energy += pcm[i * fi.channels] * pcm[i * fi.channels];
+            got += s;
+            frames++;
+        }
+        off += fi.frame_bytes;
+    }
+    glint_aac_dec_destroy(dec);
+    CHECK(frames > 30, "aac decoded most frames");
+    CHECK(got > nframes * spf / 2, "aac decoded samples");
+    CHECK(out_energy > 1.0, "aac roundtrip produced audible energy");
+}
+
 int main() {
     std::printf("=== glint unit tests ===\n\n");
 
@@ -1030,6 +1169,8 @@ int main() {
     test_opus_celt_alloc_mdct();
     test_opus_packet_parse();
     test_opus_c_api_roundtrip();
+    test_mp3_decoder_api();
+    test_aac_decoder_api();
 
     std::printf("\n%d/%d tests passed\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;
