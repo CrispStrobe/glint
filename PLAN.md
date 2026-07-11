@@ -2293,3 +2293,42 @@ silk_LSHIFT pattern; defined on every 2's-complement platform) on a
 bit-exact-verified path, so UBSan-strict would flag cosmetic UB without
 a real bug — the bit-exact SILK files are left pristine. ctest
 decoder_fuzz now covers all three decoders.
+
+# CLI + wrapper feature expansion (SoX-informed) — 2026-07-11
+
+glint has three complete, fuzz-hardened decoders wired to the C ABI +
+Python/Rust/Dart wrappers, but the CLI only ENCODES (WAV -> MP3/AAC),
+and Opus lives in four side tools. SoX is a DSP toolkit; glint is a
+CODEC library, so the goal is a complete codec Swiss-army-knife for its
+three formats (encode/decode/transcode/inspect + WAV/raw I/O), NOT DSP
+effects. Two buckets:
+
+## Bucket A — codec plumbing (table stakes)
+- **A1 CLI decode**: `glint in.{mp3,aac,opus} out.wav` (+ raw). Needs a
+  WAV writer; decoders + ABI already exist.
+- **A2 Opus in the main CLI**: `in.wav out.opus`, `in.opus out.wav`
+  (Ogg mux/demux via OggOpusWriter/Reader); retire the four side tools'
+  role for end users.
+- **A3 Transcode**: `in.mp3 out.aac` etc. — falls out of decode+encode.
+- **A4 stdin/stdout piping** (`-` filename) for Unix pipelines.
+- **A5 `--info`**: soxi-style — format, rate, channels, duration,
+  bitrate, CBR/VBR. Uses the frame_info parsers.
+
+## Bucket B — codec-adjacent
+- **B6 Resampling** (`--rate HZ`): a windowed-sinc/polyphase resampler
+  (src/resample.*) so "any WAV -> Opus/native-rate codec" works; also
+  reusable in wrappers. The one large item.
+- **B7 Gain / peak-normalize** (`--gain dB`, `--norm[=dBFS]`): loudness
+  belongs to encoding (clipping/levels); a full effects chain does not.
+- **B8 Ogg/Opus container polish**: CLI `.opus` decode honors pre-skip,
+  output gain, granule end-trim end to end.
+
+## Out of scope (glint is not SoX)
+Effects (reverb/EQ/compand/tempo/pitch), play/rec, foreign-codec read
+(FLAC/Vorbis/AIFF). WAV + raw PCM is the I/O boundary.
+
+## Wiring
+Every item lands in the CLI AND the three wrappers (decode_file /
+transcode_file / resample helpers), each with a unit test (C ABI /
+in-process) and a live CLI test (encode->decode/transcode round-trip
+vs the existing decoder gates).
