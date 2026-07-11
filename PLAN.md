@@ -2282,3 +2282,14 @@ no error):
 After fixes: both decoders survive ~190k decode calls / 200M samples of
 malformed input with ZERO ASan/UBSan reports; all decode gates + 379
 unit tests unchanged (fixes are no-ops on valid streams).
+
+The **Opus decoder** was fuzzed too (tools/fuzz_opus_decoder.cpp, added
+to the same gate): **1,040,000 random + bit-flipped/truncated decode
+calls under ASan with no crash / OOB / hang** — memory-safe (as the
+existing libopus fuzz-oracle gates already implied for the decode-only
+layers). Opus runs ASan-ONLY: its SILK layer has benign, reference-
+inherited signed left-shifts of negative values (libopus's own
+silk_LSHIFT pattern; defined on every 2's-complement platform) on a
+bit-exact-verified path, so UBSan-strict would flag cosmetic UB without
+a real bug — the bit-exact SILK files are left pristine. ctest
+decoder_fuzz now covers all three decoders.

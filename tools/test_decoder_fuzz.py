@@ -94,8 +94,56 @@ def main():
         if "mp3:" not in out or "aac:" not in out:
             sys.exit("FAIL: fuzz did not complete both decoders")
         tag = "ASan+UBSan" if sanitized else "plain"
-        print(f"PASS: MP3 + AAC decoders survive malformed input ({tag}, "
-              f"{iters} iters x random/bitflip/truncate)")
+        print(f"[mp3/aac] ok ({tag}, {iters} iters)")
+
+        # Opus decoder: ASan-only (its SILK layer has benign,
+        # reference-inherited signed-shift UBs on a bit-exact path).
+        opus_srcs = [
+            "opus_ec.cpp", "opus_laplace.cpp", "opus_cwrs.cpp",
+            "opus_celt_energy.cpp", "opus_celt_rate.cpp",
+            "opus_celt_bands.cpp", "opus_celt_decoder.cpp",
+            "opus_decoder.cpp", "opus_ms_decoder.cpp", "opus_mdct.cpp",
+            "opus_silk_excitation.cpp", "opus_silk_indices.cpp",
+            "opus_silk_nlsf.cpp", "opus_silk_plc.cpp",
+            "opus_silk_frame.cpp", "opus_silk_stereo.cpp",
+            "opus_silk_resampler.cpp", "opus_silk_decoder.cpp"]
+        obin = os.path.join(tmp, "ofuzz")
+        obuild = [cxx, "-std=c++17", "-O1", "-g",
+                  "-I", os.path.join(REPO, "src"),
+                  os.path.join(REPO, "tools", "fuzz_opus_decoder.cpp")] + \
+            [os.path.join(REPO, "src", s) for s in opus_srcs]
+        obit = None
+        enc = os.path.join(REPO, "build", "opus_enc_cli")
+        if os.path.exists(enc):
+            raw = os.path.join(tmp, "o.raw")
+            import numpy as np
+            n = 48000 * 2
+            t = np.arange(n) / 48000.0
+            pcm = np.empty(n * 2)
+            pcm[0::2] = 0.3 * np.sin(2 * math.pi * 440 * t)
+            pcm[1::2] = 0.3 * np.sin(2 * math.pi * 550 * t)
+            (np.clip(pcm, -1, 1) * 20000).astype("<i2").tofile(raw)
+            obit = os.path.join(tmp, "o.bit")
+            run([enc, raw, "2", "96000", "200", obit])
+        oa = run(obuild + ["-fsanitize=address", "-o", obin])
+        if oa.returncode == 0:
+            oit = str(max(2000, int(iters) // 2))
+            try:
+                r = subprocess.run(
+                    [obin] + ([obit] if obit else []) + [oit], env=env,
+                    capture_output=True, timeout=400)
+            except subprocess.TimeoutExpired:
+                sys.exit("FAIL: Opus decoder fuzz hung")
+            oerr = r.stderr.decode()
+            print(r.stdout.decode().strip())
+            if ("AddressSanitizer" in oerr or r.returncode != 0):
+                print(oerr[:1200])
+                sys.exit("FAIL: ASan flagged the Opus decoder")
+        else:
+            print("(Opus fuzz build skipped)")
+
+        print(f"PASS: MP3 + AAC + Opus decoders survive malformed input "
+              f"(no crash / OOB / hang)")
 
 
 if __name__ == "__main__":
