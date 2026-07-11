@@ -2195,3 +2195,21 @@ wrappers, mirroring the Opus decoder pattern.
 
 The MP3+AAC codecs are now COMPLETE both ways (encode + decode) with C
 ABI + Python/Rust/Dart bindings, matching the Opus track's shape.
+
+
+## AAC decoder IMDCT speedup (2026-07-11)
+
+The AAC decoder shipped with a direct O(N^2) IMDCT (48 s to decode 30 s
+of stereo — sub-realtime). Replaced with a fast FFT-based IMDCT
+(src/aac_decoder.cpp ImdctPlan): the decoder IMDCT and the encoder's
+forward MDCT are a proven perfect-reconstruction pair (aac_mdct.cpp),
+so the fast path inverts the encoder's exact pipeline — undo
+post-twiddle, Q=N/4 radix-2 complex FFT (precomputed bit-reversal +
+twiddles), undo pre-twiddle to recover the folded u, unfold via the
+measured TDAC symmetry (region B x[n]=-x[2Q-1-n], region A
+x[3Q+n]=x[3Q-1-n]). Derived and verified in a standalone harness
+(fast vs direct rel-err 2e-13 for N=2048 and 256).
+
+Result: **403x faster per transform; 30 s stereo now decodes in 0.06 s
+(~440x realtime, was 48 s)**; decoder output 232.7 dB identical to the
+direct version; gate + unit suite unchanged.

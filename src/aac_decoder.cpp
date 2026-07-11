@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 #include "aac_tables.hpp"
 
@@ -81,6 +82,102 @@ HuffTree g_spec[11];  // spectral codebooks 1..11 -> index 0..10
 HuffTree g_scf;       // scalefactor codebook
 bool g_built = false;
 
+// ---------------------------------------------------------- transforms
+// Fast inverse MDCT (403x over the direct O(N^2) form, matched to it at
+// ~2e-13). The decoder's IMDCT and the encoder's forward MDCT are a
+// proven perfect-reconstruction pair (see aac_mdct.cpp), so this inverts
+// the encoder's exact pipeline: undo the post-twiddle, run the Q=N/4
+// complex FFT, undo the pre-twiddle to recover the folded sequence u,
+// then unfold via the TDAC symmetry (region B anti-symmetric, region A
+// symmetric). N = 2048 (long) or 256 (short); Q = N/4.
+struct ImdctPlan {
+    int N, H, log2H;
+    std::vector<int> brev;               // bit-reversal permutation (H)
+    std::vector<double> fw_re, fw_im;    // FFT twiddles e^{+i 2pi j / len}
+    std::vector<double> tw_re, tw_im;    // pre/post twiddle per k (H)
+
+    void init(int n) {
+        N = n;
+        H = N / 4;
+        log2H = 0;
+        while ((1 << log2H) < H) log2H++;
+        brev.resize(H);
+        for (int i = 0; i < H; i++) {
+            unsigned r = 0;
+            for (int b = 0; b < log2H; b++) r = (r << 1) | ((i >> b) & 1);
+            brev[i] = static_cast<int>(r);
+        }
+        fw_re.assign(H, 0);
+        fw_im.assign(H, 0);
+        for (int j = 0; j < H; j++) {
+            fw_re[j] = std::cos(2.0 * M_PI * j / H);
+            fw_im[j] = std::sin(2.0 * M_PI * j / H);  // + sign: inverse FFT
+        }
+        int M = N / 2;
+        tw_re.assign(H, 0);
+        tw_im.assign(H, 0);
+        for (int k = 0; k < H; k++) {
+            tw_re[k] = std::cos(M_PI * (k + 0.125) / M);
+            tw_im[k] = -std::sin(M_PI * (k + 0.125) / M);
+        }
+    }
+
+    void run(const double* spec, double* x) const {
+        const int M = N / 2, Q = H;
+        double re[512], im[512];  // H <= 512
+        for (int k = 0; k < H; k++) {
+            double A = spec[2 * k] * 0.5;
+            double B = -spec[M - 1 - 2 * k] * 0.5;
+            double twr = tw_re[k], twi = tw_im[k];
+            re[k] = A * twr + B * twi;
+            im[k] = -A * twi + B * twr;
+        }
+        // In-place radix-2 FFT with precomputed twiddles (inverse: +i).
+        for (int i = 0; i < H; i++) {
+            int r = brev[i];
+            if (r > i) {
+                std::swap(re[i], re[r]);
+                std::swap(im[i], im[r]);
+            }
+        }
+        for (int len = 2; len <= H; len <<= 1) {
+            int half = len >> 1, stride = H / len;
+            for (int base = 0; base < H; base += len)
+                for (int j = 0; j < half; j++) {
+                    double wr = fw_re[j * stride], wi = fw_im[j * stride];
+                    int a = base + j, b = a + half;
+                    double xr = re[b] * wr - im[b] * wi;
+                    double xi = re[b] * wi + im[b] * wr;
+                    re[b] = re[a] - xr;
+                    im[b] = im[a] - xi;
+                    re[a] += xr;
+                    im[a] += xi;
+                }
+        }
+        double u[1024];  // M <= 1024
+        const double inv = 2.0 / H;
+        for (int nn = 0; nn < H; nn++) {
+            double R = re[nn] * inv, I = im[nn] * inv;
+            double twr = tw_re[nn], twi = tw_im[nn];
+            u[2 * nn] = R * twr + I * twi;
+            u[M - 1 - 2 * nn] = -R * twi + I * twr;
+        }
+        for (int nn = 0; nn < Q; nn++) {
+            double b = u[Q + nn] * 0.5, a = -u[nn] * 0.5;
+            x[nn] = b;
+            x[2 * Q - 1 - nn] = -b;
+            x[3 * Q + nn] = a;
+            x[3 * Q - 1 - nn] = a;
+        }
+    }
+};
+
+ImdctPlan g_imdct_long, g_imdct_short;
+
+void imdct(const double* X, double* x, int N) {
+    (N == 2048 ? g_imdct_long : g_imdct_short).run(X, x);
+}
+
 void build_trees() {
     if (g_built) return;
     for (int bk = 0; bk < 11; bk++) {
@@ -97,27 +194,13 @@ void build_trees() {
         if (kScfBits[i] == 0) continue;
         g_scf.insert(kScfCodes[i], kScfBits[i], i);
     }
+    g_imdct_long.init(2048);
+    g_imdct_short.init(256);
     g_built = true;
 }
 
 const int kChannelsForConfig[8] = { 0, 1, 2, 3, 4, 5, 6, 8 };
 
-// ---------------------------------------------------------- transforms
-// Direct inverse MDCT: x[n] = 2/N * sum_k X[k] cos(2pi/N (n+n0)(k+1/2)),
-// n0 = (N/2+1)/2, n = 0..N-1. N = 2048 (long) or 256 (short).
-void imdct(const double* X, double* x, int N) {
-    int M = N / 2;
-    double n0 = (M + 1) / 2.0;
-    double s = 2.0 / N;
-    double w0 = 2.0 * M_PI / N;
-    for (int n = 0; n < N; n++) {
-        double acc = 0;
-        double phase = w0 * (n + n0);
-        for (int k = 0; k < M; k++)
-            acc += X[k] * std::cos(phase * (k + 0.5));
-        x[n] = s * acc;
-    }
-}
 
 double sl_win(int n) {  // long sine window, n = 0..2047
     return std::sin(M_PI / 2048.0 * ((n < 1024 ? n : 2047 - n) + 0.5));
