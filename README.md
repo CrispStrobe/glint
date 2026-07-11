@@ -32,15 +32,22 @@ vo-aacenc (Apache-2.0) is unmaintained and last on quality.
 - **Verified wire format**: every configuration decodes with zero
   errors in both ffmpeg and Apple CoreAudio, which produce metrically
   identical output; decode-based gates run in CI.
-- **Opus decoder (new, this branch): RFC-conformant.** A clean-room
-  Opus decoder built from RFC 6716 — SILK, CELT, and hybrid modes,
-  packet-loss concealment, and mode-transition handling. **All 12
-  official RFC 6716/8251 test vectors pass** the normative
-  `opus_compare` procedure (97-100% quality) with zero final-range
-  mismatches across ~20,000 packets. SILK decodes bit-identically to
-  libopus; every layer is cross-checked by a dedicated oracle harness
-  in `tools/` (byte-exact for the integer layers, peak-scaled float
-  tolerances for the transforms). See PLAN.md O-track.
+- **Opus codec: RFC-conformant decoder + a competitive CELT encoder.**
+  Clean-room from RFC 6716/7845. Decoder: SILK, CELT and hybrid modes,
+  PLC/CNG, SILK in-band FEC (byte-identical recovery vs libopus),
+  multistream/surround (mapping family 1, 5.1/quad), output rates
+  8-48 kHz, Ogg `.opus` read/write with output gain. **All 12 official
+  RFC 6716/8251 test vectors pass** the normative `opus_compare`
+  procedure with zero final-range mismatches across ~20,000 packets;
+  SILK decodes bit-identically to libopus. Encoder: CELT-only with the
+  full analysis chain (pitch prefilter, transients + short blocks,
+  per-band TF resolution, dynalloc, spread/tapset, intensity + dual
+  stereo, trim, tonality analysis, CBR + unconstrained VBR) — every
+  stream's final range is verified by libopus's own decoder, and in a
+  PEAQ-ODG league against libopus 1.5.2 at 96 kbps it **wins 4 clips /
+  ties 4 / narrowly loses 2** (192 kbps: transparent everywhere, top
+  raw SNR on most clips). Every layer is cross-checked by a dedicated
+  oracle harness in `tools/`. See PLAN.md O-track.
 
 ## Quick start
 
@@ -204,6 +211,10 @@ Opus (decode): packet → TOC/framing → range decoder → energy envelope
        by the decoder, no side info) → PVQ shapes + folding +
        anti-collapse → inverse MDCT (mixed-radix FFT) → pitch
        postfilter → de-emphasis → PCM
+Opus (encode): pitch prefilter → transient/TF/tonality analysis →
+     forward MDCT → coarse/fine energy → dynalloc + trim + spread +
+       intensity decisions → PVQ band shapes → CBR or VBR (range-coder
+       shrink) → packets whose final ranges libopus itself verifies
 ```
 
 Shared discipline: psychoacoustic masks aligned with the measurement
@@ -219,7 +230,7 @@ historically passed while real decoders produced garbage.
 glint/
 ├── include/glint/glint.h      C API (MP3 + AAC)
 ├── src/                       MP3 core + aac_*.{hpp,cpp} (AAC core)
-│                              + opus_*.{hpp,cpp} (Opus decoder, WIP)
+│                              + opus_*.{hpp,cpp} (Opus codec)
 ├── tools/                     AAC/CELT table generators, no-FPU checker,
 │                              Opus-vs-libopus cross-check harnesses
 ├── cli/main.cpp               WAV → MP3/AAC CLI
@@ -251,8 +262,11 @@ the exact invocations used in CI.
 
 ## Roadmap
 
-- **Opus** (PLAN.md O-track): decoder DONE (12/12 RFC vectors). Next:
-  Ogg Opus container (decode .opus files) → CELT-only encoder → FEC.
+- **Opus** (PLAN.md O-track): COMPLETE — decoder (vectors, FEC,
+  multistream, 8-48k out, Ogg) + CELT encoder (libopus-certified
+  streams; 96k ODG league 4W/4T/2L vs libopus). Possible follow-ups:
+  the remaining piano/torture ODG gap, SILK/hybrid encoding, DTX,
+  multistream encode.
 - On-target RP2040/ESP32 throughput measurements (harness ships, needs
   silicon).
 - The last ~0.5 PEAQ ODG to Apple on speech/electronic at 128 kbps
