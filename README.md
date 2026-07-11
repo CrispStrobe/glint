@@ -45,9 +45,10 @@ vo-aacenc (Apache-2.0) is unmaintained and last on quality.
   ffmpeg/fdkaac/afconvert streams (whose PNS is decoder-random) in the
   spectral-envelope domain; a fast FFT-based IMDCT decodes at **~440x
   realtime**. Both reuse the encoders' own Huffman tables, so encode and
-  decode cannot drift, and both are fuzzed under ASan+UBSan (random /
-  bit-flipped / truncated input — no crash, out-of-bounds access or
-  hang). C ABI + Python/Rust/Dart bindings.
+  decode cannot drift. The frame decoders **and** the container/whole-file
+  parsers (WAV reader, Ogg-Opus demuxer) are fuzzed under ASan+UBSan
+  (random / bit-flipped / truncated input — no crash, out-of-bounds access
+  or hang). C ABI + Python/Rust/Dart bindings.
 - **Opus codec: RFC-conformant decoder + a competitive CELT encoder.**
   Clean-room from RFC 6716/7845. Decoder: SILK, CELT and hybrid modes,
   PLC/CNG, SILK in-band FEC (byte-identical recovery vs libopus),
@@ -283,7 +284,7 @@ glint/
 │                              + opus_*.{hpp,cpp} (Opus codec)
 ├── tools/                     AAC/CELT table generators, no-FPU checker,
 │                              Opus-vs-libopus cross-check harnesses
-├── cli/main.cpp               WAV → MP3/AAC CLI
+├── cli/                       codec CLI: encode/decode/transcode/resample
 ├── tests/                     unit + decode gates + quality/league/ABX
 ├── bindings/                  Python (ctypes) · Rust (sys+safe) · Dart FFI
 ├── embedded/                  bench core, QEMU target, Pico project
