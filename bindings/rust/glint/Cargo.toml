@@ -8,5 +8,8 @@ repository = "https://github.com/CrispStrobe/glint"
 keywords = ["mp3", "audio", "encoder", "codec"]
 categories = ["multimedia::audio", "multimedia::encoding"]
 
+[lib]
+name = "glint"
+
 [dependencies]
 glint-sys = { path = "../glint-sys" }

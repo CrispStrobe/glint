@@ -126,6 +126,59 @@ const uint8_t* glint_aac_encode_float(glint_aac_t enc, const float** channel_dat
 const uint8_t* glint_aac_flush(glint_aac_t enc, int* out_size);
 void           glint_aac_destroy(glint_aac_t enc);
 
+// ---------------------------------------------------------------------------
+// Opus (RFC 6716/7845). Decoder: any Opus stream (SILK/CELT/hybrid),
+// packet-loss concealment, SILK in-band FEC, output rates 8/12/16/24/48 kHz.
+// Encoder: CELT-only at 48 kHz (frame sizes 120/240/480/960 samples),
+// CBR or unconstrained VBR; every packet carries its TOC byte and is
+// playable as-is (mux with an Ogg layer for .opus files).
+// ---------------------------------------------------------------------------
+
+typedef struct glint_opus_dec_context* glint_opus_dec_t;
+typedef struct glint_opus_ms_dec_context* glint_opus_ms_dec_t;
+typedef struct glint_opus_enc_context* glint_opus_enc_t;
+
+// channels 1 or 2; sample_rate 48000/24000/16000/12000/8000.
+glint_opus_dec_t glint_opus_dec_create(int channels, int sample_rate);
+// Decode one packet to interleaved float PCM (+-1.0). Returns samples
+// per channel at sample_rate, or negative on error. max_samples guards
+// pcm (per channel; 5760*48000ths covers any packet).
+int      glint_opus_decode(glint_opus_dec_t dec, const uint8_t* packet,
+                           int len, float* pcm, int max_samples);
+// Conceal a LOST packet of frame_size samples per channel. packet (the
+// one FOLLOWING the loss) may carry SILK in-band FEC; pass NULL for
+// plain concealment. Returns frame_size or negative.
+int      glint_opus_decode_fec(glint_opus_dec_t dec, const uint8_t* packet,
+                               int len, float* pcm, int frame_size);
+// Range-coder state after the last decode (Opus conformance identity;
+// equals the encoder's final range for a correctly decoded packet).
+uint32_t glint_opus_dec_final_range(glint_opus_dec_t dec);
+void     glint_opus_dec_destroy(glint_opus_dec_t dec);
+
+// Multistream/surround (RFC 7845 mapping family 1, up to 8 channels).
+// streams elementary streams, the first `coupled` of them stereo;
+// mapping[channels] assigns stream channels to outputs (255 = silent).
+glint_opus_ms_dec_t glint_opus_ms_dec_create(int channels, int streams,
+                                             int coupled,
+                                             const uint8_t* mapping,
+                                             int sample_rate);
+int      glint_opus_ms_decode(glint_opus_ms_dec_t dec,
+                              const uint8_t* packet, int len, float* pcm,
+                              int max_samples);
+void     glint_opus_ms_dec_destroy(glint_opus_ms_dec_t dec);
+
+// CELT-only encoder: 48 kHz interleaved float input, channels 1 or 2.
+// vbr = 0 for CBR at bitrate_bps, 1 for unconstrained VBR targeting it.
+glint_opus_enc_t glint_opus_enc_create(int channels, int bitrate_bps,
+                                       int vbr);
+// Encode one frame (frame_size = 120, 240, 480 or 960 samples/channel).
+// Writes a complete Opus packet (TOC + payload) into out; returns its
+// size in bytes, or negative on error. max_bytes >= 1276 always works.
+int      glint_opus_encode(glint_opus_enc_t enc, const float* pcm,
+                           int frame_size, uint8_t* out, int max_bytes);
+uint32_t glint_opus_enc_final_range(glint_opus_enc_t enc);
+void     glint_opus_enc_destroy(glint_opus_enc_t enc);
+
 #ifdef __cplusplus
 }
 #endif

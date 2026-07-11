@@ -303,30 +303,7 @@ class GlintEncoder {
   }
 }
 
-// --- Simple calloc allocator ---
-
-class _Calloc {
-  late final _mallocFn = DynamicLibrary.process()
-      .lookupFunction<Pointer<Void> Function(IntPtr), Pointer<Void> Function(int)>('malloc');
-  late final _memsetFn = DynamicLibrary.process().lookupFunction<
-      Pointer<Void> Function(Pointer<Void>, Int32, IntPtr),
-      Pointer<Void> Function(Pointer<Void>, int, int)>('memset');
-  late final _freeFn = DynamicLibrary.process()
-      .lookupFunction<Void Function(Pointer<Void>), void Function(Pointer<Void>)>('free');
-
-  Pointer<T> call<T extends NativeType>([int count = 1]) {
-    final size = sizeOf<T>() * count;
-    final ptr = _mallocFn(size);
-    _memsetFn(ptr, 0, size);
-    return ptr.cast<T>();
-  }
-
-  void free(Pointer ptr) {
-    _freeFn(ptr.cast<Void>());
-  }
-}
-
-final calloc = _Calloc();
+// Allocation uses package:ffi's calloc (zero-initialised).
 
 
 /// AAC-LC encoder (ADTS output). Same interleaved-PCM conventions as
@@ -445,5 +422,188 @@ class GlintAacEncoder {
     if (_disposed) {
       throw StateError('GlintAacEncoder has been disposed');
     }
+  }
+}
+
+
+// --- Opus codec (CELT encoder + full decoder) ---
+
+typedef _OpusEncCreateNative = Pointer<Void> Function(Int32, Int32, Int32);
+typedef _OpusEncCreate = Pointer<Void> Function(int, int, int);
+typedef _OpusEncodeNative = Int32 Function(
+    Pointer<Void>, Pointer<Float>, Int32, Pointer<Uint8>, Int32);
+typedef _OpusEncode = int Function(
+    Pointer<Void>, Pointer<Float>, int, Pointer<Uint8>, int);
+typedef _OpusDecCreateNative = Pointer<Void> Function(Int32, Int32);
+typedef _OpusDecCreate = Pointer<Void> Function(int, int);
+typedef _OpusDecodeNative = Int32 Function(
+    Pointer<Void>, Pointer<Uint8>, Int32, Pointer<Float>, Int32);
+typedef _OpusDecode = int Function(
+    Pointer<Void>, Pointer<Uint8>, int, Pointer<Float>, int);
+typedef _OpusRangeNative = Uint32 Function(Pointer<Void>);
+typedef _OpusRange = int Function(Pointer<Void>);
+typedef _OpusDestroyNative = Void Function(Pointer<Void>);
+typedef _OpusDestroy = void Function(Pointer<Void>);
+
+/// CELT-only Opus encoder: 48 kHz interleaved float32 PCM in, complete
+/// Opus packets out. Frame sizes 120/240/480/960 samples per channel.
+class GlintOpusEncoder {
+  late final DynamicLibrary _lib;
+  late final Pointer<Void> _handle;
+  final int channels;
+
+  late final _OpusEncode _encode;
+  late final _OpusRange _finalRange;
+  late final _OpusDestroy _destroy;
+
+  bool _disposed = false;
+
+  GlintOpusEncoder({int channels = 2, int bitrate = 96000, bool vbr = false})
+      : channels = channels {
+    _lib = _loadLibrary();
+    final create = _lib.lookupFunction<_OpusEncCreateNative, _OpusEncCreate>(
+        'glint_opus_enc_create');
+    _encode = _lib
+        .lookupFunction<_OpusEncodeNative, _OpusEncode>('glint_opus_encode');
+    _finalRange = _lib.lookupFunction<_OpusRangeNative, _OpusRange>(
+        'glint_opus_enc_final_range');
+    _destroy = _lib.lookupFunction<_OpusDestroyNative, _OpusDestroy>(
+        'glint_opus_enc_destroy');
+    _handle = create(channels, bitrate, vbr ? 1 : 0);
+    if (_handle == nullptr) {
+      throw StateError('glint_opus_enc_create returned null');
+    }
+  }
+
+  /// Encode one frame of interleaved float PCM
+  /// (frameSize * channels values; frameSize in {120, 240, 480, 960}).
+  Uint8List encode(Float32List pcm) {
+    _checkNotDisposed();
+    final frame = pcm.length ~/ channels;
+    final inPtr = calloc<Float>(pcm.length);
+    inPtr.asTypedList(pcm.length).setAll(0, pcm);
+    final outPtr = calloc<Uint8>(1500);
+    final n = _encode(_handle, inPtr, frame, outPtr, 1500);
+    Uint8List out;
+    if (n <= 0) {
+      out = Uint8List(0);
+    } else {
+      out = Uint8List.fromList(outPtr.asTypedList(n));
+    }
+    calloc.free(inPtr);
+    calloc.free(outPtr);
+    if (n < 0) {
+      throw StateError('opus encode failed ($n)');
+    }
+    return out;
+  }
+
+  int finalRange() => _finalRange(_handle);
+
+  void dispose() {
+    if (!_disposed) {
+      _destroy(_handle);
+      _disposed = true;
+    }
+  }
+
+  void _checkNotDisposed() {
+    if (_disposed) throw StateError('GlintOpusEncoder has been disposed');
+  }
+}
+
+/// Opus decoder (SILK/CELT/hybrid, PLC, SILK in-band FEC). Output rates
+/// 48000/24000/16000/12000/8000; interleaved float32 PCM out.
+class GlintOpusDecoder {
+  late final DynamicLibrary _lib;
+  late final Pointer<Void> _handle;
+  final int channels;
+
+  late final _OpusDecode _decode;
+  late final _OpusDecode _decodeFec;
+  late final _OpusRange _finalRange;
+  late final _OpusDestroy _destroy;
+
+  bool _disposed = false;
+
+  GlintOpusDecoder({int channels = 2, int sampleRate = 48000})
+      : channels = channels {
+    _lib = _loadLibrary();
+    final create = _lib.lookupFunction<_OpusDecCreateNative, _OpusDecCreate>(
+        'glint_opus_dec_create');
+    _decode = _lib
+        .lookupFunction<_OpusDecodeNative, _OpusDecode>('glint_opus_decode');
+    _decodeFec = _lib.lookupFunction<_OpusDecodeNative, _OpusDecode>(
+        'glint_opus_decode_fec');
+    _finalRange = _lib.lookupFunction<_OpusRangeNative, _OpusRange>(
+        'glint_opus_dec_final_range');
+    _destroy = _lib.lookupFunction<_OpusDestroyNative, _OpusDestroy>(
+        'glint_opus_dec_destroy');
+    _handle = create(channels, sampleRate);
+    if (_handle == nullptr) {
+      throw StateError('glint_opus_dec_create returned null');
+    }
+  }
+
+  /// Decode one packet; returns interleaved float PCM.
+  Float32List decode(Uint8List packet) {
+    _checkNotDisposed();
+    final inPtr = calloc<Uint8>(packet.length);
+    inPtr.asTypedList(packet.length).setAll(0, packet);
+    final outPtr = calloc<Float>(2 * 5760);
+    final n = _decode(_handle, inPtr, packet.length, outPtr, 5760);
+    Float32List out;
+    if (n <= 0) {
+      out = Float32List(0);
+    } else {
+      out = Float32List.fromList(outPtr.asTypedList(n * channels));
+    }
+    calloc.free(inPtr);
+    calloc.free(outPtr);
+    if (n < 0) {
+      throw StateError('opus decode failed ($n)');
+    }
+    return out;
+  }
+
+  /// Conceal a LOST packet of [frameSize] samples per channel;
+  /// [nextPacket] (the packet after the loss) supplies SILK in-band FEC
+  /// when present.
+  Float32List decodeLost(int frameSize, [Uint8List? nextPacket]) {
+    _checkNotDisposed();
+    final outPtr = calloc<Float>(2 * 5760);
+    int n;
+    if (nextPacket != null && nextPacket.isNotEmpty) {
+      final inPtr = calloc<Uint8>(nextPacket.length);
+      inPtr.asTypedList(nextPacket.length).setAll(0, nextPacket);
+      n = _decodeFec(_handle, inPtr, nextPacket.length, outPtr, frameSize);
+      calloc.free(inPtr);
+    } else {
+      n = _decodeFec(_handle, nullptr, 0, outPtr, frameSize);
+    }
+    Float32List out;
+    if (n <= 0) {
+      out = Float32List(0);
+    } else {
+      out = Float32List.fromList(outPtr.asTypedList(n * channels));
+    }
+    calloc.free(outPtr);
+    if (n < 0) {
+      throw StateError('opus concealment failed ($n)');
+    }
+    return out;
+  }
+
+  int finalRange() => _finalRange(_handle);
+
+  void dispose() {
+    if (!_disposed) {
+      _destroy(_handle);
+      _disposed = true;
+    }
+  }
+
+  void _checkNotDisposed() {
+    if (_disposed) throw StateError('GlintOpusDecoder has been disposed');
   }
 }

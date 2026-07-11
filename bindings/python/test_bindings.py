@@ -247,6 +247,51 @@ class TestAacEncoder(unittest.TestCase):
         self.assertGreaterEqual(v, (0 << 16) | (8 << 8))
 
 
+class TestOpus(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        try:
+            glint.load_library()
+        except Exception:
+            raise unittest.SkipTest("libglint not found")
+        if not hasattr(glint, "OpusEncoder"):
+            raise unittest.SkipTest("Opus API not in this binding")
+
+    def test_roundtrip_final_range(self):
+        """Encoder and decoder final ranges must be identical on every
+        packet — the Opus conformance identity."""
+        import math
+        enc = glint.OpusEncoder(channels=2, bitrate=96000)
+        dec = glint.OpusDecoder(channels=2, sample_rate=48000)
+        for f in range(5):
+            pcm = []
+            for i in range(960):
+                t = (f * 960 + i) / 48000.0
+                pcm += [0.4 * math.sin(2 * math.pi * 440 * t),
+                        0.3 * math.sin(2 * math.pi * 660 * t)]
+            pkt = enc.encode(pcm)
+            self.assertGreater(len(pkt), 1)
+            out = dec.decode(pkt)
+            n = len(out) if not hasattr(out, "shape") else out.shape[0]
+            self.assertIn(n, (960, 960 * 2))  # numpy (960,2) vs flat list
+            self.assertEqual(enc.final_range(), dec.final_range())
+        enc.close()
+        dec.close()
+
+    def test_concealment_and_rates(self):
+        dec = glint.OpusDecoder(channels=1, sample_rate=16000)
+        lost = dec.decode_lost(320)
+        n = len(lost) if not hasattr(lost, "shape") else lost.shape[0]
+        self.assertEqual(n, 320)
+        dec.close()
+
+    def test_invalid_config(self):
+        with self.assertRaises(glint.ConfigError):
+            glint.OpusDecoder(channels=3)
+        with self.assertRaises(glint.ConfigError):
+            glint.OpusEncoder(channels=1, bitrate=100)
+
+
 if __name__ == "__main__":
     # Strip our custom argv before unittest parses it
     build = _build_dir()

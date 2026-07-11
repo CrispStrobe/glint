@@ -2039,3 +2039,49 @@ read/write, output gain) + a CELT encoder trading blows with libopus
 (4 wins / 4 ties / 2 narrow losses at 96k ODG). Possible future work
 is quality iteration (piano/torture tonality gap), SILK/hybrid
 ENCODING, DTX, and multistream encode — all beyond the original scope.
+
+# ABI + wrappers (2026-07-11)
+
+## Opus wired into the C ABI and all three bindings — done
+
+- include/glint/glint.h: glint_opus_enc_* (CELT encoder, CBR/VBR,
+  emits complete TOC+payload packets), glint_opus_dec_* (full decoder:
+  decode, decode_fec/PLC, final_range, output rates 8-48k),
+  glint_opus_ms_dec_* (surround family 1). Impl in src/opus_c_api.cpp.
+- Unit suite grew 301 -> 365 checks: the C-API round-trip asserts the
+  **final-range conformance identity on every packet** (encoder range
+  == decoder range — needs no external oracle), FEC/PLC entry, 16 kHz
+  output length, multistream wrapper, and hand-built self-delimited
+  packet-parse vectors (incl. truncation rejection).
+- Python (ctypes): OpusEncoder/OpusDecoder classes + 3 unittest cases
+  (16/16 pass). Rust: glint-sys externs + safe OpusEncoder/OpusDecoder
+  + cargo test (5/5) — also fixed the stale build.rs source list
+  (compiled 7 MP3 files only; AAC/psycho/Opus were declared but
+  unlinkable) and added the missing `[lib] name = "glint"`. Dart:
+  GlintOpusEncoder/GlintOpusDecoder + example/opus_roundtrip.dart
+  (5/5 range matches) — also replaced the hand-rolled _Calloc (broken
+  on modern Dart SDKs: generic sizeOf<T> is no longer legal) with
+  package:ffi's calloc.
+
+# MP3 + AAC-LC DECODER track (next major work)
+
+Feasible and well-prepared: both wire formats, all Huffman tables
+(prefix-freeness unit-verified), scalefactor semantics and transforms
+already live in this repo from the encoder work.
+
+- D1 MP3 decoder: header/side-info/scalefactor parse (incl. LSF sfc
+  mapping), bit-reservoir reassembly, Huffman decode (reuse
+  tables::huff), requantize x^(4/3) (reuse pow tables), stereo modes
+  (MS/intensity), alias reduction, 36/12-pt IMDCT + window sequences
+  (encoder MDCT's adjoint), polyphase synthesis filterbank (adjoint of
+  src/subband.cpp). Gates: round-trip our own encoder at all rates
+  (SNR floors), decode LAME/ffmpeg streams vs ffmpeg/CoreAudio decode
+  (tolerance), ISO compliance bounds (RMS error per ISO 11172-4 if
+  vectors available).
+- D2 AAC-LC decoder (ADTS): ADTS/ICS parse, sectioning+Huffman decode
+  (aac tables), inverse quant + scalefactors, M/S, TNS synthesis
+  filter (inverse lattice), IMDCT for all 4 window sequences +
+  overlap-add. Gates: round-trip glint-aac output, decode
+  afconvert/fdk streams vs ffmpeg decode.
+- Then: C ABI (glint_mp3_dec_*/glint_aac_dec_*) + wrappers, mirroring
+  the Opus pattern.

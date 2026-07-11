@@ -276,3 +276,147 @@ pub fn encode_pcm(pcm: &[i16], sample_rate: u32, channels: u32, bitrate: u32) ->
     mp3.extend(enc.flush());
     mp3
 }
+
+
+/// CELT-only Opus encoder: 48 kHz interleaved f32 PCM in, complete Opus
+/// packets out. Frame sizes 120/240/480/960 samples per channel.
+pub struct OpusEncoder {
+    handle: glint_sys::glint_t,
+    channels: usize,
+}
+
+unsafe impl Send for OpusEncoder {}
+
+impl OpusEncoder {
+    pub fn new(channels: u32, bitrate: u32, vbr: bool) -> Result<Self, &'static str> {
+        let handle = unsafe {
+            glint_sys::glint_opus_enc_create(channels as i32, bitrate as i32, vbr as i32)
+        };
+        if handle.is_null() {
+            return Err("invalid Opus encoder config");
+        }
+        Ok(OpusEncoder { handle, channels: channels as usize })
+    }
+
+    /// Encode one frame of interleaved f32 PCM (len = frame_size * channels,
+    /// frame_size in {120, 240, 480, 960}). Returns the packet.
+    pub fn encode(&mut self, pcm: &[f32]) -> Result<Vec<u8>, &'static str> {
+        let frame = pcm.len() / self.channels;
+        let mut out = vec![0u8; 1500];
+        let n = unsafe {
+            glint_sys::glint_opus_encode(
+                self.handle, pcm.as_ptr(), frame as i32, out.as_mut_ptr(), out.len() as i32)
+        };
+        if n < 0 {
+            return Err("opus encode failed (frame must be 120/240/480/960)");
+        }
+        out.truncate(n as usize);
+        Ok(out)
+    }
+
+    pub fn final_range(&self) -> u32 {
+        unsafe { glint_sys::glint_opus_enc_final_range(self.handle) }
+    }
+}
+
+impl Drop for OpusEncoder {
+    fn drop(&mut self) {
+        unsafe { glint_sys::glint_opus_enc_destroy(self.handle) };
+    }
+}
+
+/// Opus decoder (SILK/CELT/hybrid, PLC, SILK in-band FEC), output rates
+/// 8/12/16/24/48 kHz, interleaved f32 PCM out.
+pub struct OpusDecoder {
+    handle: glint_sys::glint_t,
+    channels: usize,
+}
+
+unsafe impl Send for OpusDecoder {}
+
+impl OpusDecoder {
+    pub fn new(channels: u32, sample_rate: u32) -> Result<Self, &'static str> {
+        let handle = unsafe {
+            glint_sys::glint_opus_dec_create(channels as i32, sample_rate as i32)
+        };
+        if handle.is_null() {
+            return Err("invalid Opus decoder config");
+        }
+        Ok(OpusDecoder { handle, channels: channels as usize })
+    }
+
+    /// Decode one packet to interleaved f32 PCM.
+    pub fn decode(&mut self, packet: &[u8]) -> Result<Vec<f32>, &'static str> {
+        let mut pcm = vec![0f32; 2 * 5760];
+        let n = unsafe {
+            glint_sys::glint_opus_decode(
+                self.handle, packet.as_ptr(), packet.len() as i32, pcm.as_mut_ptr(), 5760)
+        };
+        if n < 0 {
+            return Err("opus decode failed");
+        }
+        pcm.truncate(n as usize * self.channels);
+        Ok(pcm)
+    }
+
+    /// Conceal a LOST packet of `frame_size` samples per channel;
+    /// `next_packet` (the one after the loss) supplies SILK in-band FEC
+    /// when present.
+    pub fn decode_lost(
+        &mut self,
+        frame_size: usize,
+        next_packet: Option<&[u8]>,
+    ) -> Result<Vec<f32>, &'static str> {
+        let mut pcm = vec![0f32; 2 * 5760];
+        let n = unsafe {
+            match next_packet {
+                Some(p) => glint_sys::glint_opus_decode_fec(
+                    self.handle, p.as_ptr(), p.len() as i32, pcm.as_mut_ptr(),
+                    frame_size as i32),
+                None => glint_sys::glint_opus_decode_fec(
+                    self.handle, std::ptr::null(), 0, pcm.as_mut_ptr(),
+                    frame_size as i32),
+            }
+        };
+        if n < 0 {
+            return Err("opus concealment failed");
+        }
+        pcm.truncate(n as usize * self.channels);
+        Ok(pcm)
+    }
+
+    pub fn final_range(&self) -> u32 {
+        unsafe { glint_sys::glint_opus_dec_final_range(self.handle) }
+    }
+}
+
+impl Drop for OpusDecoder {
+    fn drop(&mut self) {
+        unsafe { glint_sys::glint_opus_dec_destroy(self.handle) };
+    }
+}
+
+#[cfg(test)]
+mod opus_tests {
+    use super::*;
+
+    #[test]
+    fn opus_roundtrip_final_range() {
+        let mut enc = OpusEncoder::new(2, 96000, false).unwrap();
+        let mut dec = OpusDecoder::new(2, 48000).unwrap();
+        for f in 0..5 {
+            let mut pcm = vec![0f32; 960 * 2];
+            for i in 0..960 {
+                let t = (f * 960 + i) as f32 / 48000.0;
+                pcm[i * 2] = 0.4 * (2.0 * std::f32::consts::PI * 440.0 * t).sin();
+                pcm[i * 2 + 1] = 0.3 * (2.0 * std::f32::consts::PI * 660.0 * t).sin();
+            }
+            let pkt = enc.encode(&pcm).unwrap();
+            let out = dec.decode(&pkt).unwrap();
+            assert_eq!(out.len(), 960 * 2);
+            assert_eq!(enc.final_range(), dec.final_range());
+        }
+        let lost = dec.decode_lost(960, None).unwrap();
+        assert_eq!(lost.len(), 960 * 2);
+    }
+}

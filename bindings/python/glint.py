@@ -195,6 +195,45 @@ def _setup_signatures(lib):
     except AttributeError:
         pass
 
+    # Opus API (encoder + decoder; guard for older shared libraries)
+    try:
+        u8p = ctypes.POINTER(ctypes.c_uint8)
+        f32p = ctypes.POINTER(ctypes.c_float)
+        lib.glint_opus_enc_create.argtypes = [ctypes.c_int, ctypes.c_int,
+                                              ctypes.c_int]
+        lib.glint_opus_enc_create.restype = _glint_t
+        lib.glint_opus_encode.argtypes = [_glint_t, f32p, ctypes.c_int,
+                                          u8p, ctypes.c_int]
+        lib.glint_opus_encode.restype = ctypes.c_int
+        lib.glint_opus_enc_final_range.argtypes = [_glint_t]
+        lib.glint_opus_enc_final_range.restype = ctypes.c_uint32
+        lib.glint_opus_enc_destroy.argtypes = [_glint_t]
+        lib.glint_opus_enc_destroy.restype = None
+
+        lib.glint_opus_dec_create.argtypes = [ctypes.c_int, ctypes.c_int]
+        lib.glint_opus_dec_create.restype = _glint_t
+        lib.glint_opus_decode.argtypes = [_glint_t, u8p, ctypes.c_int,
+                                          f32p, ctypes.c_int]
+        lib.glint_opus_decode.restype = ctypes.c_int
+        lib.glint_opus_decode_fec.argtypes = [_glint_t, u8p, ctypes.c_int,
+                                              f32p, ctypes.c_int]
+        lib.glint_opus_decode_fec.restype = ctypes.c_int
+        lib.glint_opus_dec_final_range.argtypes = [_glint_t]
+        lib.glint_opus_dec_final_range.restype = ctypes.c_uint32
+        lib.glint_opus_dec_destroy.argtypes = [_glint_t]
+        lib.glint_opus_dec_destroy.restype = None
+
+        lib.glint_opus_ms_dec_create.argtypes = [
+            ctypes.c_int, ctypes.c_int, ctypes.c_int, u8p, ctypes.c_int]
+        lib.glint_opus_ms_dec_create.restype = _glint_t
+        lib.glint_opus_ms_decode.argtypes = [_glint_t, u8p, ctypes.c_int,
+                                             f32p, ctypes.c_int]
+        lib.glint_opus_ms_decode.restype = ctypes.c_int
+        lib.glint_opus_ms_dec_destroy.argtypes = [_glint_t]
+        lib.glint_opus_ms_dec_destroy.restype = None
+    except AttributeError:
+        pass
+
 
 # ---------------------------------------------------------------------------
 # Constants (mirror the C enums)
@@ -743,3 +782,141 @@ def _read_wav(path: str):
             raise GlintError("WAV file missing fmt chunk")
 
         return sample_rate, channels, pcm_data
+
+
+# ---------------------------------------------------------------------------
+# Opus (RFC 6716/7845): CELT encoder + full decoder
+# ---------------------------------------------------------------------------
+
+class OpusEncoder:
+    """CELT-only Opus encoder: 48 kHz interleaved float32 PCM in,
+    complete Opus packets (TOC + payload) out. Frame sizes 120, 240,
+    480 or 960 samples per channel; CBR or unconstrained VBR."""
+
+    def __init__(self, channels: int = 2, bitrate: int = 96000,
+                 vbr: bool = False, *, lib=None):
+        self._lib = lib or load_library()
+        self._enc = self._lib.glint_opus_enc_create(
+            channels, bitrate, 1 if vbr else 0)
+        if not self._enc:
+            raise ConfigError(
+                f"invalid Opus encoder config: channels={channels} "
+                f"bitrate={bitrate}")
+        self._channels = channels
+        self._buf = (ctypes.c_uint8 * 1500)()
+
+    @property
+    def channels(self) -> int:
+        return self._channels
+
+    def encode(self, pcm) -> bytes:
+        """Encode one frame of interleaved float PCM (list, array or
+        float32 numpy array of frame_size*channels). Returns the
+        packet."""
+        if _HAS_NUMPY and isinstance(pcm, np.ndarray):
+            arr = np.ascontiguousarray(pcm, dtype=np.float32)
+            n = arr.size
+            ptr = arr.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+        else:
+            arr = (ctypes.c_float * len(pcm))(*pcm)
+            n = len(pcm)
+            ptr = arr
+        frame = n // self._channels
+        ret = self._lib.glint_opus_encode(self._enc, ptr, frame,
+                                          self._buf, len(self._buf))
+        if ret < 0:
+            raise GlintError(f"opus encode failed ({ret}); frame sizes "
+                             "must be 120/240/480/960 per channel")
+        return bytes(self._buf[:ret])
+
+    def final_range(self) -> int:
+        return self._lib.glint_opus_enc_final_range(self._enc)
+
+    def close(self):
+        if getattr(self, "_enc", None):
+            self._lib.glint_opus_enc_destroy(self._enc)
+            self._enc = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
+class OpusDecoder:
+    """Opus decoder (SILK/CELT/hybrid, PLC, in-band FEC). Output rates
+    48000/24000/16000/12000/8000; interleaved float32 PCM out."""
+
+    def __init__(self, channels: int = 2, sample_rate: int = 48000, *,
+                 lib=None):
+        self._lib = lib or load_library()
+        self._dec = self._lib.glint_opus_dec_create(channels, sample_rate)
+        if not self._dec:
+            raise ConfigError(
+                f"invalid Opus decoder config: channels={channels} "
+                f"sample_rate={sample_rate}")
+        self._channels = channels
+        self._pcm = (ctypes.c_float * (2 * 5760))()
+
+    @property
+    def channels(self) -> int:
+        return self._channels
+
+    def _out(self, n):
+        flat = self._pcm[: n * self._channels]
+        if _HAS_NUMPY:
+            return np.array(flat, dtype=np.float32).reshape(
+                n, self._channels)
+        return list(flat)
+
+    def decode(self, packet: bytes):
+        """Decode one packet; returns interleaved float PCM (numpy
+        (samples, channels) array when numpy is available)."""
+        buf = (ctypes.c_uint8 * len(packet)).from_buffer_copy(packet)
+        n = self._lib.glint_opus_decode(self._dec, buf, len(packet),
+                                        self._pcm, 5760)
+        if n < 0:
+            raise GlintError(f"opus decode failed ({n})")
+        return self._out(n)
+
+    def decode_lost(self, frame_size: int, next_packet: bytes = None):
+        """Conceal a LOST packet of frame_size samples/channel. Pass the
+        packet FOLLOWING the loss to use SILK in-band FEC when present."""
+        if next_packet:
+            buf = (ctypes.c_uint8 * len(next_packet)).from_buffer_copy(
+                next_packet)
+            n = self._lib.glint_opus_decode_fec(
+                self._dec, buf, len(next_packet), self._pcm, frame_size)
+        else:
+            n = self._lib.glint_opus_decode_fec(
+                self._dec, None, 0, self._pcm, frame_size)
+        if n < 0:
+            raise GlintError(f"opus concealment failed ({n})")
+        return self._out(n)
+
+    def final_range(self) -> int:
+        return self._lib.glint_opus_dec_final_range(self._dec)
+
+    def close(self):
+        if getattr(self, "_dec", None):
+            self._lib.glint_opus_dec_destroy(self._dec)
+            self._dec = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass

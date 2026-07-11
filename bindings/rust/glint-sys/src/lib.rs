@@ -70,4 +70,50 @@ extern "C" {
     ) -> *const u8;
     pub fn glint_aac_flush(enc: glint_t, out_size: *mut c_int) -> *const u8;
     pub fn glint_aac_destroy(enc: glint_t);
+
+    // Opus codec (CELT encoder + full decoder)
+    pub fn glint_opus_enc_create(channels: c_int, bitrate_bps: c_int, vbr: c_int) -> glint_t;
+    pub fn glint_opus_encode(
+        enc: glint_t,
+        pcm: *const f32,
+        frame_size: c_int,
+        out: *mut u8,
+        max_bytes: c_int,
+    ) -> c_int;
+    pub fn glint_opus_enc_final_range(enc: glint_t) -> u32;
+    pub fn glint_opus_enc_destroy(enc: glint_t);
+
+    pub fn glint_opus_dec_create(channels: c_int, sample_rate: c_int) -> glint_t;
+    pub fn glint_opus_decode(
+        dec: glint_t,
+        packet: *const u8,
+        len: c_int,
+        pcm: *mut f32,
+        max_samples: c_int,
+    ) -> c_int;
+    pub fn glint_opus_decode_fec(
+        dec: glint_t,
+        packet: *const u8,
+        len: c_int,
+        pcm: *mut f32,
+        frame_size: c_int,
+    ) -> c_int;
+    pub fn glint_opus_dec_final_range(dec: glint_t) -> u32;
+    pub fn glint_opus_dec_destroy(dec: glint_t);
+
+    pub fn glint_opus_ms_dec_create(
+        channels: c_int,
+        streams: c_int,
+        coupled: c_int,
+        mapping: *const u8,
+        sample_rate: c_int,
+    ) -> glint_t;
+    pub fn glint_opus_ms_decode(
+        dec: glint_t,
+        packet: *const u8,
+        len: c_int,
+        pcm: *mut f32,
+        max_samples: c_int,
+    ) -> c_int;
+    pub fn glint_opus_ms_dec_destroy(dec: glint_t);
 }

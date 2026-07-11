@@ -878,6 +878,127 @@ static void test_opus_celt_alloc_mdct() {
     CHECK(peak > 0.1 && peak < 4.0, "IMDCT line response bounded");
 }
 
+// ---------------------------------------------------------------------
+// Opus C API round-trip: CELT encode -> decode through the public ABI.
+// The final-range identity (decoder range == encoder range) is the Opus
+// conformance check and needs no external oracle; SNR bounds catch
+// gross signal damage. Also exercises FEC concealment, non-48k output,
+// the multistream wrapper and self-delimited packet parsing.
+static void test_opus_c_api_roundtrip() {
+    std::printf("[opus C API] encode/decode round-trip...\n");
+    const int frame = 960, frames = 25, ch = 2;
+    glint_opus_enc_t enc = glint_opus_enc_create(ch, 128000, 0);
+    glint_opus_dec_t dec = glint_opus_dec_create(ch, 48000);
+    CHECK(enc && dec, "create encoder + decoder");
+
+    static float pcm[frame * ch], out_pcm[frame * ch];
+    static uint8_t pkt[1500];
+    double err = 0, sig = 0;
+    int range_matches = 0;
+    for (int f = 0; f < frames; f++) {
+        for (int i = 0; i < frame; i++) {
+            double t = (f * frame + i) / 48000.0;
+            pcm[i * ch] = 0.4f * (float)sin(2 * M_PI * 440.0 * t);
+            pcm[i * ch + 1] = 0.3f * (float)sin(2 * M_PI * 660.0 * t);
+        }
+        int n = glint_opus_encode(enc, pcm, frame, pkt, sizeof(pkt));
+        CHECK(n > 1, "encode returns a packet");
+        int m = glint_opus_decode(dec, pkt, n, out_pcm, frame);
+        CHECK(m == frame, "decode returns the frame");
+        if (glint_opus_dec_final_range(dec) ==
+            glint_opus_enc_final_range(enc))
+            range_matches++;
+        if (f >= 2) {  // skip codec warm-up for the SNR
+            for (int i = 0; i < frame * ch; i++) {
+                double d = pcm[i] - out_pcm[i];
+                // 120-sample codec delay: compare energies only.
+                sig += pcm[i] * pcm[i];
+                err += d * d;
+            }
+        }
+    }
+    CHECK(range_matches == frames,
+          "final ranges identical on every packet (conformance identity)");
+    CHECK(err < 2.5 * sig, "decoded energy in the signal's ballpark");
+
+    // FEC/PLC entry: conceal one lost frame without a next packet.
+    int c = glint_opus_decode_fec(dec, NULL, 0, out_pcm, frame);
+    CHECK(c == frame, "plain concealment fills the frame");
+
+    glint_opus_enc_destroy(enc);
+    glint_opus_dec_destroy(dec);
+
+    // Non-48k output: same stream decoded at 16 kHz -> 320 samples.
+    glint_opus_enc_t e2 = glint_opus_enc_create(1, 64000, 1);  // VBR mono
+    glint_opus_dec_t d16 = glint_opus_dec_create(1, 16000);
+    CHECK(e2 && d16, "VBR encoder + 16k decoder");
+    for (int i = 0; i < frame; i++)
+        pcm[i] = 0.3f * (float)sin(2 * M_PI * 500.0 * i / 48000.0);
+    int n = glint_opus_encode(e2, pcm, frame, pkt, sizeof(pkt));
+    CHECK(n > 1, "VBR encode");
+    int m16 = glint_opus_decode(d16, pkt, n, out_pcm, 5760);
+    CHECK(m16 == 320, "16 kHz decode of a 20 ms packet yields 320");
+    CHECK(glint_opus_dec_final_range(d16) ==
+              glint_opus_enc_final_range(e2),
+          "final range identity holds at 16 kHz output");
+
+    // Multistream wrapper: a 1-stream coupled layout equals stereo.
+    uint8_t mapping[2] = { 0, 1 };
+    glint_opus_ms_dec_t ms =
+        glint_opus_ms_dec_create(2, 1, 1, mapping, 48000);
+    CHECK(ms != NULL, "multistream create (1 coupled stream)");
+    glint_opus_enc_t e3 = glint_opus_enc_create(2, 96000, 0);
+    for (int i = 0; i < frame; i++) {
+        pcm[i * 2] = 0.3f * (float)sin(2 * M_PI * 330.0 * i / 48000.0);
+        pcm[i * 2 + 1] = 0.3f * (float)sin(2 * M_PI * 550.0 * i / 48000.0);
+    }
+    n = glint_opus_encode(e3, pcm, frame, pkt, sizeof(pkt));
+    int mm = glint_opus_ms_decode(ms, pkt, n, out_pcm, frame);
+    CHECK(mm == frame, "multistream decode of the single stream");
+    glint_opus_ms_dec_destroy(ms);
+    glint_opus_enc_destroy(e2);
+    glint_opus_enc_destroy(e3);
+    glint_opus_dec_destroy(d16);
+}
+
+#include "opus_decoder.hpp"
+
+// Self-delimited framing (RFC 6716 appendix B) against hand-built
+// packets — the multistream splitter depends on these exact semantics.
+static void test_opus_packet_parse() {
+    std::printf("[opus] packet parse (regular + self-delimited)...\n");
+    using glint::opus::OpusPacket;
+
+    // Code 0 (one frame), regular: everything after the TOC is payload.
+    uint8_t p0[5] = { 28 << 3, 1, 2, 3, 4 };
+    OpusPacket pkt;
+    CHECK(glint::opus::opus_packet_parse(p0, 5, &pkt) == 0 &&
+              pkt.frame_count == 1 && pkt.sizes[0] == 4,
+          "code-0 regular parse");
+
+    // Code 0 self-delimited: explicit size 2, then 2 payload bytes and
+    // 2 trailing bytes that belong to the NEXT stream.
+    uint8_t p1[6] = { 28 << 3, 2, 9, 9, 7, 7 };
+    int32_t off = 0;
+    CHECK(glint::opus::opus_packet_parse_ext(p1, 6, true, &pkt, &off) ==
+                  0 &&
+              pkt.frame_count == 1 && pkt.sizes[0] == 2 && off == 4,
+          "code-0 self-delimited parse + packet_offset");
+
+    // Code 1 (two CBR frames) self-delimited: one size covers both.
+    uint8_t p2[8] = { (28 << 3) | 1, 3, 5, 5, 5, 6, 6, 6 };
+    CHECK(glint::opus::opus_packet_parse_ext(p2, 8, true, &pkt, &off) ==
+                  0 &&
+              pkt.frame_count == 2 && pkt.sizes[0] == 3 &&
+              pkt.sizes[1] == 3 && off == 8,
+          "code-1 self-delimited applies the size to both frames");
+
+    // Truncated self-delimited size must fail, not read past the end.
+    uint8_t p3[2] = { 28 << 3, 251 };
+    CHECK(glint::opus::opus_packet_parse_ext(p3, 2, true, &pkt, &off) < 0,
+          "self-delimited size larger than the buffer rejected");
+}
+
 int main() {
     std::printf("=== glint unit tests ===\n\n");
 
@@ -907,6 +1028,8 @@ int main() {
     test_opus_range_coder();
     test_opus_celt_prims();
     test_opus_celt_alloc_mdct();
+    test_opus_packet_parse();
+    test_opus_c_api_roundtrip();
 
     std::printf("\n%d/%d tests passed\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;
