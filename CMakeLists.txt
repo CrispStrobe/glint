@@ -4,6 +4,12 @@ project(glint VERSION 1.0.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# MSVC does not define M_PI etc. without this (the Opus/decoder/resample
+# sources use M_PI). Applies to all build types, not just Release.
+if(MSVC)
+    add_compile_definitions(_USE_MATH_DEFINES)
+endif()
+
 # Enable optimizations in Release builds
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
     if(MSVC)
