@@ -142,8 +142,39 @@ def main():
         else:
             print("(Opus fuzz build skipped)")
 
-        print(f"PASS: MP3 + AAC + Opus decoders survive malformed input "
-              f"(no crash / OOB / hang)")
+        # Container / whole-file parsers: the WAV reader (src/wav_io.cpp)
+        # and the Ogg-Opus demuxer (OggOpusReader::parse). These size
+        # buffers / walk lacing tables from untrusted header fields — a
+        # different attack surface than the frame decoders above. ASan+UBSan.
+        opus_file = os.path.join(tmp, "seed.opus")
+        run([glint_cli, "-F", "opus", "-b", "96", wav, opus_file])
+        cbin = os.path.join(tmp, "cfuzz")
+        cbuild = [cxx, "-std=c++17", "-O1", "-g",
+                  "-I", os.path.join(REPO, "src"),
+                  os.path.join(REPO, "tools", "fuzz_container.cpp"),
+                  os.path.join(REPO, "src", "wav_io.cpp"),
+                  os.path.join(REPO, "src", "opus_ogg.cpp")]
+        cr = run(cbuild + san + ["-o", cbin])
+        if cr.returncode == 0:
+            cit = str(max(5000, int(iters) * 3))
+            seeds = [wav, opus_file if os.path.exists(opus_file) else "-"]
+            try:
+                r = subprocess.run([cbin] + seeds + [cit], env=env,
+                                   capture_output=True, timeout=400)
+            except subprocess.TimeoutExpired:
+                sys.exit("FAIL: container fuzz hung (WAV/Ogg parser)")
+            cerr = r.stderr.decode()
+            print(r.stdout.decode().strip())
+            if ("AddressSanitizer" in cerr or "runtime error" in cerr or
+                    r.returncode != 0):
+                print(cerr[:1500])
+                sys.exit("FAIL: sanitizer flagged the WAV/Ogg container "
+                         "parser on malformed input")
+        else:
+            print("(container fuzz build skipped)")
+
+        print(f"PASS: MP3 + AAC + Opus decoders and WAV/Ogg container "
+              f"parsers survive malformed input (no crash / OOB / hang)")
 
 
 if __name__ == "__main__":

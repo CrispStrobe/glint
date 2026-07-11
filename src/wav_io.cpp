@@ -176,7 +176,12 @@ bool wav_read(const uint8_t* d, size_t n, std::vector<float>& pcm,
             ch = rd16(body + 2);
             sr = rd32(body + 4);
             bps = rd16(body + 14);
-            if (fmt == WAVE_FORMAT_EXTENSIBLE && csz >= 40) {
+            // The EXTENSIBLE extension reads valid_bits (body+18) and the
+            // 16-byte SubFormat GUID (body+24..39). csz is the CLAIMED
+            // size; require the bytes to actually be present or a truncated
+            // file reads past the buffer.
+            if (fmt == WAVE_FORMAT_EXTENSIBLE && csz >= 40 &&
+                off + 8 + 40 <= n) {
                 const uint8_t* sub = body + 24;  // SubFormat GUID
                 if (!std::memcmp(sub, GUID_PCM, 16))
                     fmt = WAVE_FORMAT_PCM;

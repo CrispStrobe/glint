@@ -2413,3 +2413,39 @@ the target volume — editing a .cpp's *content* silently reused stale
 objects (undefined-symbol link errors). glint-sys/build.rs now emits
 `cargo:rerun-if-changed` for ../../../src and ../../../include so content
 edits trigger a rebuild without a full `cargo clean`.
+
+# Untrusted-input parser audit (2026-07-11)
+
+glint IS an untrusted-input parser (its job is decoding attacker-supplied
+compressed audio). The frame/packet decoders (MP3/AAC/Opus) were already
+fuzzed under ASan+UBSan (decoder_fuzz). This pass audited the CONTAINER /
+whole-file layer the frame fuzzer never reached — the taxonomy from the
+CrispASR audit (alloc from an untrusted length field; additive bounds
+overflow; degenerate no-progress loops; a family path missing a sibling's
+guard).
+
+Findings:
+- **WAV reader OOB (src/wav_io.cpp), FIXED**: the WAVE_FORMAT_EXTENSIBLE
+  branch read valid_bits (fmt body+18) and the 16-byte SubFormat GUID
+  (body+24..39) after checking only the CLAIMED chunk size `csz >= 40`,
+  not that those bytes are present. A truncated file with a `fmt ` chunk
+  claiming csz>=40 read up to 24 bytes past the buffer (ASan
+  container-overflow, reachable from glint_cli / decode_file / every
+  wrapper). Fix: also require `off + 8 + 40 <= n`. The bug was inherited
+  from cli/audio_io.hpp's original parse_wav (now deleted — the CLI
+  delegates to the fixed shared reader).
+- **OggOpusReader::parse (src/opus_ogg.cpp): CLEAN.** Structurally immune
+  to the class — `off` is a running cursor always ≤ len (not an
+  independent 64-bit offset field), advances ≥27/iteration (forward
+  progress), allocs are bounded by file bytes consumed, the hdr[27+255]
+  stack buffer exactly fits nsegs≤255, and the family-0/1 header reads are
+  all length-guarded (channels>2 / >8 rejected, pending.size() checked
+  before every field read).
+- decode_audio frame walkers, pcm_read, resample: bounded (running
+  cursors / caller-supplied rates, not file-driven).
+
+Durable guard: tools/fuzz_container.cpp (ctest decoder_fuzz, ASan+UBSan)
+fuzzes wav_read + OggOpusReader::parse with random + bit-flipped /
+truncated / extended seeds. Verified it CATCHES the EXTENSIBLE bug when
+reintroduced and passes with the fix. The gate now covers frame decoders
+AND container parsers.
