@@ -2213,3 +2213,20 @@ x[3Q+n]=x[3Q-1-n]). Derived and verified in a standalone harness
 Result: **403x faster per transform; 30 s stereo now decodes in 0.06 s
 (~440x realtime, was 48 s)**; decoder output 232.7 dB identical to the
 direct version; gate + unit suite unchanged.
+
+## Second reference decoder — Apple CoreAudio cross-check (2026-07-11)
+
+ISO 14496-4 AAC conformance vectors are not freely available (ISO sells
+them; none in this environment). The achievable "external reference
+beyond ffmpeg" is a SECOND independent decoder: Apple CoreAudio via
+afconvert (-f WAVE -d LEF32), which decodes both ADTS AAC and MP3.
+
+- AAC gate (hard): glint roundtrip streams (no PNS) now checked vs BOTH
+  ffmpeg AND CoreAudio — glint matches both at 86-135 dB (tonal 109.8
+  vs ffmpeg / 109.8 vs Apple; noise 134.9 / 134.4). Two independent
+  ISO decoders agreeing with glint is stronger than ffmpeg alone.
+- MP3 gate (advisory): CoreAudio agrees ~82 dB on glint stereo streams
+  but its config-dependent priming/gapless trims make mono/VBR
+  alignment unreliable (MP3 decoders are not bit-exact by spec), so the
+  Apple MP3 number is reported, not gated; ffmpeg (130 dB) stays the
+  hard MP3 oracle.

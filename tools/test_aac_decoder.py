@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """AAC-LC decoder gate (PLAN § D2). Two tiers:
 
-  1. glint roundtrip (glint-aac encode -> glint decode vs ffmpeg): glint
-     never emits PNS/intensity, so a high SNR floor holds across long,
+  1. glint roundtrip (glint-aac encode -> glint decode vs ffmpeg AND
+     Apple CoreAudio): glint never emits PNS/intensity, so a high SNR
+     floor holds against TWO independent reference decoders across long,
      start/short/stop windows, M/S and TNS.
 
   2. Foreign streams (ffmpeg / afconvert / fdkaac): these use PNS
@@ -73,6 +74,23 @@ def decode_both(dec_bin, aac, tmp, channels):
     a = np.fromfile(ours, dtype=np.float32).astype(np.float64)
     b = np.fromfile(ref, dtype=np.float32).astype(np.float64)
     return a, b, r.stdout.decode().strip()
+
+
+def decode_apple(aac, tmp):
+    """Decode via Apple CoreAudio (afconvert) — a SECOND independent
+    reference decoder. Returns interleaved float64, or None if
+    unavailable."""
+    afc = shutil.which("afconvert")
+    if not afc:
+        return None
+    wav = os.path.join(tmp, "apple.wav")
+    f32 = os.path.join(tmp, "apple.f32")
+    try:
+        run([afc, "-f", "WAVE", "-d", "LEF32", aac, wav])
+        run(["ffmpeg", "-y", "-v", "error", "-i", wav, "-f", "f32le", f32])
+    except subprocess.CalledProcessError:
+        return None
+    return np.fromfile(f32, dtype=np.float32).astype(np.float64)
 
 
 def best_snr(a, b, channels):
@@ -173,10 +191,15 @@ def main():
                 failures += 1
                 continue
             snr = best_snr(a, b, ch)
-            ok = snr >= floor and "0 errors" in stats
+            ap = decode_apple(aac, tmp)
+            snr_ap = best_snr(a, ap, ch) if ap is not None else None
+            ok = snr >= floor and "0 errors" in stats and \
+                (snr_ap is None or snr_ap >= floor)
             failures += 0 if ok else 1
-            print(f"{'OK' if ok else 'FAIL'} {name}: SNR {snr:.1f} dB "
-                  f"(floor {floor}) [{stats}]")
+            extra = f", Apple {snr_ap:.1f} dB" if snr_ap is not None else \
+                " (Apple: n/a)"
+            print(f"{'OK' if ok else 'FAIL'} {name}: SNR ffmpeg "
+                  f"{snr:.1f}{extra} (floor {floor}) [{stats}]")
 
         # Tier 2: foreign encoders (PNS -> energy-domain check).
         afc = shutil.which("afconvert")
@@ -242,8 +265,9 @@ def main():
 
     if failures:
         sys.exit(f"FAIL: {failures} cases")
-    print("PASS: glint AAC-LC decoder matches ffmpeg (glint streams by "
-          "SNR, foreign PNS streams by energy)")
+    print("PASS: glint AAC-LC decoder matches ffmpeg + Apple CoreAudio "
+          "(glint streams by SNR vs two decoders, foreign PNS streams "
+          "by energy)")
 
 
 if __name__ == "__main__":

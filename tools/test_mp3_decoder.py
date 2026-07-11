@@ -88,6 +88,49 @@ def strip_xing(mp3, tmp):
     return mp3
 
 
+def _load_pair(ours_f, ref_f):
+    return (np.fromfile(ours_f, dtype=np.float32).astype(np.float64),
+            np.fromfile(ref_f, dtype=np.float32).astype(np.float64))
+
+
+def _aligned_snr(a, b):
+    n = min(len(a), len(b))
+    start = 4608 * 2
+    best = -1.0
+    stop = min(n, start + 44100 * 4)
+    for d in range(-3000, 3001, 2):
+        j0, j1 = start + d, stop + d
+        if j0 < 0 or j1 > n:
+            continue
+        seg = a[start:stop]
+        ref_seg = b[j0:j1]
+        den = float(np.dot(ref_seg, ref_seg))
+        if den <= 0:
+            continue
+        num = float(np.sum((seg - ref_seg) ** 2))
+        best = max(best, 10 * math.log10(den / max(num, 1e-30)))
+    return best
+
+
+def snr_vs_apple(dec_bin, mp3, tmp):
+    """Second reference: Apple CoreAudio (afconvert). None if absent."""
+    import shutil as _sh
+    afc = _sh.which("afconvert")
+    if not afc:
+        return None
+    ours = os.path.join(tmp, "ours.f32")
+    run([dec_bin, mp3, ours])
+    wav = os.path.join(tmp, "apple.wav")
+    a32 = os.path.join(tmp, "apple.f32")
+    try:
+        run([afc, "-f", "WAVE", "-d", "LEF32", mp3, wav])
+        run(["ffmpeg", "-y", "-v", "error", "-i", wav, "-f", "f32le", a32])
+    except subprocess.CalledProcessError:
+        return None
+    a, b = _load_pair(ours, a32)
+    return _aligned_snr(a, b)
+
+
 def snr_vs_ffmpeg(dec_bin, mp3, tmp):
     mp3 = strip_xing(mp3, tmp)
     ours = os.path.join(tmp, "ours.f32")
@@ -182,10 +225,19 @@ def main():
                       f"{(e.stdout or b'').decode()[:100]}")
                 failures += 1
                 continue
+            # ffmpeg is the hard oracle. Apple CoreAudio is a secondary
+            # sanity cross-check for glint streams — advisory only,
+            # because Apple's MP3 decoder applies config-dependent
+            # priming/gapless trims that make exact alignment unreliable
+            # (MP3 decoders are not bit-exact by spec, unlike AAC).
+            snr_ap = None
+            if name.startswith("glint-"):
+                snr_ap = snr_vs_apple(dec_bin, mp3, tmp)
             ok = snr >= floor
             failures += 0 if ok else 1
-            print(f"{'OK' if ok else 'FAIL'} {name}: SNR vs ffmpeg "
-                  f"{snr:.1f} dB (floor {floor}) [{stats}]")
+            ax = f", Apple~{snr_ap:.0f}" if snr_ap is not None else ""
+            print(f"{'OK' if ok else 'FAIL'} {name}: SNR ffmpeg "
+                  f"{snr:.1f}{ax} dB (floor {floor}) [{stats}]")
 
         # Intensity stereo: no encoder emits it, so hand-build valid
         # IS frames and check glint == ffmpeg (the reference for the ISO
@@ -217,7 +269,7 @@ def main():
     if failures:
         sys.exit(f"FAIL: {failures} cases")
     print("PASS: glint MP3 decoder matches ffmpeg on every stream "
-          "(incl. hand-built intensity-stereo frames)")
+          "(Apple CoreAudio advisory cross-check), incl. intensity frames")
 
 
 if __name__ == "__main__":
