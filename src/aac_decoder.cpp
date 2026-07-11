@@ -23,12 +23,14 @@ struct BitReader {
     const uint8_t* data;
     int len;   // bytes
     int pos = 0;
+    bool overrun = false;  // set once a read goes past the buffer
     BitReader(const uint8_t* d, int n) : data(d), len(n) {}
     int left() const { return len * 8 - pos; }
     uint32_t get(int n) {
         uint32_t v = 0;
         while (n-- > 0) {
             int byte = pos >> 3, bit = 7 - (pos & 7);
+            if (byte >= len) overrun = true;
             v = (v << 1) | (byte < len ? ((data[byte] >> bit) & 1) : 0);
             pos++;
         }
@@ -36,6 +38,7 @@ struct BitReader {
     }
     int get1() {
         int byte = pos >> 3, bit = 7 - (pos & 7);
+        if (byte >= len) overrun = true;
         int v = byte < len ? ((data[byte] >> bit) & 1) : 0;
         pos++;
         return v;
@@ -458,6 +461,10 @@ int AacDecoder::decode_frame(const uint8_t* data, int len, float* pcm,
 
     // ADTS: fixed header 28 bits + variable 28 bits; protection_absent in
     // byte1 bit0 (1 = no CRC). Header is 7 bytes then raw_data_block.
+    // This decoder supports mono/stereo (SCE/CPE) only; a header
+    // claiming more channels (possibly corrupt) must not reach the
+    // fixed-width PCM write.
+    if (info.channels < 1 || info.channels > 2) return -1;
     int protection_absent = data[1] & 1;
     int hdr = protection_absent ? 7 : 9;
     sr_index_ = (data[2] >> 2) & 0xF;
@@ -468,6 +475,7 @@ int AacDecoder::decode_frame(const uint8_t* data, int len, float* pcm,
     int decoded_ch = 0;
     // raw_data_block: id_syn_ele until END (7).
     for (;;) {
+        if (br.overrun || br.left() < 3) break;
         int id = static_cast<int>(br.get(3));
         if (id == 7) break;  // ID_END
         if (id == 0 || id == 1) {  // SCE / CPE
@@ -525,15 +533,18 @@ int AacDecoder::decode_frame(const uint8_t* data, int len, float* pcm,
                         int filled = 0;
                         while (filled < ics.max_sfb) {
                             int cb = static_cast<int>(br.get(4));
+                            if (cb == 12) return -2;  // reserved book
                             int len_sect = 0, inc;
                             do {
                                 inc = static_cast<int>(br.get(sect_bits));
                                 len_sect += inc;
+                                if (br.overrun) return -3;
                             } while (inc == sect_esc);
-                            for (int i = 0; i < len_sect; i++) {
-                                if (filled + i >= ics.max_sfb) return -2;
+                            if (len_sect == 0 ||
+                                filled + len_sect > ics.max_sfb)
+                                return -2;  // must advance, must not overrun
+                            for (int i = 0; i < len_sect; i++)
                                 book_[ch][b + i] = cb;
-                            }
                             b += len_sect;
                             filled += len_sect;
                         }
@@ -600,6 +611,11 @@ int AacDecoder::decode_frame(const uint8_t* data, int len, float* pcm,
                                 br.get(ics.window_sequence == 2 ? 4 : 6));
                             int order = static_cast<int>(
                                 br.get(ics.window_sequence == 2 ? 3 : 5));
+                            // LC profile: order <= 12 (long) / 7 (short);
+                            // clamp so a corrupt field can't overflow the
+                            // order-13 LPC scratch arrays.
+                            int order_cap = ics.window_sequence == 2 ? 7 : 12;
+                            if (order > order_cap) order = order_cap;
                             int direction = 0, compress = 0;
                             double lpc[13] = { 1.0 };
                             if (order) {
@@ -673,8 +689,8 @@ int AacDecoder::decode_frame(const uint8_t* data, int len, float* pcm,
                         } else {
                             width = swb[b + 1] - swb[b];
                         }
-                        if (bk == 0 || bk >= 13) {
-                            k += width;  // zero / PNS / intensity: no data
+                        if (bk == 0 || bk >= 12) {
+                            k += width;  // zero / reserved / PNS / IS
                             continue;
                         }
                         int dim = kBookDim[bk - 1];
@@ -682,6 +698,7 @@ int AacDecoder::decode_frame(const uint8_t* data, int len, float* pcm,
                         bool sgn = kBookSigned[bk - 1] != 0;
                         int end = k + width;
                         for (int i = k; i < end; i += dim) {
+                            if (br.overrun) return -3;
                             int idx = g_spec[bk - 1].decode(br);
                             if (idx < 0) return -3;
                             int vals[4];
@@ -792,9 +809,10 @@ int AacDecoder::decode_frame(const uint8_t* data, int len, float* pcm,
     for (int ch = 0; ch < channels_ && ch < 2; ch++)
         imdct_channel(ch, ch_pcm[ch]);
 
+    const int oc = channels_ < 2 ? channels_ : 2;
     for (int n = 0; n < 1024; n++)
-        for (int ch = 0; ch < channels_; ch++)
-            pcm[n * channels_ + ch] = ch_pcm[ch < 2 ? ch : 0][n];
+        for (int ch = 0; ch < oc; ch++)
+            pcm[n * oc + ch] = ch_pcm[ch][n];
 
     return 1024;
 }

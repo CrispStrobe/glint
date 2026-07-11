@@ -2256,3 +2256,29 @@ porting it is high-effort/low-CELT-reward). glint is competitive:
 wins/ties 8/10 clips at 96k ODG, transparent at 192k. Every CELT
 analysis block the reference uses IS ported. Marked diminishing-returns;
 the encoder is unchanged (all probes were env-gated and removed).
+
+## Decoder robustness / fuzz-hardening (2026-07-11)
+
+Real decoders must not crash, read/write out of bounds, or hang on
+malformed input. Fuzzed the MP3 + AAC decoders under
+AddressSanitizer + UndefinedBehaviorSanitizer (tools/fuzz_decoders.cpp,
+gate tools/test_decoder_fuzz.py, ctest decoder_fuzz) with random /
+bit-flipped-valid / truncated streams. Bugs found and fixed (all in
+src/aac_decoder.cpp; MP3 was already clean — 88k calls, 101M samples,
+no error):
+- **Infinite loop (DoS)**: section_data spun forever when a corrupt/
+  exhausted stream yielded len_sect == 0 (filled never advanced). Fixed
+  with a must-advance check + a BitReader overrun flag bailed on across
+  the section, element, and spectral loops.
+- **Heap overflow**: a corrupt ADTS channel_config claiming >2 channels
+  reached the fixed-width PCM interleave (pcm[n*channels_+ch]). Reject
+  channels != 1,2 (mono/stereo only) + clamp the write width.
+- **Stack overflow**: a corrupt TNS order (5-bit, up to 31) overflowed
+  the order-13 LPC scratch arrays. Clamp to the LC max (12 long / 7
+  short).
+- **Global overflow / OOB read**: reserved codebook 12 fell through to
+  kBookDim[11] / g_spec[11] (both size 11). Reject cb == 12 in sections
+  + skip bk >= 12 in spectral decode.
+After fixes: both decoders survive ~190k decode calls / 200M samples of
+malformed input with ZERO ASan/UBSan reports; all decode gates + 379
+unit tests unchanged (fixes are no-ops on valid streams).

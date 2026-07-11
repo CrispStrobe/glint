@@ -144,6 +144,14 @@ if(Python3_FOUND)
                  COMMAND ${Python3_EXECUTABLE}
                          ${CMAKE_CURRENT_SOURCE_DIR}/tools/test_aac_decoder.py
                          $<TARGET_FILE:glint_cli>)
+        # DECODER ROBUSTNESS gate: fuzz MP3/AAC under ASan+UBSan with
+        # random / bit-flipped / truncated input — no crash, OOB or hang.
+        add_test(NAME decoder_fuzz
+                 COMMAND ${Python3_EXECUTABLE}
+                         ${CMAKE_CURRENT_SOURCE_DIR}/tools/test_decoder_fuzz.py
+                         $<TARGET_FILE:glint_cli>)
+        set_tests_properties(decoder_fuzz PROPERTIES
+                 ENVIRONMENT "FUZZ_ITERS=1500" TIMEOUT 400)
     else()
         message(STATUS "m2_decode_quality test skipped (needs python3+numpy and ffmpeg)")
     endif()
