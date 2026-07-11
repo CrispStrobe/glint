@@ -12,6 +12,7 @@
 
 #pragma once
 
+#include <cstddef> // size_t — GCC needs it explicitly (MSVC/clang pull it in transitively)
 #include <cstdint>
 #include <vector>
 
