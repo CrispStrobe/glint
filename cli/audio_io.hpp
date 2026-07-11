@@ -4,6 +4,7 @@
 #ifndef GLINT_CLI_AUDIO_IO_HPP
 #define GLINT_CLI_AUDIO_IO_HPP
 
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -34,8 +35,15 @@ enum class Fmt { Unknown, Wav, Raw, Mp3, Aac, Opus };
 
 inline bool ends_with(const std::string& s, const char* suf) {
     size_t n = std::strlen(suf);
-    return s.size() >= n &&
-           strcasecmp(s.c_str() + s.size() - n, suf) == 0;
+    if (s.size() < n) return false;
+    const char* p = s.c_str() + s.size() - n;
+    // Case-insensitive compare (portable — strcasecmp is POSIX, not MSVC).
+    for (size_t i = 0; i < n; i++) {
+        unsigned char a = static_cast<unsigned char>(p[i]);
+        unsigned char b = static_cast<unsigned char>(suf[i]);
+        if (std::tolower(a) != std::tolower(b)) return false;
+    }
+    return true;
 }
 
 inline Fmt fmt_from_ext(const std::string& path) {
