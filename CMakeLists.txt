@@ -49,6 +49,7 @@ set(GLINT_SOURCES
     src/opus_decoder.cpp
     src/opus_ms_decoder.cpp
     src/opus_c_api.cpp
+    src/mp3_decoder.cpp
     src/opus_mdct.cpp
     src/opus_ogg.cpp
     src/opus_celt_enc_energy.cpp
@@ -128,6 +129,12 @@ if(Python3_FOUND)
         add_test(NAME aac_decode_quality
                  COMMAND ${Python3_EXECUTABLE}
                          ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_aac.py
+                         $<TARGET_FILE:glint_cli>)
+        # MP3 DECODER gate: decode glint- and LAME-encoded streams with
+        # Mp3Decoder and ffmpeg, require ~130 dB agreement.
+        add_test(NAME mp3_decoder_vs_ffmpeg
+                 COMMAND ${Python3_EXECUTABLE}
+                         ${CMAKE_CURRENT_SOURCE_DIR}/tools/test_mp3_decoder.py
                          $<TARGET_FILE:glint_cli>)
     else()
         message(STATUS "m2_decode_quality test skipped (needs python3+numpy and ffmpeg)")

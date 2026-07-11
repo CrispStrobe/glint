@@ -2085,3 +2085,45 @@ already live in this repo from the encoder work.
   afconvert/fdk streams vs ffmpeg decode.
 - Then: C ABI (glint_mp3_dec_*/glint_aac_dec_*) + wrappers, mirroring
   the Opus pattern.
+
+## D1 MP3 decoder — done (2026-07-11)
+
+src/mp3_decoder.{hpp,cpp}: full MPEG-1 + MPEG-2/2.5 LSF Layer III
+decoder. Header/side-info parse (both layouts), bit reservoir
+(main_data_begin history, zero-output until satisfied), scalefactors
+(MPEG-1 slen pairs + scfsi; LSF 4-slen band groups for all 6
+blocknumbers incl. the intensity variants), Huffman decode via trees
+BUILT AT RUNTIME FROM THE ENCODER'S OWN CODE TABLES (tables.hpp — the
+two sides cannot drift), requantize (x^4/3, pretab, subblock_gain),
+short-block reorder, MS + intensity stereo (MPEG-1 tan-ratio and LSF
+io^((pos+1)/2)), alias reduction, 36/12-pt IMDCT with all four window
+types + mixed blocks, overlap-add + frequency inversion, polyphase
+synthesis (DCT-32 + the tabulated window — which turned out to BE the
+ISO D synthesis table, hence its name analysis_window_d; the first
+smoke test showed an exact 32.000x output ratio from assuming D=32C).
+
+Gate: tools/test_mp3_decoder.py (ctest: mp3_decoder_vs_ffmpeg) —
+**13/13 streams at 128-131 dB agreement with ffmpeg**: glint
+speed/normal/best x stereo/joint, castanets short blocks, VBR, mono,
+MPEG-2 22.05k, and LAME 128k/castanets/V4-VBR/m2 (foreign encoder:
+scfsi, different table choices, nonzero subblock_gain, preflag). A
+real-world 1-min 48k file decodes 2500/2500 frames at 129.1 dB.
+
+Hard-won details:
+- **The short-block sfb table has 13 bands** (boundary [13] = 192): the
+  sfb21-equivalent tail (lines 3*136..575) IS coded by real encoders
+  (LAME bv up to 264 pairs). Looping bands to <12 zeroed those lines:
+  the exact signature was ~35 dB ONLY on LAME transient frames while
+  glint's own short blocks (which never code the tail) passed at
+  128 dB.
+- ffmpeg applies gapless trims from Xing/Info/LAME tags that a raw
+  frame decoder cannot know; the gate strips the metadata frame before
+  feeding BOTH decoders (glint's own VBR Xing frame produced a
+  19 dB slow-converging "mismatch" that was pure warm-up/trim skew —
+  stripped, the same stream matches at 130.8 dB).
+- MPEG-1 window-switching region0 ends at 36 LINES for all rates and
+  block types; LSF start/stop granules use 54 (matches the encoder
+  invariant).
+Intensity-stereo paths are implemented but not yet exercised by the
+gate (LAME defaults never emit it) — finding/making IS streams is a
+follow-up. Next: D2 AAC-LC decoder, then C ABI + wrappers for both.
