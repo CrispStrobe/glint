@@ -32,17 +32,22 @@ vo-aacenc (Apache-2.0) is unmaintained and last on quality.
   QEMU. Ready-to-flash benchmarks for Raspberry Pi Pico and ESP32.
 - **Verified wire format**: every configuration decodes with zero
   errors in both ffmpeg and Apple CoreAudio, which produce metrically
-  identical output; decode-based gates run in CI.
-- **MP3 + AAC-LC decoders (clean-room, verified against ffmpeg).**
-  The MPEG-1/2 Layer III decoder (bit reservoir, all window types, M/S +
-  intensity stereo, polyphase synthesis) matches ffmpeg to **128-131 dB**
-  across glint's own output and LAME streams, including hand-built
-  intensity-stereo frames. The ADTS AAC-LC decoder (all four window
-  sequences, M/S, TNS, PNS, intensity stereo) is **86-135 dB** on glint
-  roundtrips and structurally matches ffmpeg/fdkaac/afconvert streams
-  (whose PNS is decoder-random) in the spectral-envelope domain. Both
-  reuse the encoders' own Huffman tables, so encode and decode cannot
-  drift. C ABI + Python/Rust/Dart bindings.
+  identical output; decode-based gates run in CI, and the clean-room
+  decoders are fuzz-hardened under sanitizers.
+- **MP3 + AAC-LC decoders (clean-room, verified against two
+  independent references, fuzz-hardened).** The MPEG-1/2 Layer III
+  decoder (bit reservoir, all window types, M/S + intensity stereo,
+  polyphase synthesis) matches ffmpeg to **128-131 dB** across glint's
+  own output and LAME streams, including hand-built intensity-stereo
+  frames. The ADTS AAC-LC decoder (all four window sequences, M/S, TNS,
+  PNS, intensity stereo) matches **both ffmpeg and Apple CoreAudio at
+  86-135 dB** on glint roundtrips, and structurally matches
+  ffmpeg/fdkaac/afconvert streams (whose PNS is decoder-random) in the
+  spectral-envelope domain; a fast FFT-based IMDCT decodes at **~440x
+  realtime**. Both reuse the encoders' own Huffman tables, so encode and
+  decode cannot drift, and both are fuzzed under ASan+UBSan (random /
+  bit-flipped / truncated input — no crash, out-of-bounds access or
+  hang). C ABI + Python/Rust/Dart bindings.
 - **Opus codec: RFC-conformant decoder + a competitive CELT encoder.**
   Clean-room from RFC 6716/7845. Decoder: SILK, CELT and hybrid modes,
   PLC/CNG, SILK in-band FEC (byte-identical recovery vs libopus),
