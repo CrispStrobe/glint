@@ -2373,3 +2373,43 @@ does 48k sine → encode → decode_audio round-trip. GOTCHA: `cargo clean -p
 glint-sys` does NOT force a C recompile of the changed .cpp — a full
 `cargo clean` does (cc tracks source mtime on normal incremental builds,
 so plain edits are fine; only the partial-clean path is stale).
+
+# Encoder/decoder flexibility pass (2026-07-11) — 4 axes, all paths
+
+Principle: "flexible by default" for handling more inputs correctly (never
+opt-in), "optional override" for genuine choices. One implementation in
+the C ABI (source of truth), then CLI + Python + Rust + Dart, each gated.
+
+1. **Sample formats** (src/wav_io.*, wav_c_api.cpp): lifted the CLI's full
+   WAV parser/writer into shared code and exposed `glint_wav_read` /
+   `glint_wav_write` — reads PCM 8/16/24/32, IEEE float 32/64, A-law,
+   mu-law, EXTENSIBLE; writes 8/16/24/32-int + 32/64-float. cli/audio_io.hpp
+   now DELEGATES (no drift). CLI `--bits`/`--wav-float`. Wrappers:
+   read_wav_float/write_wav(bits=,float_fmt=). A 24-bit/float source no
+   longer fails in the wrappers. Pipeline is float32 internally, so 64-bit
+   float round-trips to ~1e-6.
+2. **One-call encode** (encode_audio_c_api.cpp): `glint_encode_audio(pcm,
+   frames, ch, sr, format, bitrate, vbr_q, quality, *out_size)` auto-
+   resamples to a codec-valid rate (Opus->48k; MP3/AAC->nearest of the
+   standard rate set), accepts float, returns the whole stream. Python
+   `encode_audio` + `FORMAT_*`, Rust `encode_audio`+`Codec`, Dart
+   `glintEncodeAudio`+`GlintCodec`. transcode_file routes through it.
+3. **Decoder output** (glint_decode_audio_ex): optional out_rate (resample)
+   + want_int16 (int16 vs float) + **Opus surround** (family 1, up to 8 ch
+   via OpusMsDecoder). glint_decode_audio delegates to _ex, so surround
+   reaches every caller; cli/audio_io.hpp decode_opus does surround too
+   (glint_cli 5.1.opus out.wav -> 6ch WAV). Python decode_bytes/decode_file
+   rate=/dtype=; Rust decode_audio_rate/decode_audio_i16; Dart
+   glintDecodeAudio(rate:)/glintDecodeAudioI16. Live-tested with a real
+   ffmpeg-libopus 5.1 file.
+4. **Codec knobs**: Python Encoder +quality/vbr_quality; Rust
+   Encoder::with_options / AacEncoder::with_options; Dart GlintEncoder
+   +mode/quality/path/vbrQuality, GlintAacEncoder +vbrQuality. Opus frame
+   size is already the per-call encode() arg; complexity/bandwidth aren't
+   in the C API.
+
+BUILD GOTCHA (fixed): cc's own rerun-if-changed proved unreliable across
+the target volume — editing a .cpp's *content* silently reused stale
+objects (undefined-symbol link errors). glint-sys/build.rs now emits
+`cargo:rerun-if-changed` for ../../../src and ../../../include so content
+edits trigger a rebuild without a full `cargo clean`.

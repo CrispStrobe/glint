@@ -154,6 +154,8 @@ glint_cli --info <input>
   -p PATH           double|fixed (MP3, both-mode builds only)
   -j N              worker threads, MP3 scale search (byte-identical output)
   --rate HZ         resample before encoding (Opus auto-resamples to 48k)
+  --bits N          WAV/raw output bit depth: 8|16|24|32 (default 16)
+  --wav-float       write float WAV/raw
   --gain DB         apply gain in dB
   --norm[=DB]       peak-normalize (default -1 dBFS)
   --info            print format/rate/channels/duration and exit
@@ -190,11 +192,14 @@ glint_aac_destroy` (encoder delay 2048 samples; flush returns two tail
 frames). `glint_version()` reports the library version. AAC VBR: set
 `cfg.vbr = 1; cfg.vbr_quality = 0..9`.
 
-Decode + DSP: `glint_mp3_dec_* / glint_aac_dec_*` (frame decoders),
-`glint_decode_audio(data, len, &sr, &ch, &frames)` (whole stream, auto-
-detects MP3/AAC/Ogg-Opus, returns malloc'd interleaved float — free with
-`glint_free`), and `glint_resample(in, in_frames, ch, sr_in, sr_out,
-&out_frames)` (Kaiser-windowed sinc).
+Decode + DSP + WAV: `glint_mp3_dec_* / glint_aac_dec_*` (frame decoders);
+`glint_decode_audio(...)` (whole stream, auto-detects MP3/AAC/Ogg-Opus)
+and `glint_decode_audio_ex(..., out_rate, want_int16, ...)` (adds output
+resample, int16 output, and Opus surround up to 8 ch); `glint_encode_audio(
+pcm, frames, ch, sr, format, bitrate, vbr_q, quality, &n)` (one-call
+encode, auto-resamples to a codec-valid rate); `glint_resample(...)`
+(Kaiser sinc); `glint_wav_read` / `glint_wav_write` (PCM 8/16/24/32,
+float 32/64, A-law, mu-law). All malloc'd returns free with `glint_free`.
 
 ### Bindings
 
@@ -202,10 +207,11 @@ detects MP3/AAC/Ogg-Opus, returns malloc'd interleaved float — free with
 import glint
 glint.encode_pcm(...)                        # MP3 encode
 enc = glint.AacEncoder(44100, 2, 128)        # AAC (vbr_quality= for VBR)
-pcm, sr, ch = glint.decode_file("in.aac")    # any codec -> float PCM
+pcm, sr, ch = glint.decode_file("in.aac")            # any codec/bit depth -> float
+pcm, sr, ch = glint.decode_file("s.opus", dtype="int16", rate=24000)  # + 5.1
 glint.transcode_file("in.mp3", "out.opus", bitrate=96)   # incl. Opus out
-out = glint.resample(pcm, sr, 48000, ch)     # Kaiser sinc
-opus = glint.encode_opus_file(out, ch, bitrate=96000)    # 48k float -> Ogg-Opus
+data = glint.encode_audio(pcm, ch, sr, "aac", bitrate=128)  # one-call, any rate
+glint.write_wav("o.wav", pcm, sr, ch, bits=24)       # 8/16/24/32-int or float
 ```
 
 ```rust
