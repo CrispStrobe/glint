@@ -65,7 +65,8 @@ final class GlintAacConfig extends Struct {
 }
 
 // Native function signatures
-typedef GlintCheckConfigNative = Int32 Function(Int32 sampleRate, Int32 bitrate);
+typedef GlintCheckConfigNative = Int32 Function(
+    Int32 sampleRate, Int32 bitrate);
 typedef GlintCheckConfig = int Function(int sampleRate, int bitrate);
 
 typedef GlintCreateNative = Pointer<Void> Function(Pointer<GlintConfig> cfg);
@@ -74,23 +75,26 @@ typedef GlintCreate = Pointer<Void> Function(Pointer<GlintConfig> cfg);
 typedef GlintSamplesPerFrameNative = Int32 Function(Pointer<Void> enc);
 typedef GlintSamplesPerFrame = int Function(Pointer<Void> enc);
 
-typedef GlintEncodeNative = Pointer<Uint8> Function(
-    Pointer<Void> enc, Pointer<Pointer<Int16>> channelData, Pointer<Int32> outSize);
-typedef GlintEncode = Pointer<Uint8> Function(
-    Pointer<Void> enc, Pointer<Pointer<Int16>> channelData, Pointer<Int32> outSize);
+typedef GlintEncodeNative = Pointer<Uint8> Function(Pointer<Void> enc,
+    Pointer<Pointer<Int16>> channelData, Pointer<Int32> outSize);
+typedef GlintEncode = Pointer<Uint8> Function(Pointer<Void> enc,
+    Pointer<Pointer<Int16>> channelData, Pointer<Int32> outSize);
 
-typedef GlintEncodeFloatNative = Pointer<Uint8> Function(
-    Pointer<Void> enc, Pointer<Pointer<Float>> channelData, Pointer<Int32> outSize);
-typedef GlintEncodeFloat = Pointer<Uint8> Function(
-    Pointer<Void> enc, Pointer<Pointer<Float>> channelData, Pointer<Int32> outSize);
+typedef GlintEncodeFloatNative = Pointer<Uint8> Function(Pointer<Void> enc,
+    Pointer<Pointer<Float>> channelData, Pointer<Int32> outSize);
+typedef GlintEncodeFloat = Pointer<Uint8> Function(Pointer<Void> enc,
+    Pointer<Pointer<Float>> channelData, Pointer<Int32> outSize);
 
-typedef GlintFlushNative = Pointer<Uint8> Function(Pointer<Void> enc, Pointer<Int32> outSize);
-typedef GlintFlush = Pointer<Uint8> Function(Pointer<Void> enc, Pointer<Int32> outSize);
+typedef GlintFlushNative = Pointer<Uint8> Function(
+    Pointer<Void> enc, Pointer<Int32> outSize);
+typedef GlintFlush = Pointer<Uint8> Function(
+    Pointer<Void> enc, Pointer<Int32> outSize);
 
 typedef GlintDestroyNative = Void Function(Pointer<Void> enc);
 typedef GlintDestroy = void Function(Pointer<Void> enc);
 
-typedef GlintAacCreateNative = Pointer<Void> Function(Pointer<GlintAacConfig> cfg);
+typedef GlintAacCreateNative = Pointer<Void> Function(
+    Pointer<GlintAacConfig> cfg);
 typedef GlintAacCreate = Pointer<Void> Function(Pointer<GlintAacConfig> cfg);
 
 // --- Library loader ---
@@ -152,17 +156,20 @@ class GlintEncoder {
   }) : channels = channels {
     _lib = _loadLibrary();
 
-    final checkConfig = _lib
-        .lookupFunction<GlintCheckConfigNative, GlintCheckConfig>('glint_check_config');
+    final checkConfig =
+        _lib.lookupFunction<GlintCheckConfigNative, GlintCheckConfig>(
+            'glint_check_config');
     final create =
         _lib.lookupFunction<GlintCreateNative, GlintCreate>('glint_create');
-    final spfFn = _lib.lookupFunction<GlintSamplesPerFrameNative,
-        GlintSamplesPerFrame>('glint_samples_per_frame');
+    final spfFn =
+        _lib.lookupFunction<GlintSamplesPerFrameNative, GlintSamplesPerFrame>(
+            'glint_samples_per_frame');
 
     _glintEncode =
         _lib.lookupFunction<GlintEncodeNative, GlintEncode>('glint_encode');
-    _glintEncodeFloat = _lib
-        .lookupFunction<GlintEncodeFloatNative, GlintEncodeFloat>('glint_encode_float');
+    _glintEncodeFloat =
+        _lib.lookupFunction<GlintEncodeFloatNative, GlintEncodeFloat>(
+            'glint_encode_float');
     _glintFlush =
         _lib.lookupFunction<GlintFlushNative, GlintFlush>('glint_flush');
     _glintDestroy =
@@ -171,7 +178,8 @@ class GlintEncoder {
     // Validate configuration
     final rc = checkConfig(sampleRate, bitrate);
     if (rc != 0) {
-      throw ArgumentError('Unsupported sample rate ($sampleRate) or bitrate ($bitrate)');
+      throw ArgumentError(
+          'Unsupported sample rate ($sampleRate) or bitrate ($bitrate)');
     }
 
     // Allocate and fill config struct
@@ -215,7 +223,9 @@ class GlintEncoder {
       buffers.add(buf);
       channelPtrs[ch] = buf;
 
-      for (var s = 0; s < samplesPerFrame && (s * channels + ch) < pcm.length; s++) {
+      for (var s = 0;
+          s < samplesPerFrame && (s * channels + ch) < pcm.length;
+          s++) {
         buf[s] = pcm[s * channels + ch];
       }
     }
@@ -255,7 +265,9 @@ class GlintEncoder {
       buffers.add(buf);
       channelPtrs[ch] = buf;
 
-      for (var s = 0; s < samplesPerFrame && (s * channels + ch) < pcm.length; s++) {
+      for (var s = 0;
+          s < samplesPerFrame && (s * channels + ch) < pcm.length;
+          s++) {
         buf[s] = pcm[s * channels + ch];
       }
     }
@@ -316,7 +328,6 @@ class GlintEncoder {
 
 // Allocation uses package:ffi's calloc (zero-initialised).
 
-
 /// AAC-LC encoder (ADTS output). Same interleaved-PCM conventions as
 /// [GlintEncoder]; one [encode] call consumes [samplesPerFrame] (1024)
 /// samples per channel and returns one ADTS frame. [flush] returns the two
@@ -345,16 +356,17 @@ class GlintAacEncoder {
   }) : channels = channels {
     _lib = _loadLibrary();
 
-    final create = _lib
-        .lookupFunction<GlintAacCreateNative, GlintAacCreate>('glint_aac_create');
-    final spfFn = _lib.lookupFunction<GlintSamplesPerFrameNative,
-        GlintSamplesPerFrame>('glint_aac_samples_per_frame');
+    final create = _lib.lookupFunction<GlintAacCreateNative, GlintAacCreate>(
+        'glint_aac_create');
+    final spfFn =
+        _lib.lookupFunction<GlintSamplesPerFrameNative, GlintSamplesPerFrame>(
+            'glint_aac_samples_per_frame');
     _aacEncode =
         _lib.lookupFunction<GlintEncodeNative, GlintEncode>('glint_aac_encode');
     _aacFlush =
         _lib.lookupFunction<GlintFlushNative, GlintFlush>('glint_aac_flush');
-    _aacDestroy =
-        _lib.lookupFunction<GlintDestroyNative, GlintDestroy>('glint_aac_destroy');
+    _aacDestroy = _lib
+        .lookupFunction<GlintDestroyNative, GlintDestroy>('glint_aac_destroy');
 
     final cfgPtr = calloc<GlintAacConfig>(); // calloc zeroes reserved[]
     cfgPtr.ref.sampleRate = sampleRate;
@@ -441,7 +453,6 @@ class GlintAacEncoder {
     }
   }
 }
-
 
 // --- Opus codec (CELT encoder + full decoder) ---
 
@@ -625,7 +636,6 @@ class GlintOpusDecoder {
   }
 }
 
-
 // --- MP3 + AAC-LC decoders ---
 
 final class GlintDecFrameInfo extends Struct {
@@ -667,12 +677,11 @@ abstract class _FrameDecoder {
     _lib = _loadLibrary();
     _create = _lib.lookupFunction<_DecCreateNative, _DecCreate>(
         'glint_${_prefix}_dec_create');
-    _decode = _lib.lookupFunction<_DecodeNative, _Decode>(
-        'glint_${_prefix}_decode');
+    _decode =
+        _lib.lookupFunction<_DecodeNative, _Decode>('glint_${_prefix}_decode');
     _frameInfo = _lib.lookupFunction<_FrameInfoNative, _FrameInfo>(
         'glint_${_prefix}_frame_info');
-    _destroy = _lib.lookupFunction<
-        Void Function(Pointer<Void>),
+    _destroy = _lib.lookupFunction<Void Function(Pointer<Void>),
         void Function(Pointer<Void>)>('glint_${_prefix}_dec_destroy');
     _handle = _create();
     if (_handle == nullptr) {
@@ -686,7 +695,9 @@ abstract class _FrameDecoder {
     _checkNotDisposed();
     var off = 0;
     if (data.length > 10 &&
-        data[0] == 0x49 && data[1] == 0x44 && data[2] == 0x33) {
+        data[0] == 0x49 &&
+        data[1] == 0x44 &&
+        data[2] == 0x33) {
       final sz = ((data[6] & 0x7F) << 21) |
           ((data[7] & 0x7F) << 14) |
           ((data[8] & 0x7F) << 7) |
@@ -706,8 +717,8 @@ abstract class _FrameDecoder {
         }
         final fb = fi.ref.frameBytes;
         if (fb == 0 || off + fb > data.length) break;
-        final n = _decode(_handle, (inPtr + off),
-            data.length - off, outPtr, fi);
+        final n =
+            _decode(_handle, (inPtr + off), data.length - off, outPtr, fi);
         if (n > 0) {
           final ch = fi.ref.channels == 0 ? 1 : fi.ref.channels;
           acc.addAll(outPtr.asTypedList(n * ch));
@@ -750,36 +761,32 @@ class GlintAacDecoder extends _FrameDecoder {
 // High-level convenience: resample + whole-file decode (PLAN buckets A+B)
 // ---------------------------------------------------------------------------
 
-typedef _ResampleNative = Pointer<Float> Function(Pointer<Float>, Int32,
-    Int32, Int32, Int32, Pointer<Int32>);
-typedef _Resample = Pointer<Float> Function(Pointer<Float>, int, int, int,
-    int, Pointer<Int32>);
+typedef _ResampleNative = Pointer<Float> Function(
+    Pointer<Float>, Int32, Int32, Int32, Int32, Pointer<Int32>);
+typedef _Resample = Pointer<Float> Function(
+    Pointer<Float>, int, int, int, int, Pointer<Int32>);
 typedef _FreeNative = Void Function(Pointer<Void>);
 typedef _Free = void Function(Pointer<Void>);
-typedef _DecodeAudioNative = Pointer<Float> Function(Pointer<Uint8>, Int32,
-    Pointer<Int32>, Pointer<Int32>, Pointer<Int32>);
-typedef _DecodeAudio = Pointer<Float> Function(Pointer<Uint8>, int,
-    Pointer<Int32>, Pointer<Int32>, Pointer<Int32>);
-typedef _DecodeExNative = Pointer<Void> Function(Pointer<Uint8>, Int32,
-    Int32, Int32, Pointer<Int32>, Pointer<Int32>, Pointer<Int32>);
+typedef _DecodeExNative = Pointer<Void> Function(Pointer<Uint8>, Int32, Int32,
+    Int32, Pointer<Int32>, Pointer<Int32>, Pointer<Int32>);
 typedef _DecodeEx = Pointer<Void> Function(Pointer<Uint8>, int, int, int,
     Pointer<Int32>, Pointer<Int32>, Pointer<Int32>);
-typedef _OpusEncFileNative = Pointer<Uint8> Function(Pointer<Float>, Int32,
-    Int32, Int32, Int32, Pointer<Int32>);
-typedef _OpusEncFile = Pointer<Uint8> Function(Pointer<Float>, int, int, int,
-    int, Pointer<Int32>);
-typedef _WavReadNative = Pointer<Float> Function(Pointer<Uint8>, Int32,
-    Pointer<Int32>, Pointer<Int32>, Pointer<Int32>);
-typedef _WavRead = Pointer<Float> Function(Pointer<Uint8>, int,
-    Pointer<Int32>, Pointer<Int32>, Pointer<Int32>);
-typedef _WavWriteNative = Pointer<Uint8> Function(Pointer<Float>, Int32,
-    Int32, Int32, Int32, Int32, Pointer<Int32>);
-typedef _WavWrite = Pointer<Uint8> Function(Pointer<Float>, int, int, int,
-    int, int, Pointer<Int32>);
-typedef _EncAudioNative = Pointer<Uint8> Function(Pointer<Float>, Int32,
-    Int32, Int32, Int32, Int32, Int32, Int32, Pointer<Int32>);
-typedef _EncAudio = Pointer<Uint8> Function(Pointer<Float>, int, int, int,
-    int, int, int, int, Pointer<Int32>);
+typedef _OpusEncFileNative = Pointer<Uint8> Function(
+    Pointer<Float>, Int32, Int32, Int32, Int32, Pointer<Int32>);
+typedef _OpusEncFile = Pointer<Uint8> Function(
+    Pointer<Float>, int, int, int, int, Pointer<Int32>);
+typedef _WavReadNative = Pointer<Float> Function(
+    Pointer<Uint8>, Int32, Pointer<Int32>, Pointer<Int32>, Pointer<Int32>);
+typedef _WavRead = Pointer<Float> Function(
+    Pointer<Uint8>, int, Pointer<Int32>, Pointer<Int32>, Pointer<Int32>);
+typedef _WavWriteNative = Pointer<Uint8> Function(
+    Pointer<Float>, Int32, Int32, Int32, Int32, Int32, Pointer<Int32>);
+typedef _WavWrite = Pointer<Uint8> Function(
+    Pointer<Float>, int, int, int, int, int, Pointer<Int32>);
+typedef _EncAudioNative = Pointer<Uint8> Function(Pointer<Float>, Int32, Int32,
+    Int32, Int32, Int32, Int32, Int32, Pointer<Int32>);
+typedef _EncAudio = Pointer<Uint8> Function(
+    Pointer<Float>, int, int, int, int, int, int, int, Pointer<Int32>);
 
 /// Decoded audio: interleaved float PCM plus its stream parameters.
 class GlintDecodedAudio {
@@ -832,8 +839,8 @@ class GlintDecodedAudioI16 {
 GlintDecodedAudio glintDecodeAudio(Uint8List data, {int rate = 0}) {
   if (data.isEmpty) throw StateError('empty input');
   final lib = _loadLibrary();
-  final fn = lib.lookupFunction<_DecodeExNative, _DecodeEx>(
-      'glint_decode_audio_ex');
+  final fn =
+      lib.lookupFunction<_DecodeExNative, _DecodeEx>('glint_decode_audio_ex');
   final free = lib.lookupFunction<_FreeNative, _Free>('glint_free');
   final inPtr = calloc<Uint8>(data.length);
   inPtr.asTypedList(data.length).setAll(0, data);
@@ -861,8 +868,8 @@ GlintDecodedAudio glintDecodeAudio(Uint8List data, {int rate = 0}) {
 GlintDecodedAudioI16 glintDecodeAudioI16(Uint8List data, {int rate = 0}) {
   if (data.isEmpty) throw StateError('empty input');
   final lib = _loadLibrary();
-  final fn = lib.lookupFunction<_DecodeExNative, _DecodeEx>(
-      'glint_decode_audio_ex');
+  final fn =
+      lib.lookupFunction<_DecodeExNative, _DecodeEx>('glint_decode_audio_ex');
   final free = lib.lookupFunction<_FreeNative, _Free>('glint_free');
   final inPtr = calloc<Uint8>(data.length);
   inPtr.asTypedList(data.length).setAll(0, data);
@@ -961,8 +968,8 @@ Uint8List glintWriteWav(Float32List pcm, int channels, int sampleRate,
   final outSize = calloc<Int32>();
   try {
     final frames = pcm.length ~/ channels;
-    final ptr = fn(inPtr, frames, channels, sampleRate, bits,
-        floatFmt ? 1 : 0, outSize);
+    final ptr = fn(
+        inPtr, frames, channels, sampleRate, bits, floatFmt ? 1 : 0, outSize);
     if (ptr == nullptr || outSize.value <= 0) {
       throw StateError('WAV write failed');
     }
@@ -982,15 +989,15 @@ enum GlintCodec { mp3, aac, opus }
 /// channels -> a complete MP3 / AAC-LC / Ogg-Opus stream. The input is
 /// auto-resampled to a codec-valid rate (Opus->48k, MP3/AAC->nearest
 /// supported). [bitrate] in kbps; [vbrQuality] 0..9 selects VBR.
-Uint8List glintEncodeAudio(Float32List pcm, int channels, int sampleRate,
-    GlintCodec codec,
+Uint8List glintEncodeAudio(
+    Float32List pcm, int channels, int sampleRate, GlintCodec codec,
     {int bitrate = 128, int? vbrQuality, int quality = 1}) {
   if (channels < 1 || channels > 2 || pcm.isEmpty) {
     throw StateError('encode: bad channels/empty input');
   }
   final lib = _loadLibrary();
-  final fn = lib.lookupFunction<_EncAudioNative, _EncAudio>(
-      'glint_encode_audio');
+  final fn =
+      lib.lookupFunction<_EncAudioNative, _EncAudio>('glint_encode_audio');
   final free = lib.lookupFunction<_FreeNative, _Free>('glint_free');
   final inPtr = calloc<Float>(pcm.length);
   inPtr.asTypedList(pcm.length).setAll(0, pcm);

@@ -2,7 +2,7 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
-import 'package:glint/glint.dart';
+import 'package:glint_audio/glint_audio.dart';
 
 void main() {
   const sampleRate = 44100;
@@ -17,7 +17,8 @@ void main() {
   }
 
   // Encode to MP3
-  final encoder = GlintEncoder(sampleRate: sampleRate, channels: 1, bitrate: 128);
+  final encoder =
+      GlintEncoder(sampleRate: sampleRate, channels: 1, bitrate: 128);
   final mp3 = BytesBuilder();
 
   final frameSize = encoder.samplesPerFrame;

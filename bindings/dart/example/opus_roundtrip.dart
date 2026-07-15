@@ -1,6 +1,6 @@
 import 'dart:math' as math;
 import 'dart:typed_data';
-import 'package:glint/glint.dart';
+import 'package:glint_audio/glint_audio.dart';
 
 void main() {
   final enc = GlintOpusEncoder(channels: 2, bitrate: 96000);

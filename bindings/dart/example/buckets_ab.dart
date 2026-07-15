@@ -2,7 +2,7 @@
 // glintDecodeAudio (whole-file decode). Run: dart example/buckets_ab.dart
 import 'dart:math' as math;
 import 'dart:typed_data';
-import 'package:glint/glint.dart';
+import 'package:glint_audio/glint_audio.dart';
 
 void main() {
   // 1. Resample: length scales by the ratio; passthrough is a copy.
@@ -166,8 +166,12 @@ void main() {
 
   // 8. Codec knobs: MP3 stereo/best/VBR + AAC VBR both decode back.
   final mEnc = GlintEncoder(
-      sampleRate: 44100, channels: 2, bitrate: 192,
-      mode: 3, quality: 2, vbrQuality: 3);
+      sampleRate: 44100,
+      channels: 2,
+      bitrate: 192,
+      mode: 3,
+      quality: 2,
+      vbrQuality: 3);
   final aEnc = GlintAacEncoder(
       sampleRate: 44100, channels: 2, bitrate: 128, vbrQuality: 2);
   final mp3b = BytesBuilder();
@@ -176,8 +180,8 @@ void main() {
   for (var f = 0; f < 50; f++) {
     final mp = Int16List(mEnc.samplesPerFrame * 2);
     for (var i = 0; i < mEnc.samplesPerFrame; i++) {
-      final s = (0.4 * math.sin(2 * math.pi * 440 * kphase / 44100) * 20000)
-          .toInt();
+      final s =
+          (0.4 * math.sin(2 * math.pi * 440 * kphase / 44100) * 20000).toInt();
       kphase++;
       mp[i * 2] = s;
       mp[i * 2 + 1] = s;

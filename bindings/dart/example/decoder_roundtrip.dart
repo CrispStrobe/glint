@@ -1,6 +1,6 @@
 import 'dart:math' as math;
 import 'dart:typed_data';
-import 'package:glint/glint.dart';
+import 'package:glint_audio/glint_audio.dart';
 
 void main() {
   // MP3 encode -> decode
@@ -22,7 +22,8 @@ void main() {
   enc.dispose();
   final dec = GlintMp3Decoder();
   final out = dec.decode(mp3.toBytes());
-  print('dart GlintMp3Decoder: ${mp3.length} B -> ${out.length ~/ 2} samples/ch');
+  print(
+      'dart GlintMp3Decoder: ${mp3.length} B -> ${out.length ~/ 2} samples/ch');
   if (out.length < 40000 * 2) throw StateError('too few samples');
   dec.dispose();
   print('OK');
