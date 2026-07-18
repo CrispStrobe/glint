@@ -1279,6 +1279,22 @@ static void test_vorbis_imdct() {
     }
 }
 
+// Floor 0 (LSP) curve synthesis. No encoder emits floor 0, so the math is
+// cross-checked against an independent reference implementation of spec
+// §6.2.3 (golden values computed in Python).
+static void test_vorbis_floor0() {
+    std::printf("[vorbis] floor 0 (LSP) curve synthesis...\n");
+    const float coef[4] = {0.3f, 0.9f, 1.5f, 2.2f};
+    float out[8] = {0};
+    glint::vorbis::floor0_curve(4, coef, 200, 8, 20, 44100, 256, 8, out);
+    const float golden[8] = {5300.41822f, 0.358472972f, 0.238297387f,
+                             0.212157179f, 0.203069541f, 0.19947903f,
+                             0.197737472f, 0.196927021f};
+    for (int i = 0; i < 8; i++)
+        CHECK(std::abs(out[i] - golden[i]) <= 1e-3 * std::abs(golden[i]) + 1e-6,
+              "floor0 curve matches reference");
+}
+
 #include "vorbis_test_stream.h"
 
 // Full setup-header parse (spec §4.2.4) on a REAL libvorbis stream: all
@@ -1368,6 +1384,7 @@ int main() {
     test_vorbis_codebook();
     test_vorbis_setup();
     test_vorbis_imdct();
+    test_vorbis_floor0();
     test_vorbis_decode();
 
     std::printf("\n%d/%d tests passed\n", tests_passed, tests_run);

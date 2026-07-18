@@ -65,6 +65,14 @@ int read_codebook(class BitReader& br, Codebook& cb);
 float float32_unpack(uint32_t x);          // spec §9.2.2
 uint32_t lookup1_values(int entries, int dimensions);  // spec §9.2.3
 
+// Floor 0 (LSP) curve synthesis (spec §6.2.3): from `order` LSP coefficients
+// and the amplitude/quantization parameters, fill out[0..n) with the linear
+// floor magnitude. Exposed for unit testing (no encoder emits floor 0, so
+// the math is cross-checked against an independent reference).
+void floor0_curve(int order, const float* coef, int amplitude,
+                  int amplitude_bits, int amplitude_offset, int rate,
+                  int bark_map_size, int n, float* out);
+
 // Parsed identification header (spec §4.2.2).
 struct IdHeader {
     int version = -1;

@@ -281,6 +281,62 @@ int read_codebook(BitReader& br, Codebook& cb) {
 }
 
 // ---------------------------------------------------------------------------
+// Floor 0 (LSP) curve synthesis (spec §6.2.3)
+// ---------------------------------------------------------------------------
+
+void floor0_curve(int order, const float* coef, int amplitude,
+                  int amplitude_bits, int amplitude_offset, int rate,
+                  int bark_map_size, int n, float* out) {
+    auto bark = [](double x) {
+        return 13.1 * std::atan(0.00074 * x) +
+               2.24 * std::atan(0.0000000185 * x * x) + 0.0001 * x;
+    };
+    if (n <= 0) return;
+    std::vector<int> map(n);
+    double denom = bark(0.5 * rate);
+    for (int i = 0; i < n; i++) {
+        int val = static_cast<int>(std::floor(
+            bark((rate / (2.0 * n)) * i) * bark_map_size / denom));
+        map[i] = val < bark_map_size - 1 ? val : bark_map_size - 1;
+    }
+    int i = 0;
+    while (i < n) {
+        double w = M_PI * map[i] / bark_map_size;
+        double cw = std::cos(w);
+        double p, q;
+        if (order & 1) {
+            p = 1.0 - cw * cw;
+            q = 0.25;
+            for (int j = 0; j < (order - 1) / 2; j++) {
+                double t = std::cos(coef[2 * j + 1]) - cw;
+                p *= 4.0 * t * t;
+            }
+            for (int j = 0; j < (order + 1) / 2; j++) {
+                double t = std::cos(coef[2 * j]) - cw;
+                q *= 4.0 * t * t;
+            }
+        } else {
+            p = (1.0 - cw) * 0.5;
+            q = (1.0 + cw) * 0.5;
+            for (int j = 0; j < order / 2; j++) {
+                double tp = std::cos(coef[2 * j + 1]) - cw;
+                double tq = std::cos(coef[2 * j]) - cw;
+                p *= 4.0 * tp * tp;
+                q *= 4.0 * tq * tq;
+            }
+        }
+        double lin = std::exp(
+            0.11512925 *
+            (amplitude * amplitude_offset /
+                 (((1 << amplitude_bits) - 1) * std::sqrt(p + q)) -
+             amplitude_offset));
+        int j = i;
+        while (j < n && map[j] == map[i]) out[j++] = static_cast<float>(lin);
+        i = j;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Setup header: floors, residues, mappings, modes (spec §4.2.4, §6-§8)
 // ---------------------------------------------------------------------------
 
@@ -709,9 +765,13 @@ public:
         for (int c = 0; c < ch_; c++) {
             int fnum = map.submap_floor[map.mux[c]];
             const Floor& fl = s_.floors[fnum];
-            if (fl.type != 1) return -1;  // floor 0 (LSP) not in this build
             floor_curve[c].assign(half, 0.f);
-            int used = decode_floor1(br, fl.f1, half, floor_curve[c].data());
+            int used;
+            if (fl.type == 1) {
+                used = decode_floor1(br, fl.f1, half, floor_curve[c].data());
+            } else {  // floor 0 (LSP)
+                used = decode_floor0(br, fl.f0, half, floor_curve[c].data());
+            }
             if (used < 0) return -1;
             no_residue[c] = used ? 0 : 1;
         }
@@ -793,6 +853,34 @@ private:
     std::vector<int> lap_n_;               // valid length of lap_[c]
     std::vector<char> started_;            // first-block-seen flag per ch
     FastImdct imdct0_, imdct1_;            // short / long block transforms
+
+    // Floor 0 (LSP) decode + curve synthesis (spec §6.2.2/§6.2.3). Returns 1
+    // (used) with the linear curve in `curve[0..half)`, 0 (unused), or -1.
+    int decode_floor0(BitReader& br, const Floor0& f, int half, float* curve) {
+        int amplitude = static_cast<int>(br.read(f.amplitude_bits));
+        if (amplitude <= 0) return 0;  // unused this frame
+        int nbooks = static_cast<int>(f.books.size());
+        int booknumber = static_cast<int>(br.read(ilog(nbooks)));
+        if (booknumber >= nbooks) return -1;
+        int bk = f.books[booknumber];
+        if (bk < 0 || bk >= static_cast<int>(s_.codebooks.size())) return -1;
+        const Codebook& cb = s_.codebooks[bk];
+        if (cb.dimensions <= 0 || cb.vq.empty()) return -1;
+        std::vector<float> coef;
+        std::vector<float> vec(cb.dimensions);
+        double last = 0.0;
+        while (static_cast<int>(coef.size()) < f.order) {
+            if (cb.decode_vector(br, vec.data()) < 0) return -1;
+            for (int k = 0; k < cb.dimensions; k++)
+                coef.push_back(static_cast<float>(vec[k] + last));
+            last = coef.back();
+        }
+        if (br.overrun()) return -1;
+        floor0_curve(f.order, coef.data(), amplitude, f.amplitude_bits,
+                     f.amplitude_offset, f.rate, f.bark_map_size, half,
+                     curve);
+        return 1;
+    }
 
     // Floor 1 decode + curve synthesis. Returns 1 (used) with the linear
     // curve in `curve[0..half)`, 0 (unused), or -1 (error).
