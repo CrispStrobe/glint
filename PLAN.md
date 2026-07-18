@@ -764,9 +764,28 @@ Staging (spec §4–§9, §12), each slice green before the next:
   plus a tighter codebook-entry cap (2^20) for bounded allocation. 150k
   decode calls clean under ASan+UBSan; real streams unaffected; full ctest
   green (9/9).
-- **NEXT:** floor 0 (LSP) synthesis, bindings parity (wasm rebuild +
-  `FORMAT.VORBIS` in `glint_codec.mjs`; Python already works transparently),
-  `.sf3` end-to-end acceptance (FluidR3Mono sampled presets + in-tune check).
+- **Slice 7 — bindings parity + floor 0 + docs (DONE 2026-07-19).**
+  - **Dart:** `GlintVorbisDecoder` (whole-buffer -> Float32List + sr/ch via
+    `glint_vorbis_decode`) + `example/vorbis_decode.dart` (dedicated vs
+    whole-file agree). **wasm:** exported `_glint_vorbis_decode`, added
+    `FORMAT.VORBIS` + `decodeVorbis` to `glint_codec.mjs`, rebuilt `glint.wasm`
+    via emsdk (ENVIRONMENT now `web,worker,node`); node smoke decodes a .ogg
+    (17640 frames, MP3/AAC/Opus unregressed) — first commit of the wasm
+    binding into the repo. **Rust:** `glint_sys::glint_vorbis_decode` +
+    `glint::decode_vorbis`; build.rs compiles the vorbis sources; cargo test
+    green. **Python:** `decode_bytes` decodes Vorbis via auto-detect —
+    explicit `VorbisDecodeTest` (embedded stream) in the always-on
+    python_bindings gate.
+  - **Floor 0 (LSP):** implemented (spec §6.2.2/§6.2.3) and wired in. Caveat:
+    **no encoder emits floor 0** (libvorbis has used floor 1 exclusively since
+    before 1.0; every sox quality here is floor 1), so there is no real
+    floor-0 stream to gate E2E — the math is cross-checked against an
+    independent reference (`test_vorbis_floor0`, golden values).
+  - **README** documents the decoder (highlights, dB numbers, C ABI, all four
+    wrappers, roadmap). **pub.dev:** `glint_audio` 0.9.0 -> 0.10.0 + CHANGELOG
+    (commit only; publish needs a `glint_audio-v0.10.0` tag — NOT created).
+  - Clean-room affidavit + MIT headers intact. Full ctest green (9/9); merged
+    to `main`.
 - Slices 3+: setup header (floors/residues/mappings/modes) → floor 1 →
   residue 0/1/2 + inverse coupling → iMDCT + overlap-add → dB gate vs
   ffmpeg+sox (≥120 dB) → floor 0 (LSP) → bindings → fuzz → `.sf3` E2E.
