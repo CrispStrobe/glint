@@ -685,7 +685,19 @@ Staging (spec §4–§9, §12), each slice green before the next:
   packets, granule 22050, id valid ch=1 bs 256/2048. Unit tests: LSB bit
   reader + id-header parse/reject (`test_vorbis_*` in test_unit.cpp).
   Full existing ctest suite still green (8/8), zero Opus/MP3/AAC regression.
-- **Slice 2 — codebooks (Huffman + VQ lookup 1/2)** — NEXT.
+- **Slice 2 — codebooks (Huffman + VQ lookup 1/2) (DONE 2026-07-18).**
+  `read_codebook` (spec §3.2.1): sync 0x564342, dims/entries, ordered+sparse
+  length coding, lookup types 0/1/2 with `float32_unpack` (§9.2.2) +
+  `lookup1_values` (§9.2.3). Huffman decode via a leftmost-assigned binary
+  tree (child0/child1 arrays, leaf = -(entry+2)); single-used-entry
+  degenerate books read 0 bits; over-subscribed trees rejected; bounded
+  allocation guard on multiplicands. `build_vq` materializes lookup-1/2
+  value lists (sequence_p accumulation). Unit tests: the spec §3.2.1
+  worked-example tree decodes e0/e5/e6/e1/e7 correctly, float32_unpack +
+  lookup1_values spec values, over-subscription rejected. **Validated end
+  to end on the real libvorbis stream: all 35 setup-header codebooks
+  (scalar + VQ lookup-1) build with r=0.**
+- **Slice 3 — setup header: floors / residues / mappings / modes** — NEXT.
 - Slices 3+: setup header (floors/residues/mappings/modes) → floor 1 →
   residue 0/1/2 + inverse coupling → iMDCT + overlap-add → dB gate vs
   ffmpeg+sox (≥120 dB) → floor 0 (LSP) → bindings → fuzz → `.sf3` E2E.

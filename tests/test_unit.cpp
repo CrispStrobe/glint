@@ -1200,6 +1200,56 @@ static void test_vorbis_bitreader() {
           "ilog per spec");
 }
 
+// Vorbis codebook: spec §3.2.1 worked-example Huffman tree + §9.2 helpers.
+static void test_vorbis_codebook() {
+    std::printf("[vorbis] codebook huffman + VQ helpers...\n");
+    using glint::vorbis::BitReader;
+    using glint::vorbis::Codebook;
+
+    // float32_unpack (spec §9.2.2): mantissa*2^(exp-788).
+    CHECK(glint::vorbis::float32_unpack((788u << 21) | 1u) == 1.0f,
+          "float32_unpack unit");
+    CHECK(glint::vorbis::float32_unpack((789u << 21) | 1u) == 2.0f,
+          "float32_unpack exp+1");
+    CHECK(glint::vorbis::float32_unpack(0x80000000u | (788u << 21) | 1u) ==
+              -1.0f,
+          "float32_unpack sign");
+    // lookup1_values (spec §9.2.3): greatest r with r^dim <= entries.
+    CHECK(glint::vorbis::lookup1_values(256, 2) == 16, "lookup1 256^(1/2)");
+    CHECK(glint::vorbis::lookup1_values(255, 2) == 15, "lookup1 255");
+    CHECK(glint::vorbis::lookup1_values(48, 3) == 3, "lookup1 48^(1/3)");
+
+    // The spec's example codebook lengths -> known codewords:
+    //   e0:00 e1:0100 e2:0101 e3:0110 e4:0111 e5:10 e6:110 e7:111.
+    Codebook cb;
+    cb.entries = 8;
+    cb.dimensions = 0;
+    cb.lengths = { 2, 4, 4, 4, 4, 2, 3, 3 };
+    CHECK(cb.build_huffman(), "example codebook builds");
+
+    // Decode reads bits low-first; a codeword string "0100" arrives as bits
+    // 0,1,0,0. Pack several codewords back to back and decode in order.
+    // Sequence: e0(00) e5(10) e6(110) e1(0100) e7(111). Codeword strings are
+    // in read order (first character = first bit read; top-down tree path).
+    const int bits[] = { 0, 0,  1, 0,  1, 1, 0,  0, 1, 0, 0,  1, 1, 1 };
+    uint8_t buf[4] = { 0, 0, 0, 0 };
+    int nb = static_cast<int>(sizeof(bits) / sizeof(bits[0]));
+    for (int i = 0; i < nb; i++)
+        if (bits[i]) buf[i >> 3] |= 1u << (i & 7);
+    BitReader br(buf, sizeof(buf));
+    CHECK(cb.decode_scalar(br) == 0, "decode e0 (00)");
+    CHECK(cb.decode_scalar(br) == 5, "decode e5 (10)");
+    CHECK(cb.decode_scalar(br) == 6, "decode e6 (110)");
+    CHECK(cb.decode_scalar(br) == 1, "decode e1 (0100)");
+    CHECK(cb.decode_scalar(br) == 7, "decode e7 (111)");
+
+    // Over-subscribed tree must be rejected (two length-1 + a length-2).
+    Codebook bad;
+    bad.entries = 3;
+    bad.lengths = { 1, 1, 2 };
+    CHECK(!bad.build_huffman(), "over-subscribed codebook rejected");
+}
+
 int main() {
     std::printf("=== glint unit tests ===\n\n");
 
@@ -1236,6 +1286,7 @@ int main() {
 
     test_vorbis_bitreader();
     test_vorbis_id_header();
+    test_vorbis_codebook();
 
     std::printf("\n%d/%d tests passed\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

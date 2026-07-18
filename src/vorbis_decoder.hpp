@@ -33,26 +33,37 @@ struct Codebook {
     int dimensions = 0;
     int entries = 0;
     std::vector<uint8_t> lengths;     // codeword length per entry (0 = unused)
-    // Huffman decode: flat tables built from `lengths` (canonical, per spec).
-    std::vector<int32_t> fast;        // direct LUT for short codes
-    int fast_bits = 0;
-    // Fallback association for longer codes: (code,len)->entry sorted list.
-    std::vector<uint32_t> codes;      // assigned codeword per entry
-    // VQ lookup (spec §3.2).
+    // Huffman decode tree: nodes stored as parallel child arrays. A child
+    // value >= 0 is an internal node index; a value <= -2 is the leaf for
+    // entry (-value - 2); -1 means "no child" (empty subtree).
+    std::vector<int32_t> child0;      // bit 0 branch
+    std::vector<int32_t> child1;      // bit 1 branch
+    // VQ lookup (spec §3.2 / §3.3).
     int lookup_type = 0;
     float minimum_value = 0.f;
     float delta_value = 0.f;
     int value_bits = 0;
     int sequence_p = 0;
-    std::vector<float> vq;            // entries*dimensions decoded value list
+    int lookup_values = 0;
+    std::vector<uint32_t> multiplicands;  // raw value-list entries
+    std::vector<float> vq;                // entries*dimensions decoded vectors
+    int single_entry_ = -1;               // >=0: degenerate 1-entry codebook
 
-    bool build_huffman();             // assign canonical codewords + LUT
-    void build_vq();                  // materialize the VQ value list
+    bool build_huffman();  // build the decode tree from `lengths`
+    void build_vq();       // materialize the VQ value list (lookup 1/2)
     // Decode one entry index from a bit reader (returns -1 on error).
     int decode_scalar(class BitReader& br) const;
     // Decode one VQ vector into out[0..dimensions) (returns -1 on error).
     int decode_vector(class BitReader& br, float* out) const;
 };
+
+// Read + build a codebook from the setup header bitstream (spec §3.2.1).
+// Returns 0 on success, negative on a malformed codebook.
+int read_codebook(class BitReader& br, Codebook& cb);
+
+// Spec helpers, exposed for unit tests.
+float float32_unpack(uint32_t x);          // spec §9.2.2
+uint32_t lookup1_values(int entries, int dimensions);  // spec §9.2.3
 
 // Parsed identification header (spec §4.2.2).
 struct IdHeader {
