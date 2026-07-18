@@ -658,6 +658,38 @@ Scope note: -q speed + CBR only; normal/best (psy loops) and VBR keep
 double math by design. intmath.hpp refactor left AAC INT output
 byte-identical.
 
+# Vorbis track (started 2026-07-18) — branch `feature/vorbis-decoder`
+
+Clean-room Ogg-Vorbis I **decoder** for the `.sf3` soundfont path (CometBeat
+driver). **Clean-room affidavit:** implemented from the Vorbis I specification
+(xiph.org) ONLY; no libvorbis / stb_vorbis / tremor / ffmpeg codec source was
+read or copied. ffmpeg and sox(libvorbis) are used solely as black-box
+reference decoders, and sox(libvorbis) as the corpus encoder (ffmpeg 8.1 on
+this box has only the experimental native encoder, which fails to emit; sox
+`-C q` drives libvorbis). Two independent references available: **ffmpeg**
+(`ffmpeg -i x.ogg -f f32le`) and **sox** (`sox x.ogg -t f32 -`). MIT headers
+on all new files.
+
+Staging (spec §4–§9, §12), each slice green before the next:
+
+- **Slice 1 — Ogg glue + id-header + detect split (DONE 2026-07-18).**
+  `src/vorbis_bits.hpp` (LSB-first BitReader, spec §2 + `ilog`),
+  `src/vorbis_ogg.hpp` (generic first-logical-stream packet demux, reuses
+  `glint::opus::ogg_crc`), `src/vorbis_decoder.{hpp,cpp}` (identification
+  header parse §4.2.2 — channels/rate/power-of-two blocksizes/framing;
+  validates the 3 header packets), `src/vorbis_c_api.cpp`
+  (`glint_vorbis_decode` / `_ex`, C ABI in glint.h). `detect()` in
+  `decode_audio_c_api.cpp` no longer maps ANY `OggS`→Opus: it peeks the first
+  packet — `OpusHead`→Opus, `\x01vorbis`→Vorbis — and routes accordingly.
+  Verified on a real libvorbis stream (`sox` q3, 44.1k mono): demux → 26
+  packets, granule 22050, id valid ch=1 bs 256/2048. Unit tests: LSB bit
+  reader + id-header parse/reject (`test_vorbis_*` in test_unit.cpp).
+  Full existing ctest suite still green (8/8), zero Opus/MP3/AAC regression.
+- **Slice 2 — codebooks (Huffman + VQ lookup 1/2)** — NEXT.
+- Slices 3+: setup header (floors/residues/mappings/modes) → floor 1 →
+  residue 0/1/2 + inverse coupling → iMDCT + overlap-add → dB gate vs
+  ffmpeg+sox (≥120 dB) → floor 0 (LSP) → bindings → fuzz → `.sf3` E2E.
+
 # AAC-LC track (started 2026-07-06)
 
 One repo, two codecs: the AAC encoder lives in `src/aac_*.{hpp,cpp}` with

@@ -1138,6 +1138,68 @@ static void test_aac_decoder_api() {
     CHECK(out_energy > 1.0, "aac roundtrip produced audible energy");
 }
 
+#include "vorbis_bits.hpp"
+#include "vorbis_decoder.hpp"
+
+// Vorbis identification-header parse (spec §4.2.2): channels / rate /
+// power-of-two blocksizes, framing bit, version gate.
+static void test_vorbis_id_header() {
+    std::printf("[vorbis] identification header parse...\n");
+    // 0x01 "vorbis" + version(0) + ch(2) + rate(44100) + 3x bitrate(0) +
+    // blocksize byte (bs0=2^8=256, bs1=2^11=2048) + framing=1.
+    uint8_t pkt[30] = {
+        0x01, 'v', 'o', 'r', 'b', 'i', 's',
+        0x00, 0x00, 0x00, 0x00,              // version = 0
+        0x02,                                 // channels = 2
+        0x44, 0xAC, 0x00, 0x00,              // sample rate = 44100
+        0x00, 0x00, 0x00, 0x00,              // bitrate max
+        0x00, 0x00, 0x00, 0x00,              // bitrate nominal
+        0x00, 0x00, 0x00, 0x00,              // bitrate minimum
+        0xB8,                                 // blocksizes: 0=8(256),1=11(2048)
+        0x01                                  // framing flag = 1
+    };
+    glint::vorbis::IdHeader h =
+        glint::vorbis::parse_id_header(pkt, sizeof(pkt));
+    CHECK(h.valid, "id header valid");
+    CHECK(h.channels == 2, "id header channels");
+    CHECK(h.sample_rate == 44100, "id header sample rate");
+    CHECK(h.blocksize0 == 256 && h.blocksize1 == 2048, "id header blocksizes");
+
+    // Framing bit clear -> invalid.
+    uint8_t bad = pkt[29];
+    pkt[29] = 0x00;
+    CHECK(!glint::vorbis::parse_id_header(pkt, sizeof(pkt)).valid,
+          "id header rejects framing=0");
+    pkt[29] = bad;
+    // blocksize0 > blocksize1 -> invalid (swap nibbles: 0x8B).
+    pkt[28] = 0x8B;
+    CHECK(!glint::vorbis::parse_id_header(pkt, sizeof(pkt)).valid,
+          "id header rejects bs0 > bs1");
+    // Wrong magic -> invalid.
+    uint8_t p2[30];
+    std::memcpy(p2, pkt, 30);
+    p2[0] = 0x03;
+    CHECK(!glint::vorbis::parse_id_header(p2, sizeof(p2)).valid,
+          "id header rejects wrong packet type");
+}
+
+// LSB-first bit reader (spec §2): values read low bit first; overrun flag.
+static void test_vorbis_bitreader() {
+    std::printf("[vorbis] LSB-first bit reader...\n");
+    uint8_t data[3] = { 0b10110101, 0b00000011, 0x00 };
+    glint::vorbis::BitReader br(data, sizeof(data));
+    CHECK(br.read(1) == 1, "bit 0 (LSB) = 1");
+    CHECK(br.read(2) == 0b10, "next 2 bits");     // bits 2,1 -> value 0b10
+    CHECK(br.read(5) == 0b10110, "next 5 bits");  // high 5 bits of byte0
+    CHECK(br.read(10) == 0b0000000011, "spanning byte1");
+    CHECK(!br.overrun(), "no overrun yet");
+    br.read(20);  // runs off the 3-byte buffer
+    CHECK(br.overrun(), "overrun flagged");
+    CHECK(glint::vorbis::ilog(0) == 0 && glint::vorbis::ilog(1) == 1 &&
+              glint::vorbis::ilog(7) == 3 && glint::vorbis::ilog(8) == 4,
+          "ilog per spec");
+}
+
 int main() {
     std::printf("=== glint unit tests ===\n\n");
 
@@ -1171,6 +1233,9 @@ int main() {
     test_opus_c_api_roundtrip();
     test_mp3_decoder_api();
     test_aac_decoder_api();
+
+    test_vorbis_bitreader();
+    test_vorbis_id_header();
 
     std::printf("\n%d/%d tests passed\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;
