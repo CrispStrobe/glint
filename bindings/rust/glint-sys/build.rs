@@ -45,6 +45,8 @@ fn main() {
             "../../../src/encode_audio_c_api.cpp",
             "../../../src/opus_mdct.cpp",
             "../../../src/opus_ogg.cpp",
+            "../../../src/vorbis_decoder.cpp",
+            "../../../src/vorbis_c_api.cpp",
             "../../../src/opus_celt_enc_energy.cpp",
             "../../../src/opus_celt_enc_vq.cpp",
             "../../../src/opus_celt_enc_bands.cpp",
