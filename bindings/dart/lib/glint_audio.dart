@@ -775,6 +775,10 @@ typedef _OpusEncFileNative = Pointer<Uint8> Function(
     Pointer<Float>, Int32, Int32, Int32, Int32, Pointer<Int32>);
 typedef _OpusEncFile = Pointer<Uint8> Function(
     Pointer<Float>, int, int, int, int, Pointer<Int32>);
+typedef _VorbisDecodeNative = Pointer<Float> Function(Pointer<Uint8>, Int32,
+    Pointer<Int32>, Pointer<Int32>, Pointer<Int32>);
+typedef _VorbisDecode = Pointer<Float> Function(Pointer<Uint8>, int,
+    Pointer<Int32>, Pointer<Int32>, Pointer<Int32>);
 typedef _WavReadNative = Pointer<Float> Function(
     Pointer<Uint8>, Int32, Pointer<Int32>, Pointer<Int32>, Pointer<Int32>);
 typedef _WavRead = Pointer<Float> Function(
@@ -890,6 +894,53 @@ GlintDecodedAudioI16 glintDecodeAudioI16(Uint8List data, {int rate = 0}) {
     calloc.free(sr);
     calloc.free(ch);
     calloc.free(fr);
+  }
+}
+
+/// Ogg-Vorbis I decoder (whole-buffer). Decodes a COMPLETE in-memory
+/// Ogg-Vorbis logical stream (identification + comment + setup headers
+/// followed by audio packets) to interleaved float32 PCM. Mono/stereo and
+/// beyond, at the stream's native rate — the shape the `.sf3` soundfont
+/// sample path needs. The whole-file [glintDecodeAudio] also decodes Vorbis
+/// transparently (the C auto-detect routes `OggS` + `\x01vorbis`); this
+/// dedicated wrapper mirrors [GlintOpusDecoder] and calls
+/// `glint_vorbis_decode` directly.
+class GlintVorbisDecoder {
+  final DynamicLibrary _lib;
+  late final _VorbisDecode _decode;
+  late final _Free _free;
+
+  GlintVorbisDecoder() : _lib = _loadLibrary() {
+    _decode = _lib.lookupFunction<_VorbisDecodeNative, _VorbisDecode>(
+        'glint_vorbis_decode');
+    _free = _lib.lookupFunction<_FreeNative, _Free>('glint_free');
+  }
+
+  /// Decode a complete Ogg-Vorbis stream. Returns the interleaved float PCM
+  /// with its sample rate and channel count. Throws [StateError] on a
+  /// non-Vorbis or corrupt buffer.
+  ({int sampleRate, int channels, Float32List pcm}) decode(Uint8List ogg) {
+    if (ogg.isEmpty) throw StateError('empty input');
+    final inPtr = calloc<Uint8>(ogg.length);
+    inPtr.asTypedList(ogg.length).setAll(0, ogg);
+    final sr = calloc<Int32>();
+    final ch = calloc<Int32>();
+    final fr = calloc<Int32>();
+    try {
+      final ptr = _decode(inPtr, ogg.length, sr, ch, fr);
+      if (ptr == nullptr || ch.value <= 0) {
+        throw StateError('vorbis decode failed (not Vorbis or corrupt)');
+      }
+      final total = fr.value * ch.value;
+      final pcm = Float32List.fromList(ptr.asTypedList(total));
+      _free(ptr.cast<Void>());
+      return (sampleRate: sr.value, channels: ch.value, pcm: pcm);
+    } finally {
+      calloc.free(inPtr);
+      calloc.free(sr);
+      calloc.free(ch);
+      calloc.free(fr);
+    }
   }
 }
 
