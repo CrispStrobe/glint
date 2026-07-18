@@ -13,7 +13,6 @@
 #include "reservoir.hpp"
 #include "bitstream.hpp"
 #include "tables.hpp"
-#include "psycho.hpp"
 
 // Define at global scope to match the C forward declaration in glint.h
 struct glint_context {

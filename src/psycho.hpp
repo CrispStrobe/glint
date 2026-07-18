@@ -1,5 +1,17 @@
 // glint - Psychoacoustic masking model
 // MIT License - Clean-room implementation
+//
+// ============================ DEAD CODE ============================
+// PsychoModel is UNUSED. Nothing in the encode path constructs it or calls
+// compute_masking(); the only remaining reference is a comment in quantize.cpp.
+// The masking model that actually drives the MP3 quantizer's noise-shaping
+// (NMR outer) loop lives in quantize.cpp: compute_src_band -> get_mask_model
+// (Schroeder spreading + ATH) -> compute_band_masks. This class's 1.5-3 dB/Bark
+// slopes with self-masking excluded let a loud low band "mask" the whole
+// spectrum, so it is not usable as an allocation target. Do NOT wire it into
+// the encoder. Kept only to avoid touching the multi-platform build; safe to
+// delete once removed from CMakeLists.txt / esp-idf / embedded/pico / glint.h.
+// ==================================================================
 
 #ifndef GLINT_PSYCHO_HPP
 #define GLINT_PSYCHO_HPP

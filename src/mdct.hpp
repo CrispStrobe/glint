@@ -13,6 +13,13 @@ namespace glint {
 class MDCT {
 public:
     MDCT();
+    // Plain long-block MDCT. WARNING: does NOT apply the MPEG frequency
+    // inversion (negate odd subbands at odd time slots) that a standard MP3
+    // decoder's synthesis inverts — it is a bare transform for tests/analysis,
+    // NOT the encoder path. Encoding a granule with this instead of
+    // process_strided produces a self-consistent spectrum that nonetheless
+    // decodes with every odd subband spectrally flipped (broadband audio
+    // scrambles; band-0 tones survive and mask the bug). Use process_strided.
     void process(const double subband[32][18], double mdct_out[32][18]);
     // Read directly from subband_out[32][36] at slot offset, applying
     // frequency inversion inline. Eliminates the sub_gr copy.
