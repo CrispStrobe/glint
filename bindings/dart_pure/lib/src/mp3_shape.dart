@@ -83,10 +83,11 @@ Mp3GranuleInfo mp3QuantizeGranule(
   int srIndex, {
   int quality = 2,
   bool tonalMasks = false,
+  int gainFloor = 0,
 }) {
   final sfb = kMp3SfbLong[srIndex < 3 ? srIndex : 0];
   if (quality <= 0) {
-    return _quantizeBase(mdct, availableBits, srIndex, sfb);
+    return _quantizeBase(mdct, availableBits, srIndex, sfb, gainFloor);
   }
 
   const kNormal = [1.0, 1.04, 1.09, 1.15, 1.22, 1.30];
@@ -108,13 +109,23 @@ Mp3GranuleInfo mp3QuantizeGranule(
 
   final srcBand = mp3ComputeSrcBand(mdct, srIndex);
 
-  var best =
-      _quantizeBase(_scale(mdct, factors[0]), availableBits, srIndex, sfb);
+  var best = _quantizeBase(
+    _scale(mdct, factors[0]),
+    availableBits,
+    srIndex,
+    sfb,
+    gainFloor,
+  );
   var bestMse = _granuleMse(best, mdct, srIndex, sfb);
   var bestFactor = factors[0];
   for (var fi = 1; fi < factors.length; fi++) {
-    final r =
-        _quantizeBase(_scale(mdct, factors[fi]), availableBits, srIndex, sfb);
+    final r = _quantizeBase(
+      _scale(mdct, factors[fi]),
+      availableBits,
+      srIndex,
+      sfb,
+      gainFloor,
+    );
     final mse = _granuleMse(r, mdct, srIndex, sfb);
     if (mse < bestMse) {
       bestMse = mse;
@@ -129,7 +140,13 @@ Mp3GranuleInfo mp3QuantizeGranule(
       if (step == 0) continue;
       final f = bestFactor + step * 0.015;
       if (f < 0.98) continue;
-      final r = _quantizeBase(_scale(mdct, f), availableBits, srIndex, sfb);
+      final r = _quantizeBase(
+        _scale(mdct, f),
+        availableBits,
+        srIndex,
+        sfb,
+        gainFloor,
+      );
       final mse = _granuleMse(r, mdct, srIndex, sfb);
       if (mse < bestMse) {
         bestMse = mse;
@@ -151,6 +168,7 @@ Mp3GranuleInfo mp3QuantizeGranule(
     srcBand,
     sfb,
     tonalMasks,
+    gainFloor,
   );
   return best;
 }
@@ -170,6 +188,7 @@ Mp3GranuleInfo _quantizeBase(
   int availableBits,
   int srIndex,
   List<int> sfb,
+  int gainFloor,
 ) {
   final gi = Mp3GranuleInfo(
     ix: Int16List(576),
@@ -183,7 +202,7 @@ Mp3GranuleInfo _quantizeBase(
     part23Length: 0,
     regions: mp3ComputeRegions(Int16List(576), srIndex),
   );
-  _gainSearchWithScalefacs(gi, mdct, availableBits, srIndex, sfb);
+  _gainSearchWithScalefacs(gi, mdct, availableBits, srIndex, sfb, gainFloor);
   gi.rcGain = gi.globalGain;
   return gi;
 }
@@ -196,6 +215,7 @@ void _gainSearchWithScalefacs(
   int availableBits,
   int srIndex,
   List<int> sfb,
+  int gainFloor,
 ) {
   var targetBits = availableBits - gi.part2Length;
   if (targetBits < 0) targetBits = 0;
@@ -227,6 +247,9 @@ void _gainSearchWithScalefacs(
     final est = gMax.toInt() + 2;
     if (est < maxGain && est > minGain) maxGain = est;
   }
+  // Rate-control anchor: never quantize finer than the floor, so easy granules
+  // bank bits into the reservoir instead of gold-plating SNR (glint's gain_floor).
+  if (gainFloor > minGain) minGain = gainFloor;
   if (maxGain < minGain) maxGain = minGain;
 
   var lo = minGain, hi = maxGain, bestGain = maxGain;
@@ -308,6 +331,7 @@ Mp3GranuleInfo _nmrOuterLoop(
   Float64List srcBand,
   List<int> sfb,
   bool tonalMasks,
+  int gainFloor,
 ) {
   final maskBand = tonalMasks
       ? mp3ComputeBandMasks(
@@ -379,7 +403,7 @@ Mp3GranuleInfo _nmrOuterLoop(
     if (!amplified) break;
     if (srIndex < 3) _tryFoldPreflag(cand);
     if (!_encodeScalefacFields(cand, srIndex)) break;
-    _gainSearchWithScalefacs(cand, scaled, shapeBits, srIndex, sfb);
+    _gainSearchWithScalefacs(cand, scaled, shapeBits, srIndex, sfb, gainFloor);
 
     final candNoise = _computeBandNoise(cand, mdct, srIndex, sfb);
     final jCand = _nmrObjective(candNoise, maskBand);

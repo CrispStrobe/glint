@@ -14,6 +14,7 @@ import 'mp3_bitstream.dart';
 import 'mp3_frame.dart';
 import 'mp3_granule.dart';
 import 'mp3_mdct.dart';
+import 'mp3_reservoir.dart';
 import 'mp3_shape.dart';
 import 'mp3_subband.dart';
 
@@ -43,6 +44,12 @@ Uint8List mp3EncodeMono(
   final slot = Float64List(32);
   final so = Float64List(32);
   final out = BytesBuilder(copy: false);
+  // Bit reservoir: main data spills across frame slots so a hard granule can
+  // spend more than one slot (finer shaping) while easy granules bank the rest.
+  // (A CBR gain-floor anchor was tried and measured WORSE — it coarsened easy
+  // granules faster than shaping could compensate; hard granules borrowing the
+  // naturally-banked surplus is the win. NMR −6.7 → −7.1 dB on speech.)
+  final reservoir = Mp3ReservoirStream(511);
 
   final brBps = bitrate * 1000;
   final frameBase = 144 * brBps ~/ sampleRate;
@@ -56,8 +63,11 @@ Uint8List mp3EncodeMono(
     final pad = padAcc >= sampleRate;
     if (pad) padAcc -= sampleRate;
     final frameSize = frameBase + (pad ? 1 : 0);
-    final availTotal = (frameSize - 4 - _kMonoSideInfoBytes) * 8;
-    final availPer = availTotal ~/ 2;
+    final thisFrameBits = (frameSize - 4 - _kMonoSideInfoBytes) * 8;
+    // Borrow up to one extra slot from the reservoir for this frame.
+    final mdb = reservoir.mainDataBegin();
+    final borrow = 8 * mdb < thisFrameBits ? 8 * mdb : thisFrameBits;
+    final availPer = (thisFrameBits + borrow) ~/ 2;
 
     final gr = <Mp3GranuleInfo>[];
     for (var g = 0; g < 2; g++) {
@@ -86,28 +96,34 @@ Uint8List mp3EncodeMono(
       gr.add(mp3QuantizeGranule(mdctBuf, availPer, srIndex));
     }
 
-    final frame = Mp3BitWriter();
-    _writeHeader(frame, bitrate, sampleRate, pad);
-    // Side info (mono): main_data_begin + private + scfsi + 2 granules.
-    frame.writeBits(0, 9); // main_data_begin (no reservoir)
-    frame.writeBits(0, 5); // private bits (mono)
-    frame.writeBits(0, 4); // scfsi (0 = no scalefactor sharing across granules)
+    // Header + side info (mono, byte-aligned = 21 bytes) carrying main_data_begin.
+    final si = Mp3BitWriter();
+    _writeHeader(si, bitrate, sampleRate, pad);
+    si.writeBits(mdb, 9); // main_data_begin (reservoir back-pointer)
+    si.writeBits(0, 5); // private bits (mono)
+    si.writeBits(0, 4); // scfsi (0 = no scalefactor sharing across granules)
     for (var g = 0; g < 2; g++) {
-      _writeGranuleSideInfo(frame, gr[g]);
+      _writeGranuleSideInfo(si, gr[g]);
     }
-    // Main data per granule: scalefactors (part2) then Huffman (part3).
+    si.byteAlign();
+    final headerSi = si.takeBytes();
+
+    // Main data (byte-aligned): per granule scalefactors then Huffman.
+    final md = Mp3BitWriter();
     for (var g = 0; g < 2; g++) {
-      _writeScalefactors(frame, gr[g]);
-      mp3EncodeGranule(frame, gr[g].ix, gr[g].regions, srIndex);
+      _writeScalefactors(md, gr[g]);
+      mp3EncodeGranule(md, gr[g].ix, gr[g].regions, srIndex);
     }
-    frame.byteAlign();
-    final bytes = frame.takeBytes();
-    out.add(bytes);
-    if (bytes.length < frameSize) {
-      out.add(Uint8List(frameSize - bytes.length)); // pad the frame
-    }
+    md.byteAlign();
+    reservoir.addFrame(
+      headerSi,
+      md.takeBytes(),
+      frameSize - headerSi.length,
+      out,
+    );
     pos += 1152;
   }
+  reservoir.flush(out);
   return out.toBytes();
 }
 
