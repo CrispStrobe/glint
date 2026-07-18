@@ -1,0 +1,11 @@
+name: Publish glint_audio_pure to pub.dev
+on:
+  push:
+    tags: ['glint_audio_pure-v[0-9]+.[0-9]+.[0-9]+']
+jobs:
+  publish:
+    permissions:
+      id-token: write  # OIDC auth to pub.dev (no stored secrets)
+    uses: dart-lang/setup-dart/.github/workflows/publish.yml@v1
+    with:
+      working-directory: bindings/dart_pure

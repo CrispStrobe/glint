@@ -7,7 +7,10 @@
 
 import 'dart:typed_data';
 
+/// Decoded uncompressed PCM16 WAV audio: [samples] interleaved across
+/// [channels] at [sampleRate].
 class WavData {
+  /// Creates decoded WAV audio from interleaved PCM16 [samples].
   const WavData({
     required this.samples,
     required this.sampleRate,
@@ -16,7 +19,11 @@ class WavData {
 
   /// Interleaved PCM16 samples (all channels).
   final Int16List samples;
+
+  /// Sample rate in Hz.
   final int sampleRate;
+
+  /// Number of interleaved channels (1 = mono, 2 = stereo).
   final int channels;
 }
 
@@ -77,7 +84,7 @@ WavData readWavPcm16(Uint8List bytes) {
   return WavData(samples: out, sampleRate: sampleRate, channels: channels);
 }
 
-/// Downmix interleaved samples to a mono float list in [-1, 1].
+/// Downmix interleaved samples to a mono float list in `-1..1`.
 Float64List wavToMonoFloat(WavData wav) {
   final ch = wav.channels < 1 ? 1 : wav.channels;
   final frames = wav.samples.length ~/ ch;

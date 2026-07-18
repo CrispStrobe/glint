@@ -8,7 +8,7 @@
 /// import 'dart:typed_data';
 /// import 'package:glint_audio_pure/glint_audio_pure.dart';
 ///
-/// // pcm: mono samples in [-1, 1]
+/// // pcm: mono samples in `-1..1`
 /// final Uint8List mp3 = mp3EncodeMono(pcm, sampleRate: 44100, bitrate: 128);
 /// ```
 ///
@@ -22,7 +22,8 @@
 /// quality benchmark against the reference C++ encoder.
 library;
 
-export 'src/mp3_encoder.dart' show mp3EncodeMono, mp3EncodeStereo, mp3EncodeMonoVbr, mp3EncodeStereoVbr;
+export 'src/mp3_encoder.dart'
+    show mp3EncodeMono, mp3EncodeStereo, mp3EncodeMonoVbr, mp3EncodeStereoVbr;
 export 'src/mp3_frame.dart'
     show
         kMp3Bitrates,
