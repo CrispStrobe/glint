@@ -11,6 +11,7 @@ Usage: python3 tools/test_decoder_fuzz.py [path/to/glint_cli]
 
 import math
 import os
+import shutil
 import struct
 import subprocess
 import sys
@@ -173,8 +174,48 @@ def main():
         else:
             print("(container fuzz build skipped)")
 
-        print(f"PASS: MP3 + AAC + Opus decoders and WAV/Ogg container "
-              f"parsers survive malformed input (no crash / OOB / hang)")
+        # Ogg-Vorbis decoder: whole-buffer path (Ogg demux + setup-header
+        # parse + audio synthesis). CRC-repaired mutations drive the setup
+        # parser — the classic Vorbis attack surface (huge codebook dims,
+        # bad floor/residue params). ASan+UBSan. Seed via sox if available.
+        vorb = os.path.join(tmp, "seed.ogg")
+        have_seed = False
+        if shutil.which("sox"):
+            r = run(["sox", wav, "-C", "3", vorb])
+            have_seed = r.returncode == 0 and os.path.exists(vorb)
+        vbin = os.path.join(tmp, "vfuzz")
+        vbuild = [cxx, "-std=c++17", "-O1", "-g",
+                  "-I", os.path.join(REPO, "src"),
+                  "-I", os.path.join(REPO, "include"),
+                  os.path.join(REPO, "tools", "fuzz_vorbis.cpp"),
+                  os.path.join(REPO, "src", "vorbis_decoder.cpp"),
+                  os.path.join(REPO, "src", "opus_ogg.cpp")]
+        vr = run(vbuild + san + ["-o", vbin])
+        if vr.returncode == 0:
+            vit = str(max(3000, int(iters)))
+            seed = [vorb] if have_seed else []
+            try:
+                r = subprocess.run([vbin] + seed + [vit], env=env,
+                                   capture_output=True, timeout=400)
+            except subprocess.TimeoutExpired:
+                sys.exit("FAIL: Vorbis decoder fuzz hung (possible O(N^2) "
+                         "transform or unbounded setup-header loop)")
+            verr = r.stderr.decode()
+            print(r.stdout.decode().strip())
+            if ("AddressSanitizer" in verr or "runtime error" in verr or
+                    r.returncode != 0):
+                print(verr[:1500])
+                sys.exit("FAIL: sanitizer flagged the Vorbis decoder on "
+                         "malformed input")
+            if "vorbis:" not in r.stdout.decode():
+                sys.exit("FAIL: Vorbis fuzz did not complete")
+        else:
+            print("(Vorbis fuzz build skipped)")
+            print(vr.stderr.decode()[:600])
+
+        print(f"PASS: MP3 + AAC + Opus + Vorbis decoders and WAV/Ogg "
+              f"container parsers survive malformed input "
+              f"(no crash / OOB / hang)")
 
 
 if __name__ == "__main__":

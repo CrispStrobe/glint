@@ -217,7 +217,10 @@ int read_codebook(BitReader& br, Codebook& cb) {
     cb.entries = static_cast<int>(br.read(24));
     if (cb.entries < 1 || cb.dimensions < 0 || cb.dimensions > 4096)
         return -1;
-    if (cb.entries > (1 << 24)) return -1;  // bounded allocation
+    // Bounded allocation: real Vorbis codebooks never approach this; the cap
+    // keeps a malformed setup header (ordered coding can claim a huge entry
+    // count from a few bits) from forcing an unbounded tree/VQ allocation.
+    if (cb.entries > (1 << 20)) return -1;
     cb.lengths.assign(cb.entries, 0);
 
     int ordered = br.read_bit();
@@ -542,6 +545,39 @@ int parse_setup(BitReader& br, Setup& s, int channels) {
 
     if (br.read_bit() != 1) return -1;  // framing bit
     if (br.overrun()) return -1;
+
+    // Validate every cross-reference the audio decoder will index blindly:
+    // a malformed setup header must be rejected here, not read out of bounds.
+    int ncb = static_cast<int>(s.codebooks.size());
+    int nfl = static_cast<int>(s.floors.size());
+    int nrs = static_cast<int>(s.residues.size());
+    for (const Floor& f : s.floors) {
+        if (f.type == 1) {
+            for (size_t j = 0; j < f.f1.class_masterbooks.size(); j++) {
+                if (f.f1.class_subclasses[j] > 0 &&
+                    (f.f1.class_masterbooks[j] < 0 ||
+                     f.f1.class_masterbooks[j] >= ncb))
+                    return -1;
+                for (int book : f.f1.subclass_books[j])
+                    if (book >= ncb) return -1;
+            }
+        } else if (f.type == 0) {
+            for (int book : f.f0.books)
+                if (book < 0 || book >= ncb) return -1;
+        }
+    }
+    for (const Residue& r : s.residues) {
+        if (r.classbook < 0 || r.classbook >= ncb) return -1;
+        for (const auto& row : r.books)
+            for (int book : row)
+                if (book >= ncb) return -1;
+    }
+    for (const Mapping& m : s.mappings) {
+        for (int fl : m.submap_floor)
+            if (fl < 0 || fl >= nfl) return -1;
+        for (int rs : m.submap_residue)
+            if (rs < 0 || rs >= nrs) return -1;
+    }
     return 0;
 }
 

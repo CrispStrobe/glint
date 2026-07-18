@@ -753,10 +753,20 @@ Staging (spec §4–§9, §12), each slice green before the next:
   raw 117.9 / shape 136.7 dB, pitch 30.97 Hz (B0=30.87, on-pitch). Gate
   extended with 10 s long clips + a 20 s per-decode wall-clock guard so this
   hang class fails the gate; 19/19 configs green.
-- **NEXT:** Vorbis fuzz target (`fuzz_decoders.cpp` + `decoder_fuzz`, ASan+
-  UBSan, random/truncated/bit-flipped + malformed setup headers, with a
-  time/iteration guard). Then floor 0 (LSP) synthesis, bindings parity
-  (wasm rebuild + `FORMAT.VORBIS`), `.sf3` E2E.
+- **Slice 6 — Vorbis fuzz target (DONE 2026-07-18).** `tools/fuzz_vorbis.cpp`
+  + `decoder_fuzz`: random / bit-flipped / truncated Ogg-Vorbis, plus
+  **CRC-repaired mutations** that drive the setup-header parser (the classic
+  attack surface). ASan+UBSan, wall-clock guard. **The fuzzer immediately
+  caught a real heap-overflow:** the setup header's cross-references (residue
+  `classbook`/books, floor masterbooks/subclass books, mapping floor/residue
+  indices) were used as vector indices with no bounds check. Fixed with a
+  validation pass in `parse_setup` that rejects any out-of-range reference,
+  plus a tighter codebook-entry cap (2^20) for bounded allocation. 150k
+  decode calls clean under ASan+UBSan; real streams unaffected; full ctest
+  green (9/9).
+- **NEXT:** floor 0 (LSP) synthesis, bindings parity (wasm rebuild +
+  `FORMAT.VORBIS` in `glint_codec.mjs`; Python already works transparently),
+  `.sf3` end-to-end acceptance (FluidR3Mono sampled presets + in-tune check).
 - Slices 3+: setup header (floors/residues/mappings/modes) → floor 1 →
   residue 0/1/2 + inverse coupling → iMDCT + overlap-add → dB gate vs
   ffmpeg+sox (≥120 dB) → floor 0 (LSP) → bindings → fuzz → `.sf3` E2E.
