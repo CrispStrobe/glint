@@ -244,7 +244,7 @@ void _gainSearchWithScalefacs(
       sfb,
     );
     final regs = mp3ComputeRegions(ix, srIndex);
-    final bits = mp3GranuleBits(ix, regs, srIndex);
+    final bits = regs.bits;
     if (bits <= targetBits) {
       hi = gain - 1;
       bestGain = gain;
@@ -272,7 +272,7 @@ void _gainSearchWithScalefacs(
     );
     _copyInto(gi.ix, ix);
     gi.regions = mp3ComputeRegions(ix, srIndex);
-    huffBits = mp3GranuleBits(gi.ix, gi.regions, srIndex);
+    huffBits = gi.regions.bits;
   }
   gi.part23Length = gi.part2Length + huffBits;
 
@@ -291,7 +291,7 @@ void _gainSearchWithScalefacs(
     );
     _copyInto(gi.ix, ix);
     gi.regions = mp3ComputeRegions(gi.ix, srIndex);
-    huffBits = mp3GranuleBits(gi.ix, gi.regions, srIndex);
+    huffBits = gi.regions.bits;
     gi.part23Length = gi.part2Length + huffBits;
   }
 }

@@ -6,6 +6,8 @@
 // for (|x|,|y|) capped at 15, then linbits for the ESC tables (16-31), then a
 // sign bit per non-zero value. Pure Dart => identical native + web.
 
+import 'dart:typed_data';
+
 import 'mp3_bitstream.dart';
 import 'mp3_huffman_tables.dart';
 
@@ -91,23 +93,47 @@ void mp3EncodePair(Mp3BitWriter bs, int tableId, int x, int y) {
   if (y != 0) bs.writeBits(y < 0 ? 1 : 0, 1);
 }
 
+/// Per-table code-length LUT, indexed `(min(ax,15)<<4)|min(ay,15)` (glint's
+/// `kPairCost`): built once per table so the rate loop's inner bit-count is a
+/// table read, not an object-allocating `getHuffTable` + array math per pair.
+final List<Int8List?> _kPairCostLut = List<Int8List?>.filled(34, null);
+
+Int8List _pairCostLut(int tableId) {
+  final cached = _kPairCostLut[tableId];
+  if (cached != null) return cached;
+  final ht = getHuffTable(tableId);
+  final xlen = ht.xlen;
+  final lut = Int8List(256);
+  for (var ax = 0; ax < 16; ax++) {
+    for (var ay = 0; ay < 16; ay++) {
+      final cx = ax < xlen ? ax : xlen - 1;
+      final cy = ay < xlen ? ay : xlen - 1;
+      lut[(ax << 4) | ay] = ht.len[cx * xlen + cy];
+    }
+  }
+  _kPairCostLut[tableId] = lut;
+  return lut;
+}
+
+int _linbitsOf(int tableId) {
+  if (tableId >= 16 && tableId <= 23) return _kLinbits16[tableId - 16];
+  if (tableId >= 24 && tableId <= 31) return _kLinbits24[tableId - 24];
+  return 0;
+}
+
 /// The number of bits [mp3EncodePair] would emit (for the rate loop) — code
-/// length + linbits + one sign bit per non-zero value.
+/// length + linbits + one sign bit per non-zero value. LUT-driven (hot path).
 int mp3PairBits(int tableId, int x, int y) {
   if (tableId == 0) return 0;
-  final ht = getHuffTable(tableId);
-  var ax = x.abs();
-  var ay = y.abs();
-  var bits = 0;
-  if (ht.linbits > 0 && ax >= 15) {
-    bits += ht.linbits;
-    ax = 15;
+  final lut = _pairCostLut(tableId);
+  final ax = x.abs();
+  final ay = y.abs();
+  var bits = lut[((ax < 15 ? ax : 15) << 4) | (ay < 15 ? ay : 15)];
+  final lb = _linbitsOf(tableId);
+  if (lb > 0) {
+    if (ax >= 15) bits += lb;
+    if (ay >= 15) bits += lb;
   }
-  if (ht.linbits > 0 && ay >= 15) {
-    bits += ht.linbits;
-    ay = 15;
-  }
-  bits += ht.len[ax * ht.xlen + ay];
   if (x != 0) bits++;
   if (y != 0) bits++;
   return bits;
