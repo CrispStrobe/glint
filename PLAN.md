@@ -711,10 +711,32 @@ Staging (spec §4–§9, §12), each slice green before the next:
   consumes all setup bits bar the final-byte padding (0–6 bits).** ctest:
   `test_vorbis_setup` embeds a real stream (`tests/vorbis_test_stream.h`)
   and gates the parse. Full existing suite green.
-- **Slice 4 — audio decode: floor 1 synthesis + residue 0/1/2 + inverse
-  coupling + iMDCT + windowed overlap-add → dB gate vs ffmpeg+sox** — NEXT
-  (the big one). Corpus + references ready; sox is both encoder and the
-  second reference decoder.
+- **Slice 4 — audio decode (DONE 2026-07-18, first end-to-end).** Floor 1
+  decode + curve synthesis (§7.2, render_point/render_line, floor1_inverse_dB
+  geometric table from the spec's two literal anchors), residue types 0/1/2
+  with the classification/partition loop (§8.6) and per-type partition layout,
+  inverse channel coupling (§4.3.5, last→first), floor·residue dot product,
+  inverse MDCT and windowed overlap-add (§4.3.1/§4.3.8). **Key findings while
+  bringing it up:** (a) the IMDCT cosine argument must be (π/M)(p+½+M/2)(k+½)
+  — an earlier ×2 argument gave the classic frequency-doubling aliasing;
+  (b) libvorbis's backward-MDCT normalization is a **unit constant** (the
+  forward carries the 1/M), verified by a self-consistent MDCT roundtrip
+  (283 dB) and the corpus; (c) the overlap-add carry offset is (i−left_start),
+  not a global-position scheme. **Measured vs ffmpeg (float64 SNR, aligned):
+  chirp 118.3 / noise 118.3 / mono-tone 118.9 / stereo 119.8 dB raw, 137–139
+  dB after removing a uniform 1.2 ppm scale (float32-precision floor).
+  glint matches the SECOND reference sox(libvorbis) exactly as well as ffmpeg
+  does (identical 77/90 dB vs sox's lower-precision f32 output) — i.e. glint
+  agrees with BOTH references to float precision.** Self-contained ctest
+  `test_vorbis_decode` decodes the embedded stream and asserts on-pitch
+  (recovered period 100 samples = 440 Hz). Full existing suite green (8/8).
+  Floor 0 (LSP) config is parsed but its synthesis is not yet implemented
+  (the sox/ffmpeg corpus is all floor 1; a floor-0 stream returns an error
+  rather than wrong audio).
+- **Slice 5 — decode-vs-reference dB ctest gate** (`tools/test_vorbis_
+  decoder.py` + `vorbis_decoder_vs_ffmpeg`, corpus q0..q10/mono+stereo/
+  22k+44k vs ffmpeg AND sox) — NEXT. Then floor 0 (LSP), bindings parity,
+  fuzz target, `.sf3` E2E.
 - Slices 3+: setup header (floors/residues/mappings/modes) → floor 1 →
   residue 0/1/2 + inverse coupling → iMDCT + overlap-add → dB gate vs
   ffmpeg+sox (≥120 dB) → floor 0 (LSP) → bindings → fuzz → `.sf3` E2E.

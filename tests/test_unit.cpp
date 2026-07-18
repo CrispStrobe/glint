@@ -1267,6 +1267,39 @@ static void test_vorbis_setup() {
           "setup consumes all but final-byte padding");
 }
 
+// Full audio decode of the embedded 440 Hz mono stream: correct rate/
+// channels, a full frame count, audible energy, and on-pitch (the recovered
+// fundamental period must be ~100.2 samples = 44100/440).
+static void test_vorbis_decode() {
+    std::printf("[vorbis] full audio decode (on-pitch check)...\n");
+    std::vector<float> pcm;
+    int sr = 0, ch = 0;
+    int r = glint::vorbis::decode_ogg(kVorbisMono440, kVorbisMono440Len, pcm,
+                                      sr, ch);
+    CHECK(r == 0, "decode_ogg succeeds");
+    CHECK(sr == 44100 && ch == 1, "decoded rate/channels");
+    CHECK(pcm.size() > 20000 && pcm.size() <= 22050,
+          "decoded ~0.5 s of frames");
+    double energy = 0;
+    for (float x : pcm) energy += (double)x * x;
+    CHECK(energy > 1.0, "decoded audible energy");
+
+    // Autocorrelation over a steady mid segment -> fundamental period.
+    if (pcm.size() > 12000) {
+        int base = 4000, win = 4096;
+        double best = -1e30;
+        int best_lag = 0;
+        for (int lag = 60; lag < 160; lag++) {
+            double s = 0;
+            for (int i = 0; i < win; i++)
+                s += (double)pcm[base + i] * pcm[base + i + lag];
+            if (s > best) { best = s; best_lag = lag; }
+        }
+        CHECK(best_lag >= 98 && best_lag <= 102,
+              "recovered ~440 Hz fundamental period");
+    }
+}
+
 int main() {
     std::printf("=== glint unit tests ===\n\n");
 
@@ -1305,6 +1338,7 @@ int main() {
     test_vorbis_id_header();
     test_vorbis_codebook();
     test_vorbis_setup();
+    test_vorbis_decode();
 
     std::printf("\n%d/%d tests passed\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;
