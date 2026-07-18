@@ -78,5 +78,13 @@ struct IdHeader {
 // Parse a Vorbis identification header packet (must start with 0x01 "vorbis").
 IdHeader parse_id_header(const uint8_t* pkt, size_t len);
 
+// Test hook: demux + parse all three headers (incl. the full setup header)
+// of an in-memory Ogg-Vorbis buffer. Returns 0 on success. Writes channel
+// count, sample rate, and how many setup-header bits were consumed vs.
+// available (a correct parse consumes all but the trailing byte padding).
+int debug_parse_headers(const uint8_t* ogg, size_t len, int* channels,
+                        int* rate, size_t* setup_bits_used,
+                        size_t* setup_bits_total);
+
 }  // namespace vorbis
 }  // namespace glint

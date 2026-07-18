@@ -697,7 +697,24 @@ Staging (spec §4–§9, §12), each slice green before the next:
   lookup1_values spec values, over-subscription rejected. **Validated end
   to end on the real libvorbis stream: all 35 setup-header codebooks
   (scalar + VQ lookup-1) build with r=0.**
-- **Slice 3 — setup header: floors / residues / mappings / modes** — NEXT.
+- **Slice 3 — setup header: floors / residues / mappings / modes (DONE
+  2026-07-18).** `parse_setup` (spec §4.2.4): codebooks, time placeholders,
+  floor type 1 (partitions/classes/subclass books/multiplier/rangebits/X
+  list + derived low/high neighbours §9.2.5 + sorted order) and type 0
+  config (LSP: order/rate/bark_map/amplitude/books), residue types 0/1/2
+  (begin/end/partition_size/classifications/classbook/cascade/books),
+  mapping type 0 (submaps, coupling steps with ilog(ch-1) magnitude/angle,
+  mux, per-submap floor+residue), modes (blockflag/window/transform/mapping),
+  framing bit. Reserved-field + bounds validation throughout. Test hook
+  `debug_parse_headers`. **Validated across a real libvorbis corpus (sox
+  -C 0/3/6/10, mono+stereo, 22.05k+44.1k): every stream parses with 0 and
+  consumes all setup bits bar the final-byte padding (0–6 bits).** ctest:
+  `test_vorbis_setup` embeds a real stream (`tests/vorbis_test_stream.h`)
+  and gates the parse. Full existing suite green.
+- **Slice 4 — audio decode: floor 1 synthesis + residue 0/1/2 + inverse
+  coupling + iMDCT + windowed overlap-add → dB gate vs ffmpeg+sox** — NEXT
+  (the big one). Corpus + references ready; sox is both encoder and the
+  second reference decoder.
 - Slices 3+: setup header (floors/residues/mappings/modes) → floor 1 →
   residue 0/1/2 + inverse coupling → iMDCT + overlap-add → dB gate vs
   ffmpeg+sox (≥120 dB) → floor 0 (LSP) → bindings → fuzz → `.sf3` E2E.

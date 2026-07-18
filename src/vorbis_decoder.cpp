@@ -3,6 +3,8 @@
 
 #include "vorbis_decoder.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <functional>
@@ -271,6 +273,301 @@ int read_codebook(BitReader& br, Codebook& cb) {
     if (br.overrun()) return -1;
     if (!cb.build_huffman()) return -1;
     cb.build_vq();
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Setup header: floors, residues, mappings, modes (spec §4.2.4, §6-§8)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct Floor1 {
+    int partitions = 0;
+    std::vector<int> partition_class;        // [partitions]
+    std::vector<int> class_dimensions;       // [maxclass+1]
+    std::vector<int> class_subclasses;       // [maxclass+1]
+    std::vector<int> class_masterbooks;      // [maxclass+1]
+    std::vector<std::vector<int>> subclass_books;  // [maxclass+1][1<<subcl]
+    int multiplier = 0;
+    int rangebits = 0;
+    std::vector<int> x_list;                 // coded-order X positions
+    int values = 0;
+    // Derived: sorted order + low/high neighbours for curve synthesis.
+    std::vector<int> sorted_idx;             // indices sorted by x_list value
+    std::vector<int> low_neighbour;          // per coded index
+    std::vector<int> high_neighbour;
+};
+
+struct Floor0 {
+    int order = 0;
+    int rate = 0;
+    int bark_map_size = 0;
+    int amplitude_bits = 0;
+    int amplitude_offset = 0;
+    std::vector<int> books;
+};
+
+struct Floor {
+    int type = -1;
+    Floor1 f1;
+    Floor0 f0;
+};
+
+struct Residue {
+    int type = 0;
+    int begin = 0, end = 0, partition_size = 0;
+    int classifications = 0, classbook = 0;
+    std::vector<int> cascade;                // [classifications]
+    std::vector<std::array<int, 8>> books;   // [classifications][8], -1 unused
+};
+
+struct Mapping {
+    int submaps = 1;
+    int coupling_steps = 0;
+    std::vector<int> magnitude, angle;       // [coupling_steps]
+    std::vector<int> mux;                    // [channels]
+    std::vector<int> submap_floor;           // [submaps]
+    std::vector<int> submap_residue;         // [submaps]
+};
+
+struct Mode {
+    int blockflag = 0;
+    int windowtype = 0;
+    int transformtype = 0;
+    int mapping = 0;
+};
+
+struct Setup {
+    IdHeader id;
+    std::vector<Codebook> codebooks;
+    std::vector<Floor> floors;
+    std::vector<Residue> residues;
+    std::vector<Mapping> mappings;
+    std::vector<Mode> modes;
+};
+
+int parse_floor1(BitReader& br, Floor1& f) {
+    f.partitions = static_cast<int>(br.read(5));
+    f.partition_class.resize(f.partitions);
+    int maxclass = -1;
+    for (int i = 0; i < f.partitions; i++) {
+        f.partition_class[i] = static_cast<int>(br.read(4));
+        if (f.partition_class[i] > maxclass) maxclass = f.partition_class[i];
+    }
+    f.class_dimensions.assign(maxclass + 1, 0);
+    f.class_subclasses.assign(maxclass + 1, 0);
+    f.class_masterbooks.assign(maxclass + 1, 0);
+    f.subclass_books.assign(maxclass + 1, {});
+    for (int j = 0; j <= maxclass; j++) {
+        f.class_dimensions[j] = static_cast<int>(br.read(3)) + 1;
+        f.class_subclasses[j] = static_cast<int>(br.read(2));
+        if (f.class_subclasses[j] > 0)
+            f.class_masterbooks[j] = static_cast<int>(br.read(8));
+        int n = 1 << f.class_subclasses[j];
+        f.subclass_books[j].resize(n);
+        for (int k = 0; k < n; k++)
+            f.subclass_books[j][k] = static_cast<int>(br.read(8)) - 1;
+    }
+    f.multiplier = static_cast<int>(br.read(2)) + 1;
+    f.rangebits = static_cast<int>(br.read(4));
+    f.x_list.clear();
+    f.x_list.push_back(0);
+    f.x_list.push_back(1 << f.rangebits);
+    for (int i = 0; i < f.partitions; i++) {
+        int cls = f.partition_class[i];
+        for (int j = 0; j < f.class_dimensions[cls]; j++)
+            f.x_list.push_back(static_cast<int>(br.read(f.rangebits)));
+    }
+    f.values = static_cast<int>(f.x_list.size());
+    if (f.values > 65) return -1;  // spec cap (2 + 63)
+    // Derived neighbours (spec §9.2.5): for each element >= 2, find the
+    // closest lower/higher x among earlier elements.
+    f.low_neighbour.assign(f.values, 0);
+    f.high_neighbour.assign(f.values, 0);
+    for (int i = 2; i < f.values; i++) {
+        int lo = 0, hi = 0, low_x = -1, high_x = 1 << 30;
+        for (int j = 0; j < i; j++) {
+            int x = f.x_list[j];
+            if (x < f.x_list[i] && x > low_x) { low_x = x; lo = j; }
+            if (x > f.x_list[i] && x < high_x) { high_x = x; hi = j; }
+        }
+        f.low_neighbour[i] = lo;
+        f.high_neighbour[i] = hi;
+    }
+    // sorted_idx: indices ordered by x value (stable).
+    f.sorted_idx.resize(f.values);
+    for (int i = 0; i < f.values; i++) f.sorted_idx[i] = i;
+    std::sort(f.sorted_idx.begin(), f.sorted_idx.end(),
+              [&](int a, int b) {
+                  if (f.x_list[a] != f.x_list[b])
+                      return f.x_list[a] < f.x_list[b];
+                  return a < b;
+              });
+    return br.overrun() ? -1 : 0;
+}
+
+int parse_floor0(BitReader& br, Floor0& f) {
+    f.order = static_cast<int>(br.read(8));
+    f.rate = static_cast<int>(br.read(16));
+    f.bark_map_size = static_cast<int>(br.read(16));
+    f.amplitude_bits = static_cast<int>(br.read(6));
+    f.amplitude_offset = static_cast<int>(br.read(8));
+    int nbooks = static_cast<int>(br.read(4)) + 1;
+    f.books.resize(nbooks);
+    for (int i = 0; i < nbooks; i++)
+        f.books[i] = static_cast<int>(br.read(8));
+    return br.overrun() ? -1 : 0;
+}
+
+int parse_residue(BitReader& br, Residue& r) {
+    r.begin = static_cast<int>(br.read(24));
+    r.end = static_cast<int>(br.read(24));
+    r.partition_size = static_cast<int>(br.read(24)) + 1;
+    r.classifications = static_cast<int>(br.read(6)) + 1;
+    r.classbook = static_cast<int>(br.read(8));
+    r.cascade.assign(r.classifications, 0);
+    for (int i = 0; i < r.classifications; i++) {
+        int high = 0;
+        int low = static_cast<int>(br.read(3));
+        int flag = br.read_bit();
+        if (flag) high = static_cast<int>(br.read(5));
+        r.cascade[i] = low | (high << 3);
+    }
+    r.books.assign(r.classifications, {});
+    for (int i = 0; i < r.classifications; i++)
+        for (int k = 0; k < 8; k++)
+            r.books[i][k] = (r.cascade[i] & (1 << k))
+                                ? static_cast<int>(br.read(8))
+                                : -1;
+    return br.overrun() ? -1 : 0;
+}
+
+int parse_mapping(BitReader& br, Mapping& m, int channels) {
+    if (br.read_bit())
+        m.submaps = static_cast<int>(br.read(4)) + 1;
+    else
+        m.submaps = 1;
+    if (br.read_bit()) {
+        m.coupling_steps = static_cast<int>(br.read(8)) + 1;
+        int bits = ilog(channels - 1);
+        m.magnitude.resize(m.coupling_steps);
+        m.angle.resize(m.coupling_steps);
+        for (int i = 0; i < m.coupling_steps; i++) {
+            m.magnitude[i] = static_cast<int>(br.read(bits));
+            m.angle[i] = static_cast<int>(br.read(bits));
+            if (m.magnitude[i] == m.angle[i] ||
+                m.magnitude[i] >= channels || m.angle[i] >= channels)
+                return -1;
+        }
+    } else {
+        m.coupling_steps = 0;
+    }
+    if (br.read(2) != 0) return -1;  // reserved
+    m.mux.assign(channels, 0);
+    if (m.submaps > 1) {
+        for (int ch = 0; ch < channels; ch++) {
+            m.mux[ch] = static_cast<int>(br.read(4));
+            if (m.mux[ch] >= m.submaps) return -1;
+        }
+    }
+    m.submap_floor.resize(m.submaps);
+    m.submap_residue.resize(m.submaps);
+    for (int i = 0; i < m.submaps; i++) {
+        br.read(8);  // unused time-configuration placeholder
+        m.submap_floor[i] = static_cast<int>(br.read(8));
+        m.submap_residue[i] = static_cast<int>(br.read(8));
+    }
+    return br.overrun() ? -1 : 0;
+}
+
+int parse_setup(BitReader& br, Setup& s, int channels) {
+    // Codebooks.
+    int cbcount = static_cast<int>(br.read(8)) + 1;
+    s.codebooks.resize(cbcount);
+    for (int i = 0; i < cbcount; i++)
+        if (read_codebook(br, s.codebooks[i]) != 0) return -1;
+
+    // Time-domain transforms: count, each a 16-bit 0 placeholder.
+    int tcount = static_cast<int>(br.read(6)) + 1;
+    for (int i = 0; i < tcount; i++)
+        if (br.read(16) != 0) return -1;
+
+    // Floors.
+    int fcount = static_cast<int>(br.read(6)) + 1;
+    s.floors.resize(fcount);
+    for (int i = 0; i < fcount; i++) {
+        int type = static_cast<int>(br.read(16));
+        s.floors[i].type = type;
+        if (type == 1) {
+            if (parse_floor1(br, s.floors[i].f1) != 0) return -1;
+        } else if (type == 0) {
+            if (parse_floor0(br, s.floors[i].f0) != 0) return -1;
+        } else {
+            return -1;
+        }
+    }
+
+    // Residues.
+    int rcount = static_cast<int>(br.read(6)) + 1;
+    s.residues.resize(rcount);
+    for (int i = 0; i < rcount; i++) {
+        int type = static_cast<int>(br.read(16));
+        if (type > 2) return -1;
+        s.residues[i].type = type;
+        if (parse_residue(br, s.residues[i]) != 0) return -1;
+    }
+
+    // Mappings.
+    int mcount = static_cast<int>(br.read(6)) + 1;
+    s.mappings.resize(mcount);
+    for (int i = 0; i < mcount; i++) {
+        if (br.read(16) != 0) return -1;  // mapping type must be 0
+        if (parse_mapping(br, s.mappings[i], channels) != 0) return -1;
+    }
+
+    // Modes.
+    int modecount = static_cast<int>(br.read(6)) + 1;
+    s.modes.resize(modecount);
+    for (int i = 0; i < modecount; i++) {
+        s.modes[i].blockflag = br.read_bit();
+        s.modes[i].windowtype = static_cast<int>(br.read(16));
+        s.modes[i].transformtype = static_cast<int>(br.read(16));
+        s.modes[i].mapping = static_cast<int>(br.read(8));
+        if (s.modes[i].windowtype != 0 || s.modes[i].transformtype != 0)
+            return -1;
+        if (s.modes[i].mapping >= mcount) return -1;
+    }
+
+    if (br.read_bit() != 1) return -1;  // framing bit
+    if (br.overrun()) return -1;
+    return 0;
+}
+
+}  // namespace
+
+int debug_parse_headers(const uint8_t* ogg, size_t len, int* channels,
+                        int* rate, size_t* setup_bits_used,
+                        size_t* setup_bits_total) {
+    std::vector<std::vector<uint8_t>> packets;
+    int64_t g = -1;
+    if (ogg_demux_first_stream(ogg, len, packets, &g) != 0 ||
+        packets.size() < 3)
+        return -1;
+    IdHeader id = parse_id_header(packets[0].data(), packets[0].size());
+    if (!id.valid) return -1;
+    const auto& sp = packets[2];
+    if (sp.size() < 7 || sp[0] != 0x05 ||
+        std::memcmp(sp.data() + 1, "vorbis", 6) != 0)
+        return -1;
+    BitReader br(sp.data() + 7, sp.size() - 7);
+    Setup s;
+    s.id = id;
+    if (parse_setup(br, s, id.channels) != 0) return -1;
+    if (channels) *channels = id.channels;
+    if (rate) *rate = static_cast<int>(id.sample_rate);
+    if (setup_bits_used) *setup_bits_used = br.bits_read();
+    if (setup_bits_total) *setup_bits_total = br.bit_length();
     return 0;
 }
 

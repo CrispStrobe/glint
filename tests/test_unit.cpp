@@ -1250,6 +1250,23 @@ static void test_vorbis_codebook() {
     CHECK(!bad.build_huffman(), "over-subscribed codebook rejected");
 }
 
+#include "vorbis_test_stream.h"
+
+// Full setup-header parse (spec §4.2.4) on a REAL libvorbis stream: all
+// codebooks, floors, residues, mappings, modes must parse and consume the
+// whole setup packet bar the final-byte padding.
+static void test_vorbis_setup() {
+    std::printf("[vorbis] full header + setup parse (real stream)...\n");
+    int ch = 0, rate = 0;
+    size_t used = 0, total = 0;
+    int r = glint::vorbis::debug_parse_headers(
+        kVorbisMono440, kVorbisMono440Len, &ch, &rate, &used, &total);
+    CHECK(r == 0, "setup parses a real libvorbis stream");
+    CHECK(ch == 1 && rate == 44100, "id from real stream");
+    CHECK(total >= used && (total - used) < 8,
+          "setup consumes all but final-byte padding");
+}
+
 int main() {
     std::printf("=== glint unit tests ===\n\n");
 
@@ -1287,6 +1304,7 @@ int main() {
     test_vorbis_bitreader();
     test_vorbis_id_header();
     test_vorbis_codebook();
+    test_vorbis_setup();
 
     std::printf("\n%d/%d tests passed\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;
