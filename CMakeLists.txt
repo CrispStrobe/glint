@@ -115,6 +115,11 @@ add_executable(opus_mux_cli tools/opusfile_mux_cli.cpp)
 target_link_libraries(opus_mux_cli PRIVATE glint_static)
 target_include_directories(opus_mux_cli PRIVATE src)
 
+# Ogg-Vorbis decoder CLI: whole .ogg -> f32le PCM (used by the dB gate).
+add_executable(vorbis_dec_cli tools/vorbis_dec_cli.cpp)
+target_link_libraries(vorbis_dec_cli PRIVATE glint_static)
+target_include_directories(vorbis_dec_cli PRIVATE src include)
+
 # Unit tests
 enable_testing()
 add_executable(glint_test tests/test_unit.cpp)
@@ -178,6 +183,13 @@ if(Python3_FOUND)
                          $<TARGET_FILE:glint_cli>)
         set_tests_properties(decoder_fuzz PROPERTIES
                  ENVIRONMENT "FUZZ_ITERS=700" TIMEOUT 700)
+        # OGG-VORBIS DECODER gate: decode a sox(libvorbis) corpus with glint,
+        # ffmpeg and sox; require glint to match both references (raw >=100 dB,
+        # shape >=120 dB vs ffmpeg; parity with ffmpeg vs sox). Deterministic.
+        add_test(NAME vorbis_decoder_vs_ffmpeg
+                 COMMAND ${Python3_EXECUTABLE}
+                         ${CMAKE_CURRENT_SOURCE_DIR}/tools/test_vorbis_decoder.py
+                         $<TARGET_FILE:vorbis_dec_cli>)
     else()
         message(STATUS "m2_decode_quality test skipped (needs python3+numpy and ffmpeg)")
     endif()
