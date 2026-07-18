@@ -95,4 +95,29 @@ void main() {
     expect(off, mp3.length, reason: 'frames tile the stream exactly');
     expect(frames, inInclusiveRange(36, 40));
   });
+
+  test('VBR: variable-size frames that all sync + tile, quality→size', () {
+    const sr = 44100;
+    final busy = _sine(2 * sr, 440, sr); // 2 s of content
+    final best = mp3EncodeMonoVbr(busy, quality: 0);
+    final small = mp3EncodeMonoVbr(busy, quality: 9);
+
+    // Better quality => more bytes.
+    expect(best.length, greaterThan(small.length));
+
+    // Walk VBR frames by each header's OWN bitrate; every frame must sync/tile.
+    var off = 0, frames = 0;
+    while (off + 4 <= best.length) {
+      expect(best[off], 0xFF, reason: 'frame $frames sync');
+      expect(best[off + 1] & 0xE0, 0xE0);
+      final brIdx = (best[off + 2] >> 4) & 0xF;
+      final srIdx = (best[off + 2] >> 2) & 0x3;
+      expect(srIdx, mp3SampleRateIndex(sr));
+      final kbps = kMp3Bitrates[brIdx - 1]; // brIdx 1..14 → index 0..13
+      final pad = (best[off + 2] >> 1) & 0x1;
+      off += mp3FrameSize(kbps, sr, padding: pad == 1);
+      frames++;
+    }
+    expect(off, best.length, reason: 'VBR frames tile exactly');
+  });
 }

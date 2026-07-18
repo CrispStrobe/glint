@@ -38,16 +38,64 @@ Uint8List mp3EncodeStereo(
 }) =>
     _mp3Encode([left, right], sampleRate, bitrate, Mp3ChannelMode.stereo);
 
-/// Channel-general MPEG-1 Layer III encoder (mono or L/R stereo), CBR, with the
-/// bit reservoir. Each channel runs its own subband+MDCT; per frame the budget
-/// (one slot + up to one reservoir slot) is split evenly across the
-/// 2 granules x nch channels.
+/// VBR target global_gain per quality (glint `vbr_target_gain`): 0 = best
+/// (finest), 9 = smallest. Each step is ~1.1 dB of quantization noise.
+const List<int> _kVbrTargetGain = [
+  134,
+  140,
+  144,
+  148,
+  152,
+  156,
+  161,
+  166,
+  172,
+  178,
+];
+
+/// Encode mono [pcm] to a **variable-bitrate** MP3 at constant [quality] (0 =
+/// best/largest … 9 = smallest). Each frame picks the smallest bitrate that
+/// holds its content, so quiet passages shrink and busy ones keep quality.
+Uint8List mp3EncodeMonoVbr(
+  Float64List pcm, {
+  int sampleRate = 44100,
+  int quality = 4,
+}) =>
+    _mp3Encode(
+      [pcm],
+      sampleRate,
+      320,
+      Mp3ChannelMode.mono,
+      vbrQuality: quality,
+    );
+
+/// Encode stereo [left]/[right] to a variable-bitrate MP3 at constant [quality].
+Uint8List mp3EncodeStereoVbr(
+  Float64List left,
+  Float64List right, {
+  int sampleRate = 44100,
+  int quality = 4,
+}) =>
+    _mp3Encode(
+      [left, right],
+      sampleRate,
+      320,
+      Mp3ChannelMode.stereo,
+      vbrQuality: quality,
+    );
+
+/// Channel-general MPEG-1 Layer III encoder (mono or L/R stereo). CBR uses the
+/// bit reservoir; VBR ([vbrQuality] set) writes self-contained frames, each at
+/// the smallest bitrate that fits, quantized to the quality's target gain.
+/// Each channel runs its own subband+MDCT; per frame the budget is split evenly
+/// across the 2 granules × nch channels.
 Uint8List _mp3Encode(
   List<Float64List> channels,
   int sampleRate,
   int bitrate,
-  Mp3ChannelMode mode,
-) {
+  Mp3ChannelMode mode, {
+  int? vbrQuality,
+}) {
   final srIndex = mp3SampleRateIndex(sampleRate);
   if (srIndex < 0) {
     throw ArgumentError('unsupported sample rate: $sampleRate');
@@ -58,6 +106,11 @@ Uint8List _mp3Encode(
   final nch = channels.length;
   // MPEG-1 side info: 17 bytes mono, 32 bytes stereo.
   final sideInfoBytes = nch == 1 ? 17 : 32;
+  final vbr = vbrQuality != null;
+  final gainFloor = vbr ? _kVbrTargetGain[vbrQuality.clamp(0, 9)] : 0;
+  // VBR quantizes against the largest possible frame; the gain floor sets the
+  // actual quality and the per-frame bitrate is chosen to fit.
+  final vbrCeilBits = (mp3FrameSize(320, sampleRate) - 4 - sideInfoBytes) * 8;
   var nSamples = 0;
   for (final c in channels) {
     if (c.length > nSamples) nSamples = c.length;
@@ -81,15 +134,23 @@ Uint8List _mp3Encode(
 
   var pos = 0;
   while (pos < nSamples) {
-    // Padding bit averages the bitrate across frames (fractional frame size).
-    padAcc += rem;
-    final pad = padAcc >= sampleRate;
-    if (pad) padAcc -= sampleRate;
-    final frameSize = frameBase + (pad ? 1 : 0);
-    final thisFrameBits = (frameSize - 4 - sideInfoBytes) * 8;
-    final mdb = reservoir.mainDataBegin();
-    final borrow = 8 * mdb < thisFrameBits ? 8 * mdb : thisFrameBits;
-    final availPer = (thisFrameBits + borrow) ~/ (2 * nch);
+    int mdb;
+    int availPer;
+    var pad = false;
+    if (vbr) {
+      mdb = 0; // VBR frames are self-contained
+      availPer = vbrCeilBits ~/ (2 * nch);
+    } else {
+      // Padding bit averages the bitrate across frames (fractional frame size).
+      padAcc += rem;
+      pad = padAcc >= sampleRate;
+      if (pad) padAcc -= sampleRate;
+      final frameSize = frameBase + (pad ? 1 : 0);
+      final thisFrameBits = (frameSize - 4 - sideInfoBytes) * 8;
+      mdb = reservoir.mainDataBegin();
+      final borrow = 8 * mdb < thisFrameBits ? 8 * mdb : thisFrameBits;
+      availPer = (thisFrameBits + borrow) ~/ (2 * nch);
+    }
 
     // Quantize 2 granules x nch channels.
     final gr = List.generate(2, (_) => <Mp3GranuleInfo>[]);
@@ -112,23 +173,17 @@ Uint8List _mp3Encode(
         }
         mdct[ch].process(subband, mdctBuf);
         mdct[ch].aliasReduce(mdctBuf);
-        gr[g].add(mp3QuantizeGranule(mdctBuf, availPer, srIndex));
+        gr[g].add(
+          mp3QuantizeGranule(
+            mdctBuf,
+            availPer,
+            srIndex,
+            gainFloor: gainFloor,
+            vbrShaping: vbr,
+          ),
+        );
       }
     }
-
-    // Header + side info carrying main_data_begin.
-    final si = Mp3BitWriter();
-    _writeHeader(si, bitrate, sampleRate, pad, mode);
-    si.writeBits(mdb, 9); // main_data_begin (reservoir back-pointer)
-    si.writeBits(0, nch == 1 ? 5 : 3); // private bits
-    si.writeBits(0, nch * 4); // scfsi (no scalefactor sharing)
-    for (var g = 0; g < 2; g++) {
-      for (var ch = 0; ch < nch; ch++) {
-        _writeGranuleSideInfo(si, gr[g][ch]);
-      }
-    }
-    si.byteAlign();
-    final headerSi = si.takeBytes();
 
     // Main data (byte-aligned): per granule, per channel, scalefactors + Huffman.
     final md = Mp3BitWriter();
@@ -139,16 +194,57 @@ Uint8List _mp3Encode(
       }
     }
     md.byteAlign();
-    reservoir.addFrame(
-      headerSi,
-      md.takeBytes(),
-      frameSize - headerSi.length,
-      out,
-    );
+    final mdBytes = md.takeBytes();
+
+    // VBR: pick the smallest bitrate whose frame holds this frame's main data.
+    var frameBitrate = bitrate;
+    var frameSize = frameBase + (pad ? 1 : 0);
+    if (vbr) {
+      final needed = 4 + sideInfoBytes + mdBytes.length;
+      final picked = _vbrPickFrameSize(needed, sampleRate);
+      frameBitrate = picked.$1;
+      frameSize = picked.$2;
+    }
+
+    // Header + side info carrying main_data_begin.
+    final si = Mp3BitWriter();
+    _writeHeader(si, frameBitrate, sampleRate, pad, mode);
+    si.writeBits(mdb, 9); // main_data_begin (0 for VBR)
+    si.writeBits(0, nch == 1 ? 5 : 3); // private bits
+    si.writeBits(0, nch * 4); // scfsi (no scalefactor sharing)
+    for (var g = 0; g < 2; g++) {
+      for (var ch = 0; ch < nch; ch++) {
+        _writeGranuleSideInfo(si, gr[g][ch]);
+      }
+    }
+    si.byteAlign();
+    final headerSi = si.takeBytes();
+
+    if (vbr) {
+      // Self-contained frame: header + side info + main data, zero-padded.
+      out
+        ..add(headerSi)
+        ..add(mdBytes);
+      final padLen = frameSize - headerSi.length - mdBytes.length;
+      if (padLen > 0) out.add(Uint8List(padLen));
+    } else {
+      reservoir.addFrame(headerSi, mdBytes, frameSize - headerSi.length, out);
+    }
     pos += 1152;
   }
-  reservoir.flush(out);
+  if (!vbr) reservoir.flush(out);
   return out.toBytes();
+}
+
+/// Smallest MPEG-1 (bitrate, frameSize) whose frame holds [neededBytes] of
+/// header+side-info+main-data (glint `vbr_pick_frame_size`).
+(int, int) _vbrPickFrameSize(int neededBytes, int sampleRate) {
+  for (final kbps in kMp3Bitrates) {
+    final size = 144 * kbps * 1000 ~/ sampleRate;
+    if (size >= neededBytes) return (kbps, size);
+  }
+  final maxKbps = kMp3Bitrates.last;
+  return (maxKbps, 144 * maxKbps * 1000 ~/ sampleRate);
 }
 
 /// glint's 4-bit scalefac_compress → (slen1, slen2) — bit widths of the two

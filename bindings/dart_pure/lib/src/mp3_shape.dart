@@ -84,6 +84,7 @@ Mp3GranuleInfo mp3QuantizeGranule(
   int quality = 2,
   bool tonalMasks = false,
   int gainFloor = 0,
+  bool vbrShaping = false,
 }) {
   final sfb = kMp3SfbLong[srIndex < 3 ? srIndex : 0];
   if (quality <= 0) {
@@ -169,6 +170,7 @@ Mp3GranuleInfo mp3QuantizeGranule(
     sfb,
     tonalMasks,
     gainFloor,
+    vbrShaping,
   );
   return best;
 }
@@ -332,6 +334,7 @@ Mp3GranuleInfo _nmrOuterLoop(
   List<int> sfb,
   bool tonalMasks,
   int gainFloor,
+  bool vbrShaping,
 ) {
   final maskBand = tonalMasks
       ? mp3ComputeBandMasks(
@@ -359,8 +362,11 @@ Mp3GranuleInfo _nmrOuterLoop(
   }
 
   final scaled = _scale(mdct, factor);
-  var shapeBits =
-      start.part23Length + (availableBits - start.part23Length) ~/ 2;
+  // CBR: spend the unshaped size + half the leftover slot. VBR: bound at
+  // unshaped×1.25 so a big ceiling doesn't let shaping balloon the frame.
+  var shapeBits = vbrShaping
+      ? start.part23Length + start.part23Length ~/ 4
+      : start.part23Length + (availableBits - start.part23Length) ~/ 2;
   if (shapeBits > availableBits) shapeBits = availableBits;
   final kNoiseGuard = _noiseGuard();
 
