@@ -22,7 +22,7 @@
 /// quality benchmark against the reference C++ encoder.
 library;
 
-export 'src/mp3_encoder.dart' show mp3EncodeMono;
+export 'src/mp3_encoder.dart' show mp3EncodeMono, mp3EncodeStereo;
 export 'src/mp3_frame.dart'
     show
         kMp3Bitrates,

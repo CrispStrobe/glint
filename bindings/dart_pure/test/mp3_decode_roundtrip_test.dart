@@ -111,4 +111,49 @@ void main() {
       skip: ffmpeg ? false : 'ffmpeg not on PATH',
     );
   }
+
+  test(
+    'ffmpeg decodes stereo to two distinct channels',
+    () {
+      const n = sr * 2;
+      final left = Float64List(n);
+      final right = Float64List(n);
+      for (var i = 0; i < n; i++) {
+        final t = i / sr;
+        left[i] = 0.5 * math.sin(2 * math.pi * 440 * t); // L: 440 Hz
+        right[i] = 0.5 * math.sin(2 * math.pi * 880 * t); // R: 880 Hz
+      }
+      final mp3 = mp3EncodeStereo(left, right, bitrate: 192);
+      final dir = Directory.systemTemp.createTempSync('mp3st');
+      try {
+        File('${dir.path}/s.mp3').writeAsBytesSync(mp3);
+        final r = Process.runSync('ffmpeg', [
+          '-v', 'error', '-i', '${dir.path}/s.mp3', //
+          '-f', 's16le', '-ac', '2', '-ar', '$sr', '${dir.path}/s.pcm',
+        ]);
+        expect(r.exitCode, 0, reason: 'ffmpeg: ${r.stderr}');
+        final raw = File('${dir.path}/s.pcm').readAsBytesSync();
+        final bd = ByteData.sublistView(raw);
+        // De-interleave and reconstruct each channel's dominant frequency by
+        // correlating against the expected tone — L must favour 440, R 880.
+        double corr(int ch, double f) {
+          var re = 0.0, im = 0.0;
+          final frames = raw.length ~/ 4;
+          for (var i = 0; i < frames; i++) {
+            final s = bd.getInt16((i * 2 + ch) * 2, Endian.little) / 32768.0;
+            final t = i / sr;
+            re += s * math.cos(2 * math.pi * f * t);
+            im += s * math.sin(2 * math.pi * f * t);
+          }
+          return math.sqrt(re * re + im * im);
+        }
+
+        expect(corr(0, 440) > corr(0, 880), isTrue, reason: 'L favours 440 Hz');
+        expect(corr(1, 880) > corr(1, 440), isTrue, reason: 'R favours 880 Hz');
+      } finally {
+        dir.deleteSync(recursive: true);
+      }
+    },
+    skip: ffmpeg ? false : 'ffmpeg not on PATH',
+  );
 }

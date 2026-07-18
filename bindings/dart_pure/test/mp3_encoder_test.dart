@@ -71,4 +71,28 @@ void main() {
       throwsArgumentError,
     );
   });
+
+  test('stereo: well-framed stream with the stereo channel-mode flag', () {
+    const sr = 44100, br = 192;
+    final left = _sine(sr, 440, sr);
+    final right = _sine(sr, 554, sr);
+    final mp3 = mp3EncodeStereo(left, right, bitrate: br);
+    expect(mp3.length, greaterThan(0));
+
+    var off = 0, frames = 0;
+    while (off + 4 <= mp3.length) {
+      expect(mp3[off], 0xFF, reason: 'frame $frames sync');
+      expect(mp3[off + 1] & 0xE0, 0xE0);
+      // Channel mode is bits 7..6 of byte 3; stereo = 00.
+      expect(
+        (mp3[off + 3] >> 6) & 0x3,
+        0,
+        reason: 'frame $frames channel mode',
+      );
+      off += mp3FrameSize(br, sr, padding: (mp3[off + 2] >> 1) & 0x1 == 1);
+      frames++;
+    }
+    expect(off, mp3.length, reason: 'frames tile the stream exactly');
+    expect(frames, inInclusiveRange(36, 40));
+  });
 }

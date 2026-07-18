@@ -18,9 +18,6 @@ import 'mp3_reservoir.dart';
 import 'mp3_shape.dart';
 import 'mp3_subband.dart';
 
-/// Mono side-info size for MPEG-1 Layer III: 17 bytes.
-const int _kMonoSideInfoBytes = 17;
-
 /// Encode mono [pcm] (−1..1) to an MPEG-1 Layer III (mono, CBR) `.mp3`.
 /// [bitrate] kbps must be a valid MPEG-1 rate; [sampleRate] one of 44100/48000/
 /// 32000.
@@ -28,7 +25,29 @@ Uint8List mp3EncodeMono(
   Float64List pcm, {
   int sampleRate = 44100,
   int bitrate = 128,
-}) {
+}) =>
+    _mp3Encode([pcm], sampleRate, bitrate, Mp3ChannelMode.mono);
+
+/// Encode stereo [left]/[right] (−1..1) to an MPEG-1 Layer III (stereo, CBR)
+/// `.mp3`. Channels may differ in length (the shorter is zero-padded).
+Uint8List mp3EncodeStereo(
+  Float64List left,
+  Float64List right, {
+  int sampleRate = 44100,
+  int bitrate = 128,
+}) =>
+    _mp3Encode([left, right], sampleRate, bitrate, Mp3ChannelMode.stereo);
+
+/// Channel-general MPEG-1 Layer III encoder (mono or L/R stereo), CBR, with the
+/// bit reservoir. Each channel runs its own subband+MDCT; per frame the budget
+/// (one slot + up to one reservoir slot) is split evenly across the
+/// 2 granules x nch channels.
+Uint8List _mp3Encode(
+  List<Float64List> channels,
+  int sampleRate,
+  int bitrate,
+  Mp3ChannelMode mode,
+) {
   final srIndex = mp3SampleRateIndex(sampleRate);
   if (srIndex < 0) {
     throw ArgumentError('unsupported sample rate: $sampleRate');
@@ -36,9 +55,16 @@ Uint8List mp3EncodeMono(
   if (mp3BitrateIndex(bitrate) == 0) {
     throw ArgumentError('unsupported bitrate: $bitrate');
   }
+  final nch = channels.length;
+  // MPEG-1 side info: 17 bytes mono, 32 bytes stereo.
+  final sideInfoBytes = nch == 1 ? 17 : 32;
+  var nSamples = 0;
+  for (final c in channels) {
+    if (c.length > nSamples) nSamples = c.length;
+  }
 
-  final sb = Mp3SubbandAnalysis();
-  final mdct = Mp3Mdct();
+  final sb = [for (var c = 0; c < nch; c++) Mp3SubbandAnalysis()];
+  final mdct = [for (var c = 0; c < nch; c++) Mp3Mdct()];
   final subband = Float64List(576);
   final mdctBuf = Float64List(576);
   final slot = Float64List(32);
@@ -46,9 +72,6 @@ Uint8List mp3EncodeMono(
   final out = BytesBuilder(copy: false);
   // Bit reservoir: main data spills across frame slots so a hard granule can
   // spend more than one slot (finer shaping) while easy granules bank the rest.
-  // (A CBR gain-floor anchor was tried and measured WORSE — it coarsened easy
-  // granules faster than shaping could compensate; hard granules borrowing the
-  // naturally-banked surplus is the win. NMR −6.7 → −7.1 dB on speech.)
   final reservoir = Mp3ReservoirStream(511);
 
   final brBps = bitrate * 1000;
@@ -57,62 +80,63 @@ Uint8List mp3EncodeMono(
   var padAcc = 0;
 
   var pos = 0;
-  while (pos < pcm.length) {
+  while (pos < nSamples) {
     // Padding bit averages the bitrate across frames (fractional frame size).
     padAcc += rem;
     final pad = padAcc >= sampleRate;
     if (pad) padAcc -= sampleRate;
     final frameSize = frameBase + (pad ? 1 : 0);
-    final thisFrameBits = (frameSize - 4 - _kMonoSideInfoBytes) * 8;
-    // Borrow up to one extra slot from the reservoir for this frame.
+    final thisFrameBits = (frameSize - 4 - sideInfoBytes) * 8;
     final mdb = reservoir.mainDataBegin();
     final borrow = 8 * mdb < thisFrameBits ? 8 * mdb : thisFrameBits;
-    final availPer = (thisFrameBits + borrow) ~/ 2;
+    final availPer = (thisFrameBits + borrow) ~/ (2 * nch);
 
-    final gr = <Mp3GranuleInfo>[];
+    // Quantize 2 granules x nch channels.
+    final gr = List.generate(2, (_) => <Mp3GranuleInfo>[]);
     for (var g = 0; g < 2; g++) {
-      for (var ts = 0; ts < 18; ts++) {
-        for (var i = 0; i < 32; i++) {
-          final idx = pos + g * 576 + ts * 32 + i;
-          slot[i] = idx < pcm.length ? pcm[idx] : 0.0;
+      for (var ch = 0; ch < nch; ch++) {
+        final pcm = channels[ch];
+        for (var ts = 0; ts < 18; ts++) {
+          for (var i = 0; i < 32; i++) {
+            final idx = pos + g * 576 + ts * 32 + i;
+            slot[i] = idx < pcm.length ? pcm[idx] : 0.0;
+          }
+          sb[ch].processSlot(slot, so);
+          for (var b = 0; b < 32; b++) {
+            // MPEG frequency inversion: negate odd subbands at odd time slots
+            // (see the localization note in git history — without it the
+            // decoder reconstructs odd subbands spectrally flipped).
+            final v = so[b];
+            subband[b * 18 + ts] = ((b & 1) != 0 && (ts & 1) != 0) ? -v : v;
+          }
         }
-        sb.processSlot(slot, so);
-        for (var b = 0; b < 32; b++) {
-          // MPEG frequency inversion: negate odd subbands at odd time slots.
-          // glint's encoder MDCT (process_strided) folds this in; our
-          // Mp3Mdct.process (== glint's plain process()) does not, so we must
-          // pre-invert here or the decoder's synthesis reconstructs the odd
-          // subbands spectrally flipped (broadband audio scrambles; band-0
-          // tones are unaffected — the symptom that localized this).
-          final v = so[b];
-          subband[b * 18 + ts] = ((b & 1) != 0 && (ts & 1) != 0) ? -v : v;
-        }
+        mdct[ch].process(subband, mdctBuf);
+        mdct[ch].aliasReduce(mdctBuf);
+        gr[g].add(mp3QuantizeGranule(mdctBuf, availPer, srIndex));
       }
-      mdct.process(subband, mdctBuf);
-      mdct.aliasReduce(mdctBuf);
-      // The rate/distortion + psychoacoustic shaping loop (mp3_shape.dart):
-      // picks global_gain + per-sfb scalefactors so quantization noise sits
-      // under the masking threshold, not flat across the spectrum.
-      gr.add(mp3QuantizeGranule(mdctBuf, availPer, srIndex));
     }
 
-    // Header + side info (mono, byte-aligned = 21 bytes) carrying main_data_begin.
+    // Header + side info carrying main_data_begin.
     final si = Mp3BitWriter();
-    _writeHeader(si, bitrate, sampleRate, pad);
+    _writeHeader(si, bitrate, sampleRate, pad, mode);
     si.writeBits(mdb, 9); // main_data_begin (reservoir back-pointer)
-    si.writeBits(0, 5); // private bits (mono)
-    si.writeBits(0, 4); // scfsi (0 = no scalefactor sharing across granules)
+    si.writeBits(0, nch == 1 ? 5 : 3); // private bits
+    si.writeBits(0, nch * 4); // scfsi (no scalefactor sharing)
     for (var g = 0; g < 2; g++) {
-      _writeGranuleSideInfo(si, gr[g]);
+      for (var ch = 0; ch < nch; ch++) {
+        _writeGranuleSideInfo(si, gr[g][ch]);
+      }
     }
     si.byteAlign();
     final headerSi = si.takeBytes();
 
-    // Main data (byte-aligned): per granule scalefactors then Huffman.
+    // Main data (byte-aligned): per granule, per channel, scalefactors + Huffman.
     final md = Mp3BitWriter();
     for (var g = 0; g < 2; g++) {
-      _writeScalefactors(md, gr[g]);
-      mp3EncodeGranule(md, gr[g].ix, gr[g].regions, srIndex);
+      for (var ch = 0; ch < nch; ch++) {
+        _writeScalefactors(md, gr[g][ch]);
+        mp3EncodeGranule(md, gr[g][ch].ix, gr[g][ch].regions, srIndex);
+      }
     }
     md.byteAlign();
     reservoir.addFrame(
@@ -151,7 +175,13 @@ void _writeScalefactors(Mp3BitWriter w, Mp3GranuleInfo gi) {
   }
 }
 
-void _writeHeader(Mp3BitWriter w, int bitrate, int sampleRate, bool pad) {
+void _writeHeader(
+  Mp3BitWriter w,
+  int bitrate,
+  int sampleRate,
+  bool pad,
+  Mp3ChannelMode mode,
+) {
   w
     ..writeBits(0x7FF, 11)
     ..writeBits(0x3, 2) // MPEG-1
@@ -161,7 +191,7 @@ void _writeHeader(Mp3BitWriter w, int bitrate, int sampleRate, bool pad) {
     ..writeBits(mp3SampleRateIndex(sampleRate), 2)
     ..writeBits(pad ? 1 : 0, 1)
     ..writeBits(0, 1) // private
-    ..writeBits(Mp3ChannelMode.mono.index, 2)
+    ..writeBits(mode.index, 2)
     ..writeBits(0, 2) // mode extension
     ..writeBits(0, 1) // copyright
     ..writeBits(1, 1) // original
