@@ -37,9 +37,19 @@ def run(cmd, **kw):
     return subprocess.run(cmd, capture_output=True, **kw)
 
 
+# Wall-clock guard: a correct decoder is ~realtime*hundreds. A regression to
+# an O(N^2) transform hangs on long/large-block clips (the FluidR3Mono.sf3
+# low-piano case) — bound every decode so that class of bug fails the gate.
+DECODE_TIMEOUT_S = 20
+
+
 def decode_glint(cli, ogg):
     out = ogg + ".g.f32"
-    r = run([cli, ogg, out])
+    try:
+        r = run([cli, ogg, out], timeout=DECODE_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"glint decode exceeded {DECODE_TIMEOUT_S}s (hang?)")
     if r.returncode != 0:
         raise RuntimeError("glint decode failed: " + r.stderr.decode())
     sr, ch, frames = (int(x) for x in r.stderr.decode().split()[:3])
@@ -116,35 +126,41 @@ def main():
         return 0
 
     tmp = tempfile.mkdtemp(prefix="glint_vorbis_")
+    # (rate, channels, quality, duration_s). Short clips at every setting,
+    # plus LONG clips (~10 s) that exercise hundreds of long (n1) blocks —
+    # the case a short corpus misses and an O(N^2) iMDCT hangs on.
     configs = []
     for rate in (22050, 44100):
         for ch in (1, 2):
             for q in (0, 3, 6, 10):
-                configs.append((rate, ch, q))
+                configs.append((rate, ch, q, 0.4))
+    configs.append((44100, 1, 6, 10.0))
+    configs.append((44100, 2, 6, 10.0))
+    configs.append((22050, 1, 3, 10.0))
 
     failures = 0
     tested = 0
-    for rate, ch, q in configs:
-        wav = os.path.join(tmp, f"src_{rate}_{ch}.wav")
+    for rate, ch, q, dur in configs:
+        wav = os.path.join(tmp, f"src_{rate}_{ch}_{dur}.wav")
         if not os.path.exists(wav):
             # Non-periodic source (pink noise) -> unambiguous alignment.
             r = run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
-                     f"anoisesrc=d=0.4:c=pink:r={rate}:a=0.35",
+                     f"anoisesrc=d={dur}:c=pink:r={rate}:a=0.35",
                      "-ac", str(ch), wav])
             if r.returncode != 0:
                 continue
-        ogg = os.path.join(tmp, f"c_{rate}_{ch}_{q}.ogg")
+        ogg = os.path.join(tmp, f"c_{rate}_{ch}_{q}_{dur}.ogg")
         if run(["sox", wav, "-C", str(q), ogg]).returncode != 0:
             continue
         try:
             gsr, gch, g = decode_glint(cli, ogg)
             f = decode_ffmpeg(ogg, ch)
         except RuntimeError as e:
-            print(f"FAIL {rate}/{ch}ch/q{q}: {e}")
+            print(f"FAIL {rate}/{ch}ch/q{q}/{dur}s: {e}")
             failures += 1
             continue
         if gsr != rate or gch != ch:
-            print(f"FAIL {rate}/{ch}ch/q{q}: sr/ch mismatch "
+            print(f"FAIL {rate}/{ch}ch/q{q}/{dur}s: sr/ch mismatch "
                   f"({gsr}/{gch})")
             failures += 1
             continue
@@ -166,7 +182,7 @@ def main():
                           f"< ffmpeg-vs-sox {fs[0]:.1f} - 3")
                     failures += 1
         ok = raw >= 100.0 and scaled >= 120.0
-        print(f"{'ok ' if ok else 'FAIL'} {rate}/{ch}ch/q{q:2d}: "
+        print(f"{'ok ' if ok else 'FAIL'} {rate}/{ch}ch/q{q:2d}/{dur:.0f}s: "
               f"raw={raw:.1f} scaled={scaled:.1f} dB{sox_note}")
         if not ok:
             failures += 1

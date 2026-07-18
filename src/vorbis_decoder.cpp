@@ -10,6 +10,7 @@
 #include <functional>
 
 #include "vorbis_bits.hpp"
+#include "vorbis_imdct.hpp"
 #include "vorbis_ogg.hpp"
 
 namespace glint {
@@ -637,6 +638,8 @@ public:
         lap_.assign(ch_, {});
         lap_n_.assign(ch_, 0);
         started_.assign(ch_, 0);
+        imdct0_.init(n0_);
+        imdct1_.init(n1_);
     }
 
     // Decode one audio packet, appending finished interleaved samples.
@@ -739,7 +742,8 @@ public:
                     spec[c][k] *= floor_curve[c][k];
             }
             std::vector<float> time(n);
-            imdct(spec[c].data(), time.data(), n);
+            (n == n1_ ? imdct1_ : imdct0_).backward(spec[c].data(),
+                                                    time.data());
             for (int i = 0; i < n; i++) time[i] *= win[i];
             overlap_add(c, time.data(), n, left_start, right_start, out[c]);
         }
@@ -752,6 +756,7 @@ private:
     std::vector<std::vector<float>> lap_;  // carry buffer per channel
     std::vector<int> lap_n_;               // valid length of lap_[c]
     std::vector<char> started_;            // first-block-seen flag per ch
+    FastImdct imdct0_, imdct1_;            // short / long block transforms
 
     // Floor 1 decode + curve synthesis. Returns 1 (used) with the linear
     // curve in `curve[0..half)`, 0 (unused), or -1 (error).
@@ -977,21 +982,6 @@ private:
             w[i] = static_cast<float>(std::sin(H * s * s));
         }
         for (int i = re; i < n; i++) w[i] = 0.f;
-    }
-
-    // Direct inverse MDCT: n/2 spectral bins -> n time samples (spec §1.3.2).
-    // Correctness-first O(N^2); a fast FFT path replaces it in slice 4b.
-    void imdct(const float* X, float* out, int n) {
-        int M = n / 2;
-        // libvorbis-compatible backward MDCT normalization (the forward
-        // carries the 1/M): a unit constant reconstructs at unit amplitude.
-        for (int p = 0; p < n; p++) {
-            double acc = 0.0;
-            double c = (M_PI / M) * (p + 0.5 + M / 2.0);
-            for (int k = 0; k < M; k++)
-                acc += X[k] * std::cos(c * (k + 0.5));
-            out[p] = static_cast<float>(acc);
-        }
     }
 
     // Windowed overlap-add (spec §4.3.8). `lap_[c]` is the carry buffer whose

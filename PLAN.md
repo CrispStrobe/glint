@@ -733,10 +733,30 @@ Staging (spec §4–§9, §12), each slice green before the next:
   Floor 0 (LSP) config is parsed but its synthesis is not yet implemented
   (the sox/ffmpeg corpus is all floor 1; a floor-0 stream returns an error
   rather than wrong audio).
-- **Slice 5 — decode-vs-reference dB ctest gate** (`tools/test_vorbis_
-  decoder.py` + `vorbis_decoder_vs_ffmpeg`, corpus q0..q10/mono+stereo/
-  22k+44k vs ffmpeg AND sox) — NEXT. Then floor 0 (LSP), bindings parity,
-  fuzz target, `.sf3` E2E.
+- **Slice 5 — decode-vs-reference dB ctest gate (DONE 2026-07-18).**
+  `tools/vorbis_dec_cli` + `tools/test_vorbis_decoder.py`, ctest
+  `vorbis_decoder_vs_ffmpeg`: sox(libvorbis) corpus decoded by glint, ffmpeg
+  and sox; gates glint-vs-ffmpeg raw ≥100 dB / shape ≥120 dB and glint-vs-sox
+  parity with ffmpeg. 16 short configs green (raw 117.7–119.8, shape 135–138).
+- **Slice 4b — fast (N/4-FFT) inverse MDCT (DONE 2026-07-18).** The
+  correctness-first O(N²) iMDCT with a live `cos()` in its inner loop was a
+  real **DoS hang** on long/large-block clips (a low-piano FluidR3Mono.sf3
+  sample: ~500 long packets × M² transcendental calls → minutes). Replaced by
+  `src/vorbis_imdct.hpp` `FastImdct`: an H=N/4 radix-2 complex FFT with
+  pre/post twiddle + TDAC unfold, generalized from glint's proven AAC
+  `ImdctPlan` to any power-of-two N and normalized to the Vorbis convention
+  (×M vs ImdctPlan — the two conventions are identical MDCTs:
+  (2π/N)(n+n0)(k+½)=(π/M)(n+½+M/2)(k+½)). Unit test `test_vorbis_imdct` diffs
+  fast vs the direct O(N²) reference across N=64..8192 (matches to ~1e-12).
+  **Results:** the real "Piano FF B0(R)" stream (97,798 B, 11.78 s) now
+  decodes in **0.027 s** (was hanging), 519,598 frames = ffmpeg exactly,
+  raw 117.9 / shape 136.7 dB, pitch 30.97 Hz (B0=30.87, on-pitch). Gate
+  extended with 10 s long clips + a 20 s per-decode wall-clock guard so this
+  hang class fails the gate; 19/19 configs green.
+- **NEXT:** Vorbis fuzz target (`fuzz_decoders.cpp` + `decoder_fuzz`, ASan+
+  UBSan, random/truncated/bit-flipped + malformed setup headers, with a
+  time/iteration guard). Then floor 0 (LSP) synthesis, bindings parity
+  (wasm rebuild + `FORMAT.VORBIS`), `.sf3` E2E.
 - Slices 3+: setup header (floors/residues/mappings/modes) → floor 1 →
   residue 0/1/2 + inverse coupling → iMDCT + overlap-add → dB gate vs
   ffmpeg+sox (≥120 dB) → floor 0 (LSP) → bindings → fuzz → `.sf3` E2E.

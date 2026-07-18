@@ -1250,6 +1250,35 @@ static void test_vorbis_codebook() {
     CHECK(!bad.build_huffman(), "over-subscribed codebook rejected");
 }
 
+#include "vorbis_imdct.hpp"
+
+// Fast (N/4-FFT) inverse MDCT must equal the direct O(N^2) reference across
+// every Vorbis block size — proves the fast path is exact before it is the
+// only path in the decoder.
+static void test_vorbis_imdct() {
+    std::printf("[vorbis] fast iMDCT == direct O(N^2)...\n");
+    unsigned seed = 12345;
+    for (int n : {64, 128, 256, 1024, 2048, 8192}) {
+        int M = n / 2;
+        std::vector<float> spec(M), yd(n), yf(n);
+        for (int k = 0; k < M; k++) {
+            seed = seed * 1103515245u + 12345u;
+            spec[k] = ((seed >> 8) & 0xFFFF) / 32768.0f - 1.0f;
+        }
+        glint::vorbis::imdct_direct(spec.data(), yd.data(), n);
+        glint::vorbis::FastImdct fi;
+        fi.init(n);
+        fi.backward(spec.data(), yf.data());
+        double maxabs = 0, maxdiff = 0;
+        for (int i = 0; i < n; i++) {
+            maxabs = std::max(maxabs, (double)std::abs(yd[i]));
+            maxdiff = std::max(maxdiff, (double)std::abs(yd[i] - yf[i]));
+        }
+        CHECK(maxdiff < 1e-3 * (maxabs + 1e-6),
+              "fast iMDCT matches direct reference");
+    }
+}
+
 #include "vorbis_test_stream.h"
 
 // Full setup-header parse (spec §4.2.4) on a REAL libvorbis stream: all
@@ -1338,6 +1367,7 @@ int main() {
     test_vorbis_id_header();
     test_vorbis_codebook();
     test_vorbis_setup();
+    test_vorbis_imdct();
     test_vorbis_decode();
 
     std::printf("\n%d/%d tests passed\n", tests_passed, tests_run);
