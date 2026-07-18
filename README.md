@@ -1,9 +1,9 @@
 # glint
 
-A clean-room **MP3, AAC-LC and Opus codec suite** in C++17, MIT
-licensed: encoders and decoders for all three formats. The name nods to
-integers (*g-lint*) and the [Shine](https://github.com/toots/shine)
-encoder lineage.
+A clean-room **MP3, AAC-LC, Opus and Ogg-Vorbis codec suite** in C++17,
+MIT licensed: encoders and decoders for MP3/AAC/Opus, plus a decoder for
+Ogg-Vorbis I. The name nods to integers (*g-lint*) and the
+[Shine](https://github.com/toots/shine) encoder lineage.
 
 Both codecs are implemented from the ISO specs (11172-3 / 13818-3 for
 MP3, 13818-7 / 14496-3 for AAC) with no third-party encoder code
@@ -65,6 +65,22 @@ vo-aacenc (Apache-2.0) is unmaintained and last on quality.
   ties 4 / narrowly loses 2** (192 kbps: transparent everywhere, top
   raw SNR on most clips). Every layer is cross-checked by a dedicated
   oracle harness in `tools/`. See PLAN.md O-track.
+- **Ogg-Vorbis I decoder (clean-room from the Vorbis I spec).** Full
+  decode path: Ogg demux, the three header packets, codebooks (Huffman +
+  VQ lookup 1/2), floor types 1 (piecewise-linear) and 0 (LSP), residue
+  types 0/1/2 with inverse channel coupling, and a fast N/4-FFT inverse
+  MDCT + windowed overlap-add. Vorbis decode is deterministic, so glint
+  matches **both ffmpeg and sox(libvorbis)**: on a corpus (q0…q10, mono +
+  stereo, 22.05/44.1 kHz, short + 10 s clips) it is **117–120 dB raw SNR
+  vs ffmpeg (137–139 dB after a sub-2 ppm float-precision scale)** and
+  agrees with sox to the same dB as ffmpeg does. Drives `.sf3` soundfonts,
+  whose samples are Ogg-Vorbis: a real FluidR3Mono low-piano sample
+  (11.78 s) decodes in ~25 ms, sample-count-identical to ffmpeg and
+  on-pitch. Whole-file `glint_vorbis_decode`, wired into the auto-detect
+  `glint_decode_audio` (which splits `OggS` into Opus vs Vorbis by the
+  first packet's codec id) and the wasm/web path; fuzz-hardened under
+  ASan+UBSan (random / truncated / bit-flipped + malformed setup headers).
+  See PLAN.md Vorbis track.
 
 ## Quick start
 
@@ -194,9 +210,12 @@ frames). `glint_version()` reports the library version. AAC VBR: set
 `cfg.vbr = 1; cfg.vbr_quality = 0..9`.
 
 Decode + DSP + WAV: `glint_mp3_dec_* / glint_aac_dec_*` (frame decoders);
-`glint_decode_audio(...)` (whole stream, auto-detects MP3/AAC/Ogg-Opus)
-and `glint_decode_audio_ex(..., out_rate, want_int16, ...)` (adds output
-resample, int16 output, and Opus surround up to 8 ch); `glint_encode_audio(
+`glint_vorbis_decode(ogg, len, &sr, &ch, &frames)` (whole-buffer
+Ogg-Vorbis I -> float PCM, `_ex` sibling adds resample + int16);
+`glint_decode_audio(...)` (whole stream, auto-detects
+MP3/AAC/Ogg-Opus/Ogg-Vorbis) and `glint_decode_audio_ex(..., out_rate,
+want_int16, ...)` (adds output resample, int16 output, and Opus surround
+up to 8 ch); `glint_encode_audio(
 pcm, frames, ch, sr, format, bitrate, vbr_q, quality, &n)` (one-call
 encode, auto-resamples to a codec-valid rate); `glint_resample(...)`
 (Kaiser sinc); `glint_wav_read` / `glint_wav_write` (PCM 8/16/24/32,
@@ -210,6 +229,7 @@ glint.encode_pcm(...)                        # MP3 encode
 enc = glint.AacEncoder(44100, 2, 128)        # AAC (vbr_quality= for VBR)
 pcm, sr, ch = glint.decode_file("in.aac")            # any codec/bit depth -> float
 pcm, sr, ch = glint.decode_file("s.opus", dtype="int16", rate=24000)  # + 5.1
+pcm, sr, ch = glint.decode_bytes(open("s.ogg","rb").read())  # Ogg-Vorbis too
 glint.transcode_file("in.mp3", "out.opus", bitrate=96)   # incl. Opus out
 data = glint.encode_audio(pcm, ch, sr, "aac", bitrate=128)  # one-call, any rate
 glint.write_wav("o.wav", pcm, sr, ch, bits=24)       # 8/16/24/32-int or float
@@ -218,13 +238,16 @@ glint.write_wav("o.wav", pcm, sr, ch, bits=24)       # 8/16/24/32-int or float
 ```rust
 let mp3 = glint::encode_pcm(&pcm, 44100, 2, 128);
 let aac = glint::encode_pcm_aac(&pcm, 44100, 2, 128, 1);
-let audio = glint::decode_audio(&bytes).unwrap();   // -> DecodedAudio
+let audio = glint::decode_audio(&bytes).unwrap();   // -> DecodedAudio (any)
+let ogg = glint::decode_vorbis(&ogg_bytes).unwrap();   // dedicated Vorbis
 let up = glint::resample(&audio.pcm, audio.channels, audio.sample_rate, 48000);
 ```
 
 Dart/Flutter (FFI): `GlintEncoder` / `GlintAacEncoder` encode,
-`GlintMp3Decoder` / `GlintAacDecoder` and `glintDecodeAudio` decode,
-`glintResample` resample.
+`GlintMp3Decoder` / `GlintAacDecoder` / `GlintVorbisDecoder` and
+`glintDecodeAudio` decode, `glintResample` resample. Web (wasm,
+`bindings/wasm/glint_codec.mjs`): `decodeAudio(bytes)` (auto-detect, incl.
+Vorbis) + `decodeVorbis(bytes)`.
 
 ## Embedded and no-FPU
 
@@ -282,11 +305,13 @@ glint/
 ├── include/glint/glint.h      C API (MP3 + AAC)
 ├── src/                       MP3 core + aac_*.{hpp,cpp} (AAC core)
 │                              + opus_*.{hpp,cpp} (Opus codec)
+│                              + vorbis_*.{hpp,cpp} (Ogg-Vorbis decoder)
 ├── tools/                     AAC/CELT table generators, no-FPU checker,
 │                              Opus-vs-libopus cross-check harnesses
 ├── cli/                       codec CLI: encode/decode/transcode/resample
 ├── tests/                     unit + decode gates + quality/league/ABX
 ├── bindings/                  Python (ctypes) · Rust (sys+safe) · Dart FFI
+│                              · wasm (Emscripten, web)
 ├── embedded/                  bench core, QEMU target, Pico project
 ├── esp-idf/                   ESP32 component + example
 ├── packaging/vcpkg/           vcpkg port
@@ -318,6 +343,10 @@ the exact invocations used in CI.
   streams; 96k ODG league 4W/4T/2L vs libopus). Possible follow-ups:
   the remaining piano/torture ODG gap, SILK/hybrid encoding, DTX,
   multistream encode.
+- **Ogg-Vorbis** (PLAN.md Vorbis track): DECODER COMPLETE — matches
+  ffmpeg + sox(libvorbis) at the float floor, drives `.sf3` soundfonts,
+  fuzz-hardened; native (FFI) + wasm/web + Python/Rust wrappers. A Vorbis
+  encoder is a possible follow-up.
 - On-target RP2040/ESP32 throughput measurements (harness ships, needs
   silicon).
 - The last ~0.5 PEAQ ODG to Apple on speech/electronic at 128 kbps

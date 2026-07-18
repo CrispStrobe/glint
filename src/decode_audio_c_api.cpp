@@ -16,13 +16,32 @@
 #include "opus_ms_decoder.hpp"
 #include "opus_ogg.hpp"
 #include "resample.hpp"
+#include "vorbis_decoder.hpp"
+#include "vorbis_ogg.hpp"
 
 namespace {
 
-enum class Fmt { Unknown, Mp3, Aac, Opus };
+enum class Fmt { Unknown, Mp3, Aac, Opus, Vorbis };
+
+// Ogg containers carry both Opus and Vorbis. Peek at the first logical
+// stream's first packet: "OpusHead" -> Opus, 0x01 "vorbis" -> Vorbis.
+Fmt detect_ogg_codec(const uint8_t* d, size_t n) {
+    std::vector<std::vector<uint8_t>> packets;
+    int64_t granule = -1;
+    if (glint::vorbis::ogg_demux_first_stream(d, n, packets, &granule) != 0 ||
+        packets.empty())
+        return Fmt::Unknown;
+    const auto& p0 = packets[0];
+    if (p0.size() >= 8 && !std::memcmp(p0.data(), "OpusHead", 8))
+        return Fmt::Opus;
+    if (p0.size() >= 7 && p0[0] == 0x01 &&
+        !std::memcmp(p0.data() + 1, "vorbis", 6))
+        return Fmt::Vorbis;
+    return Fmt::Unknown;
+}
 
 Fmt detect(const uint8_t* d, size_t n) {
-    if (n >= 4 && !std::memcmp(d, "OggS", 4)) return Fmt::Opus;
+    if (n >= 4 && !std::memcmp(d, "OggS", 4)) return detect_ogg_codec(d, n);
     size_t off = 0;
     if (n > 10 && !std::memcmp(d, "ID3", 3))
         off = 10 + ((d[6] & 0x7F) << 21 | (d[7] & 0x7F) << 14 |
@@ -134,6 +153,12 @@ bool decode_opus(const uint8_t* d, size_t n, std::vector<float>& out,
     return true;
 }
 
+// Decode Ogg-Vorbis I (whole buffer) at its native sample rate.
+bool decode_vorbis(const uint8_t* d, size_t n, std::vector<float>& out,
+                   int& sr, int& ch) {
+    return glint::vorbis::decode_ogg(d, n, out, sr, ch) == 0 && ch > 0;
+}
+
 // Decode any supported stream to interleaved float at the native rate.
 bool decode_native(const uint8_t* data, size_t len, std::vector<float>& out,
                    int& sr, int& ch) {
@@ -141,6 +166,7 @@ bool decode_native(const uint8_t* data, size_t len, std::vector<float>& out,
     case Fmt::Mp3: return decode_mp3(data, len, out, sr, ch);
     case Fmt::Aac: return decode_aac(data, len, out, sr, ch);
     case Fmt::Opus: return decode_opus(data, len, out, sr, ch);
+    case Fmt::Vorbis: return decode_vorbis(data, len, out, sr, ch);
     default: return false;
     }
 }

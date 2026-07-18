@@ -677,6 +677,31 @@ pub fn decode_audio(data: &[u8]) -> Option<DecodedAudio> {
     Some(DecodedAudio { pcm, sample_rate: sr as u32, channels: ch as u32 })
 }
 
+/// Decode a complete in-memory Ogg-Vorbis I stream (identification +
+/// comment + setup headers followed by audio packets) to interleaved f32
+/// PCM at its native rate — the shape the `.sf3` soundfont sample path
+/// needs. Mirrors [`OpusDecoder`]; [`decode_audio`] also decodes Vorbis
+/// transparently. Returns `None` on a non-Vorbis or corrupt buffer.
+pub fn decode_vorbis(ogg: &[u8]) -> Option<DecodedAudio> {
+    if ogg.is_empty() {
+        return None;
+    }
+    let mut sr: core::ffi::c_int = 0;
+    let mut ch: core::ffi::c_int = 0;
+    let mut frames: core::ffi::c_int = 0;
+    let ptr = unsafe {
+        glint_sys::glint_vorbis_decode(ogg.as_ptr(), ogg.len() as i32,
+            &mut sr, &mut ch, &mut frames)
+    };
+    if ptr.is_null() || ch <= 0 {
+        return None;
+    }
+    let total = frames as usize * ch as usize;
+    let pcm = unsafe { std::slice::from_raw_parts(ptr, total) }.to_vec();
+    unsafe { glint_sys::glint_free(ptr as *mut core::ffi::c_void) };
+    Some(DecodedAudio { pcm, sample_rate: sr as u32, channels: ch as u32 })
+}
+
 /// Encode interleaved 48 kHz f32 PCM (±1.0, `frames` per channel, 1-2
 /// channels) to a complete Ogg-Opus file (CELT-only, 20 ms frames). `vbr`
 /// selects unconstrained VBR. Input MUST be 48 kHz — resample first with

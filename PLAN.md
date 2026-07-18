@@ -658,6 +658,138 @@ Scope note: -q speed + CBR only; normal/best (psy loops) and VBR keep
 double math by design. intmath.hpp refactor left AAC INT output
 byte-identical.
 
+# Vorbis track (started 2026-07-18) — branch `feature/vorbis-decoder`
+
+Clean-room Ogg-Vorbis I **decoder** for the `.sf3` soundfont path (CometBeat
+driver). **Clean-room affidavit:** implemented from the Vorbis I specification
+(xiph.org) ONLY; no libvorbis / stb_vorbis / tremor / ffmpeg codec source was
+read or copied. ffmpeg and sox(libvorbis) are used solely as black-box
+reference decoders, and sox(libvorbis) as the corpus encoder (ffmpeg 8.1 on
+this box has only the experimental native encoder, which fails to emit; sox
+`-C q` drives libvorbis). Two independent references available: **ffmpeg**
+(`ffmpeg -i x.ogg -f f32le`) and **sox** (`sox x.ogg -t f32 -`). MIT headers
+on all new files.
+
+Staging (spec §4–§9, §12), each slice green before the next:
+
+- **Slice 1 — Ogg glue + id-header + detect split (DONE 2026-07-18).**
+  `src/vorbis_bits.hpp` (LSB-first BitReader, spec §2 + `ilog`),
+  `src/vorbis_ogg.hpp` (generic first-logical-stream packet demux, reuses
+  `glint::opus::ogg_crc`), `src/vorbis_decoder.{hpp,cpp}` (identification
+  header parse §4.2.2 — channels/rate/power-of-two blocksizes/framing;
+  validates the 3 header packets), `src/vorbis_c_api.cpp`
+  (`glint_vorbis_decode` / `_ex`, C ABI in glint.h). `detect()` in
+  `decode_audio_c_api.cpp` no longer maps ANY `OggS`→Opus: it peeks the first
+  packet — `OpusHead`→Opus, `\x01vorbis`→Vorbis — and routes accordingly.
+  Verified on a real libvorbis stream (`sox` q3, 44.1k mono): demux → 26
+  packets, granule 22050, id valid ch=1 bs 256/2048. Unit tests: LSB bit
+  reader + id-header parse/reject (`test_vorbis_*` in test_unit.cpp).
+  Full existing ctest suite still green (8/8), zero Opus/MP3/AAC regression.
+- **Slice 2 — codebooks (Huffman + VQ lookup 1/2) (DONE 2026-07-18).**
+  `read_codebook` (spec §3.2.1): sync 0x564342, dims/entries, ordered+sparse
+  length coding, lookup types 0/1/2 with `float32_unpack` (§9.2.2) +
+  `lookup1_values` (§9.2.3). Huffman decode via a leftmost-assigned binary
+  tree (child0/child1 arrays, leaf = -(entry+2)); single-used-entry
+  degenerate books read 0 bits; over-subscribed trees rejected; bounded
+  allocation guard on multiplicands. `build_vq` materializes lookup-1/2
+  value lists (sequence_p accumulation). Unit tests: the spec §3.2.1
+  worked-example tree decodes e0/e5/e6/e1/e7 correctly, float32_unpack +
+  lookup1_values spec values, over-subscription rejected. **Validated end
+  to end on the real libvorbis stream: all 35 setup-header codebooks
+  (scalar + VQ lookup-1) build with r=0.**
+- **Slice 3 — setup header: floors / residues / mappings / modes (DONE
+  2026-07-18).** `parse_setup` (spec §4.2.4): codebooks, time placeholders,
+  floor type 1 (partitions/classes/subclass books/multiplier/rangebits/X
+  list + derived low/high neighbours §9.2.5 + sorted order) and type 0
+  config (LSP: order/rate/bark_map/amplitude/books), residue types 0/1/2
+  (begin/end/partition_size/classifications/classbook/cascade/books),
+  mapping type 0 (submaps, coupling steps with ilog(ch-1) magnitude/angle,
+  mux, per-submap floor+residue), modes (blockflag/window/transform/mapping),
+  framing bit. Reserved-field + bounds validation throughout. Test hook
+  `debug_parse_headers`. **Validated across a real libvorbis corpus (sox
+  -C 0/3/6/10, mono+stereo, 22.05k+44.1k): every stream parses with 0 and
+  consumes all setup bits bar the final-byte padding (0–6 bits).** ctest:
+  `test_vorbis_setup` embeds a real stream (`tests/vorbis_test_stream.h`)
+  and gates the parse. Full existing suite green.
+- **Slice 4 — audio decode (DONE 2026-07-18, first end-to-end).** Floor 1
+  decode + curve synthesis (§7.2, render_point/render_line, floor1_inverse_dB
+  geometric table from the spec's two literal anchors), residue types 0/1/2
+  with the classification/partition loop (§8.6) and per-type partition layout,
+  inverse channel coupling (§4.3.5, last→first), floor·residue dot product,
+  inverse MDCT and windowed overlap-add (§4.3.1/§4.3.8). **Key findings while
+  bringing it up:** (a) the IMDCT cosine argument must be (π/M)(p+½+M/2)(k+½)
+  — an earlier ×2 argument gave the classic frequency-doubling aliasing;
+  (b) libvorbis's backward-MDCT normalization is a **unit constant** (the
+  forward carries the 1/M), verified by a self-consistent MDCT roundtrip
+  (283 dB) and the corpus; (c) the overlap-add carry offset is (i−left_start),
+  not a global-position scheme. **Measured vs ffmpeg (float64 SNR, aligned):
+  chirp 118.3 / noise 118.3 / mono-tone 118.9 / stereo 119.8 dB raw, 137–139
+  dB after removing a uniform 1.2 ppm scale (float32-precision floor).
+  glint matches the SECOND reference sox(libvorbis) exactly as well as ffmpeg
+  does (identical 77/90 dB vs sox's lower-precision f32 output) — i.e. glint
+  agrees with BOTH references to float precision.** Self-contained ctest
+  `test_vorbis_decode` decodes the embedded stream and asserts on-pitch
+  (recovered period 100 samples = 440 Hz). Full existing suite green (8/8).
+  Floor 0 (LSP) config is parsed but its synthesis is not yet implemented
+  (the sox/ffmpeg corpus is all floor 1; a floor-0 stream returns an error
+  rather than wrong audio).
+- **Slice 5 — decode-vs-reference dB ctest gate (DONE 2026-07-18).**
+  `tools/vorbis_dec_cli` + `tools/test_vorbis_decoder.py`, ctest
+  `vorbis_decoder_vs_ffmpeg`: sox(libvorbis) corpus decoded by glint, ffmpeg
+  and sox; gates glint-vs-ffmpeg raw ≥100 dB / shape ≥120 dB and glint-vs-sox
+  parity with ffmpeg. 16 short configs green (raw 117.7–119.8, shape 135–138).
+- **Slice 4b — fast (N/4-FFT) inverse MDCT (DONE 2026-07-18).** The
+  correctness-first O(N²) iMDCT with a live `cos()` in its inner loop was a
+  real **DoS hang** on long/large-block clips (a low-piano FluidR3Mono.sf3
+  sample: ~500 long packets × M² transcendental calls → minutes). Replaced by
+  `src/vorbis_imdct.hpp` `FastImdct`: an H=N/4 radix-2 complex FFT with
+  pre/post twiddle + TDAC unfold, generalized from glint's proven AAC
+  `ImdctPlan` to any power-of-two N and normalized to the Vorbis convention
+  (×M vs ImdctPlan — the two conventions are identical MDCTs:
+  (2π/N)(n+n0)(k+½)=(π/M)(n+½+M/2)(k+½)). Unit test `test_vorbis_imdct` diffs
+  fast vs the direct O(N²) reference across N=64..8192 (matches to ~1e-12).
+  **Results:** the real "Piano FF B0(R)" stream (97,798 B, 11.78 s) now
+  decodes in **0.027 s** (was hanging), 519,598 frames = ffmpeg exactly,
+  raw 117.9 / shape 136.7 dB, pitch 30.97 Hz (B0=30.87, on-pitch). Gate
+  extended with 10 s long clips + a 20 s per-decode wall-clock guard so this
+  hang class fails the gate; 19/19 configs green.
+- **Slice 6 — Vorbis fuzz target (DONE 2026-07-18).** `tools/fuzz_vorbis.cpp`
+  + `decoder_fuzz`: random / bit-flipped / truncated Ogg-Vorbis, plus
+  **CRC-repaired mutations** that drive the setup-header parser (the classic
+  attack surface). ASan+UBSan, wall-clock guard. **The fuzzer immediately
+  caught a real heap-overflow:** the setup header's cross-references (residue
+  `classbook`/books, floor masterbooks/subclass books, mapping floor/residue
+  indices) were used as vector indices with no bounds check. Fixed with a
+  validation pass in `parse_setup` that rejects any out-of-range reference,
+  plus a tighter codebook-entry cap (2^20) for bounded allocation. 150k
+  decode calls clean under ASan+UBSan; real streams unaffected; full ctest
+  green (9/9).
+- **Slice 7 — bindings parity + floor 0 + docs (DONE 2026-07-19).**
+  - **Dart:** `GlintVorbisDecoder` (whole-buffer -> Float32List + sr/ch via
+    `glint_vorbis_decode`) + `example/vorbis_decode.dart` (dedicated vs
+    whole-file agree). **wasm:** exported `_glint_vorbis_decode`, added
+    `FORMAT.VORBIS` + `decodeVorbis` to `glint_codec.mjs`, rebuilt `glint.wasm`
+    via emsdk (ENVIRONMENT now `web,worker,node`); node smoke decodes a .ogg
+    (17640 frames, MP3/AAC/Opus unregressed) — first commit of the wasm
+    binding into the repo. **Rust:** `glint_sys::glint_vorbis_decode` +
+    `glint::decode_vorbis`; build.rs compiles the vorbis sources; cargo test
+    green. **Python:** `decode_bytes` decodes Vorbis via auto-detect —
+    explicit `VorbisDecodeTest` (embedded stream) in the always-on
+    python_bindings gate.
+  - **Floor 0 (LSP):** implemented (spec §6.2.2/§6.2.3) and wired in. Caveat:
+    **no encoder emits floor 0** (libvorbis has used floor 1 exclusively since
+    before 1.0; every sox quality here is floor 1), so there is no real
+    floor-0 stream to gate E2E — the math is cross-checked against an
+    independent reference (`test_vorbis_floor0`, golden values).
+  - **README** documents the decoder (highlights, dB numbers, C ABI, all four
+    wrappers, roadmap). **pub.dev:** `glint_audio` 0.9.0 -> 0.10.0 + CHANGELOG
+    (commit only; publish needs a `glint_audio-v0.10.0` tag — NOT created).
+  - Clean-room affidavit + MIT headers intact. Full ctest green (9/9); merged
+    to `main`.
+- Slices 3+: setup header (floors/residues/mappings/modes) → floor 1 →
+  residue 0/1/2 + inverse coupling → iMDCT + overlap-add → dB gate vs
+  ffmpeg+sox (≥120 dB) → floor 0 (LSP) → bindings → fuzz → `.sf3` E2E.
+
 # AAC-LC track (started 2026-07-06)
 
 One repo, two codecs: the AAC encoder lives in `src/aac_*.{hpp,cpp}` with

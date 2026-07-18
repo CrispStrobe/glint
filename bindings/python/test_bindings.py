@@ -514,6 +514,121 @@ class TestBucketsAB(unittest.TestCase):
             self.assertEqual((sr, ch), (48000, 2))
 
 
+
+class VorbisDecodeTest(unittest.TestCase):
+    """Vorbis decode through the whole-file auto-detect (C detect splits
+    OggS into Opus vs Vorbis by codec id)."""
+    _VORBIS_OGG_B64 = (
+        "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"
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        cls.build = _build_dir()
+        if glint._find_library(cls.build) is None:
+            raise unittest.SkipTest("libglint not found")
+        glint.set_library_path(cls.build)
+        cls.lib = glint.load_library(cls.build)
+        if not hasattr(cls.lib, "glint_decode_audio"):
+            raise unittest.SkipTest("libglint has no whole-file decode ABI")
+
+    def test_decode_vorbis_autodetect(self):
+        # A real libvorbis stream (sox -C 3, 44.1k mono, 440 Hz), embedded so
+        # the test is self-contained. decode_bytes must auto-detect Vorbis
+        # (both Opus and Vorbis are OggS; the C detect splits by codec id).
+        import base64
+        ogg = base64.b64decode("".join(self._VORBIS_OGG_B64.split()))
+        pcm, sr, ch = glint.decode_bytes(ogg)
+        self.assertEqual((sr, ch), (44100, 1))
+        frames = pcm.shape[0] if hasattr(pcm, "shape") else len(pcm) // ch
+        self.assertGreater(frames, 20000)
+
+    def test_decode_vorbis_dedicated(self):
+        # The dedicated whole-buffer entry point, when the wrapper exposes it.
+        import base64
+        ogg = base64.b64decode("".join(self._VORBIS_OGG_B64.split()))
+        if not hasattr(self.lib, "glint_vorbis_decode"):
+            self.skipTest("libglint has no glint_vorbis_decode symbol")
+        # Symbol must be present and callable through ctypes.
+        self.assertTrue(callable(self.lib.glint_vorbis_decode))
+
+
 if __name__ == "__main__":
     # Strip our custom argv before unittest parses it
     build = _build_dir()

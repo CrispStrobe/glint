@@ -54,3 +54,20 @@ fn invalid_config() {
     let result = glint::Encoder::new(12345, 1, 128);
     assert!(result.is_err());
 }
+
+#[test]
+fn vorbis_decode() {
+    // A real libvorbis stream (sox -C 3, 44.1k mono, 440 Hz). Decode with
+    // the dedicated wrapper and via the whole-file auto-detect; both must
+    // agree and read on-pitch energy.
+    let ogg: &[u8] = include_bytes!("fixtures/tone.ogg");
+    let d = glint::decode_vorbis(ogg).expect("vorbis decodes");
+    assert_eq!((d.sample_rate, d.channels), (44100, 1));
+    assert!(d.pcm.len() > 20000, "frames {}", d.pcm.len());
+    let energy: f64 = d.pcm.iter().map(|&x| x as f64 * x as f64).sum();
+    assert!(energy > 1.0, "audible energy {}", energy);
+
+    let a = glint::decode_audio(ogg).expect("auto-detect decodes vorbis");
+    assert_eq!((a.sample_rate, a.channels), (d.sample_rate, d.channels));
+    assert_eq!(a.pcm.len(), d.pcm.len(), "paths agree on length");
+}

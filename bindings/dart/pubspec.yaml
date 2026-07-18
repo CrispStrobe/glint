@@ -1,6 +1,6 @@
 name: glint_audio
-description: Dart FFI bindings for the glint MP3, AAC-LC, Opus, WAV and resampling codec suite.
-version: 0.9.0
+description: Dart FFI bindings for the glint MP3, AAC-LC, Opus, Ogg-Vorbis, WAV and resampling codec suite.
+version: 0.10.0
 repository: https://github.com/CrispStrobe/glint/tree/main/bindings/dart
 homepage: https://github.com/CrispStrobe/glint
 
@@ -12,7 +12,7 @@ dependencies:
 
 topics:
   - audio
-  - codec
   - mp3
   - aac
   - opus
+  - vorbis

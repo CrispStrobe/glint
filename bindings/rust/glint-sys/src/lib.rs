@@ -136,6 +136,15 @@ extern "C" {
         out_frames: *mut c_int,
     ) -> *mut f32;
     pub fn glint_free(p: *mut core::ffi::c_void);
+    // Ogg-Vorbis I decoder (whole-buffer). glint_decode_audio also decodes
+    // Vorbis transparently via the C auto-detect.
+    pub fn glint_vorbis_decode(
+        ogg: *const u8,
+        len: c_int,
+        out_sr: *mut c_int,
+        out_ch: *mut c_int,
+        out_frames: *mut c_int,
+    ) -> *mut f32;
     pub fn glint_decode_audio(
         data: *const u8,
         len: c_int,

@@ -1138,6 +1138,213 @@ static void test_aac_decoder_api() {
     CHECK(out_energy > 1.0, "aac roundtrip produced audible energy");
 }
 
+#include "vorbis_bits.hpp"
+#include "vorbis_decoder.hpp"
+
+// Vorbis identification-header parse (spec §4.2.2): channels / rate /
+// power-of-two blocksizes, framing bit, version gate.
+static void test_vorbis_id_header() {
+    std::printf("[vorbis] identification header parse...\n");
+    // 0x01 "vorbis" + version(0) + ch(2) + rate(44100) + 3x bitrate(0) +
+    // blocksize byte (bs0=2^8=256, bs1=2^11=2048) + framing=1.
+    uint8_t pkt[30] = {
+        0x01, 'v', 'o', 'r', 'b', 'i', 's',
+        0x00, 0x00, 0x00, 0x00,              // version = 0
+        0x02,                                 // channels = 2
+        0x44, 0xAC, 0x00, 0x00,              // sample rate = 44100
+        0x00, 0x00, 0x00, 0x00,              // bitrate max
+        0x00, 0x00, 0x00, 0x00,              // bitrate nominal
+        0x00, 0x00, 0x00, 0x00,              // bitrate minimum
+        0xB8,                                 // blocksizes: 0=8(256),1=11(2048)
+        0x01                                  // framing flag = 1
+    };
+    glint::vorbis::IdHeader h =
+        glint::vorbis::parse_id_header(pkt, sizeof(pkt));
+    CHECK(h.valid, "id header valid");
+    CHECK(h.channels == 2, "id header channels");
+    CHECK(h.sample_rate == 44100, "id header sample rate");
+    CHECK(h.blocksize0 == 256 && h.blocksize1 == 2048, "id header blocksizes");
+
+    // Framing bit clear -> invalid.
+    uint8_t bad = pkt[29];
+    pkt[29] = 0x00;
+    CHECK(!glint::vorbis::parse_id_header(pkt, sizeof(pkt)).valid,
+          "id header rejects framing=0");
+    pkt[29] = bad;
+    // blocksize0 > blocksize1 -> invalid (swap nibbles: 0x8B).
+    pkt[28] = 0x8B;
+    CHECK(!glint::vorbis::parse_id_header(pkt, sizeof(pkt)).valid,
+          "id header rejects bs0 > bs1");
+    // Wrong magic -> invalid.
+    uint8_t p2[30];
+    std::memcpy(p2, pkt, 30);
+    p2[0] = 0x03;
+    CHECK(!glint::vorbis::parse_id_header(p2, sizeof(p2)).valid,
+          "id header rejects wrong packet type");
+}
+
+// LSB-first bit reader (spec §2): values read low bit first; overrun flag.
+static void test_vorbis_bitreader() {
+    std::printf("[vorbis] LSB-first bit reader...\n");
+    uint8_t data[3] = { 0b10110101, 0b00000011, 0x00 };
+    glint::vorbis::BitReader br(data, sizeof(data));
+    CHECK(br.read(1) == 1, "bit 0 (LSB) = 1");
+    CHECK(br.read(2) == 0b10, "next 2 bits");     // bits 2,1 -> value 0b10
+    CHECK(br.read(5) == 0b10110, "next 5 bits");  // high 5 bits of byte0
+    CHECK(br.read(10) == 0b0000000011, "spanning byte1");
+    CHECK(!br.overrun(), "no overrun yet");
+    br.read(20);  // runs off the 3-byte buffer
+    CHECK(br.overrun(), "overrun flagged");
+    CHECK(glint::vorbis::ilog(0) == 0 && glint::vorbis::ilog(1) == 1 &&
+              glint::vorbis::ilog(7) == 3 && glint::vorbis::ilog(8) == 4,
+          "ilog per spec");
+}
+
+// Vorbis codebook: spec §3.2.1 worked-example Huffman tree + §9.2 helpers.
+static void test_vorbis_codebook() {
+    std::printf("[vorbis] codebook huffman + VQ helpers...\n");
+    using glint::vorbis::BitReader;
+    using glint::vorbis::Codebook;
+
+    // float32_unpack (spec §9.2.2): mantissa*2^(exp-788).
+    CHECK(glint::vorbis::float32_unpack((788u << 21) | 1u) == 1.0f,
+          "float32_unpack unit");
+    CHECK(glint::vorbis::float32_unpack((789u << 21) | 1u) == 2.0f,
+          "float32_unpack exp+1");
+    CHECK(glint::vorbis::float32_unpack(0x80000000u | (788u << 21) | 1u) ==
+              -1.0f,
+          "float32_unpack sign");
+    // lookup1_values (spec §9.2.3): greatest r with r^dim <= entries.
+    CHECK(glint::vorbis::lookup1_values(256, 2) == 16, "lookup1 256^(1/2)");
+    CHECK(glint::vorbis::lookup1_values(255, 2) == 15, "lookup1 255");
+    CHECK(glint::vorbis::lookup1_values(48, 3) == 3, "lookup1 48^(1/3)");
+
+    // The spec's example codebook lengths -> known codewords:
+    //   e0:00 e1:0100 e2:0101 e3:0110 e4:0111 e5:10 e6:110 e7:111.
+    Codebook cb;
+    cb.entries = 8;
+    cb.dimensions = 0;
+    cb.lengths = { 2, 4, 4, 4, 4, 2, 3, 3 };
+    CHECK(cb.build_huffman(), "example codebook builds");
+
+    // Decode reads bits low-first; a codeword string "0100" arrives as bits
+    // 0,1,0,0. Pack several codewords back to back and decode in order.
+    // Sequence: e0(00) e5(10) e6(110) e1(0100) e7(111). Codeword strings are
+    // in read order (first character = first bit read; top-down tree path).
+    const int bits[] = { 0, 0,  1, 0,  1, 1, 0,  0, 1, 0, 0,  1, 1, 1 };
+    uint8_t buf[4] = { 0, 0, 0, 0 };
+    int nb = static_cast<int>(sizeof(bits) / sizeof(bits[0]));
+    for (int i = 0; i < nb; i++)
+        if (bits[i]) buf[i >> 3] |= 1u << (i & 7);
+    BitReader br(buf, sizeof(buf));
+    CHECK(cb.decode_scalar(br) == 0, "decode e0 (00)");
+    CHECK(cb.decode_scalar(br) == 5, "decode e5 (10)");
+    CHECK(cb.decode_scalar(br) == 6, "decode e6 (110)");
+    CHECK(cb.decode_scalar(br) == 1, "decode e1 (0100)");
+    CHECK(cb.decode_scalar(br) == 7, "decode e7 (111)");
+
+    // Over-subscribed tree must be rejected (two length-1 + a length-2).
+    Codebook bad;
+    bad.entries = 3;
+    bad.lengths = { 1, 1, 2 };
+    CHECK(!bad.build_huffman(), "over-subscribed codebook rejected");
+}
+
+#include "vorbis_imdct.hpp"
+
+// Fast (N/4-FFT) inverse MDCT must equal the direct O(N^2) reference across
+// every Vorbis block size — proves the fast path is exact before it is the
+// only path in the decoder.
+static void test_vorbis_imdct() {
+    std::printf("[vorbis] fast iMDCT == direct O(N^2)...\n");
+    unsigned seed = 12345;
+    for (int n : {64, 128, 256, 1024, 2048, 8192}) {
+        int M = n / 2;
+        std::vector<float> spec(M), yd(n), yf(n);
+        for (int k = 0; k < M; k++) {
+            seed = seed * 1103515245u + 12345u;
+            spec[k] = ((seed >> 8) & 0xFFFF) / 32768.0f - 1.0f;
+        }
+        glint::vorbis::imdct_direct(spec.data(), yd.data(), n);
+        glint::vorbis::FastImdct fi;
+        fi.init(n);
+        fi.backward(spec.data(), yf.data());
+        double maxabs = 0, maxdiff = 0;
+        for (int i = 0; i < n; i++) {
+            maxabs = std::max(maxabs, (double)std::abs(yd[i]));
+            maxdiff = std::max(maxdiff, (double)std::abs(yd[i] - yf[i]));
+        }
+        CHECK(maxdiff < 1e-3 * (maxabs + 1e-6),
+              "fast iMDCT matches direct reference");
+    }
+}
+
+// Floor 0 (LSP) curve synthesis. No encoder emits floor 0, so the math is
+// cross-checked against an independent reference implementation of spec
+// §6.2.3 (golden values computed in Python).
+static void test_vorbis_floor0() {
+    std::printf("[vorbis] floor 0 (LSP) curve synthesis...\n");
+    const float coef[4] = {0.3f, 0.9f, 1.5f, 2.2f};
+    float out[8] = {0};
+    glint::vorbis::floor0_curve(4, coef, 200, 8, 20, 44100, 256, 8, out);
+    const float golden[8] = {5300.41822f, 0.358472972f, 0.238297387f,
+                             0.212157179f, 0.203069541f, 0.19947903f,
+                             0.197737472f, 0.196927021f};
+    for (int i = 0; i < 8; i++)
+        CHECK(std::abs(out[i] - golden[i]) <= 1e-3 * std::abs(golden[i]) + 1e-6,
+              "floor0 curve matches reference");
+}
+
+#include "vorbis_test_stream.h"
+
+// Full setup-header parse (spec §4.2.4) on a REAL libvorbis stream: all
+// codebooks, floors, residues, mappings, modes must parse and consume the
+// whole setup packet bar the final-byte padding.
+static void test_vorbis_setup() {
+    std::printf("[vorbis] full header + setup parse (real stream)...\n");
+    int ch = 0, rate = 0;
+    size_t used = 0, total = 0;
+    int r = glint::vorbis::debug_parse_headers(
+        kVorbisMono440, kVorbisMono440Len, &ch, &rate, &used, &total);
+    CHECK(r == 0, "setup parses a real libvorbis stream");
+    CHECK(ch == 1 && rate == 44100, "id from real stream");
+    CHECK(total >= used && (total - used) < 8,
+          "setup consumes all but final-byte padding");
+}
+
+// Full audio decode of the embedded 440 Hz mono stream: correct rate/
+// channels, a full frame count, audible energy, and on-pitch (the recovered
+// fundamental period must be ~100.2 samples = 44100/440).
+static void test_vorbis_decode() {
+    std::printf("[vorbis] full audio decode (on-pitch check)...\n");
+    std::vector<float> pcm;
+    int sr = 0, ch = 0;
+    int r = glint::vorbis::decode_ogg(kVorbisMono440, kVorbisMono440Len, pcm,
+                                      sr, ch);
+    CHECK(r == 0, "decode_ogg succeeds");
+    CHECK(sr == 44100 && ch == 1, "decoded rate/channels");
+    CHECK(pcm.size() > 20000 && pcm.size() <= 22050,
+          "decoded ~0.5 s of frames");
+    double energy = 0;
+    for (float x : pcm) energy += (double)x * x;
+    CHECK(energy > 1.0, "decoded audible energy");
+
+    // Autocorrelation over a steady mid segment -> fundamental period.
+    if (pcm.size() > 12000) {
+        int base = 4000, win = 4096;
+        double best = -1e30;
+        int best_lag = 0;
+        for (int lag = 60; lag < 160; lag++) {
+            double s = 0;
+            for (int i = 0; i < win; i++)
+                s += (double)pcm[base + i] * pcm[base + i + lag];
+            if (s > best) { best = s; best_lag = lag; }
+        }
+        CHECK(best_lag >= 98 && best_lag <= 102,
+              "recovered ~440 Hz fundamental period");
+    }
+}
+
 int main() {
     std::printf("=== glint unit tests ===\n\n");
 
@@ -1171,6 +1378,14 @@ int main() {
     test_opus_c_api_roundtrip();
     test_mp3_decoder_api();
     test_aac_decoder_api();
+
+    test_vorbis_bitreader();
+    test_vorbis_id_header();
+    test_vorbis_codebook();
+    test_vorbis_setup();
+    test_vorbis_imdct();
+    test_vorbis_floor0();
+    test_vorbis_decode();
 
     std::printf("\n%d/%d tests passed\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;
