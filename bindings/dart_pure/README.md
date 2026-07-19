@@ -34,7 +34,8 @@ final Uint8List mp3 = mp3EncodeMono(pcm, sampleRate: 44100, bitrate: 128);
 The full MPEG-1 Layer III encode pipeline:
 
 1. 32-band polyphase (subband) analysis
-2. MDCT — long blocks, with alias reduction and frequency inversion
+2. MDCT — long blocks (and opt-in short/transient blocks), with alias reduction
+   and frequency inversion
 3. Rate/distortion quantization loop with a **psychoacoustic masking model**:
    scalefactors are amplified to push quantization noise under the Bark-band
    masking threshold (Schroeder spreading + ATH), with `scalefac_scale` and
@@ -44,15 +45,16 @@ The full MPEG-1 Layer III encode pipeline:
 
 ## Scope & quality
 
-- **Now:** encode mono / stereo / joint(M/S), CBR + VBR (Xing header); DECODE
-  (mono/stereo/joint) — the codec round-trips in pure Dart. Long blocks.
+- **Now:** encode mono / stereo / joint(M/S), CBR + VBR (Xing header), long
+  blocks plus opt-in short/transient blocks (`shortBlocks: true`); DECODE every
+  block type (long/short/mixed/start/stop) — the codec round-trips in pure Dart
+  and decodes any real-world MP3.
 - Benchmarked against glint's own `measure_audio.py` on a speech signal at
   128 kbps mono: **SNR 35.2 dB** (glint 32.1 dB), band 0–1 kHz **40.6 dB**
   (glint 36.3). Raw SNR exceeds the reference; perceptual noise-to-mask (NMR)
   is a touch behind (a Huffman region-optimizer refinement — the next quality
   step). A 200→3000 Hz sweep decodes at 78 dB.
-- **Not yet:** short/transient blocks, AAC/Opus. Follow the
-  repo for progress.
+- **Not yet:** AAC/Opus. Follow the repo for progress.
 
 ## API
 

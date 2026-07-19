@@ -34,6 +34,8 @@ class Mp3GranuleInfo {
     required this.part2Length,
     required this.part23Length,
     required this.regions,
+    this.blockType = 0,
+    this.subblockGain = const [0, 0, 0],
   });
 
   final Int16List ix;
@@ -46,6 +48,8 @@ class Mp3GranuleInfo {
   int part2Length; // scalefactor bits
   int part23Length; // scalefactor + Huffman bits
   Mp3HuffRegions regions;
+  int blockType; // 0 long, 1 start, 2 short, 3 stop
+  List<int> subblockGain; // short-block per-window gain (3)
 
   Mp3GranuleInfo copy() => Mp3GranuleInfo(
         ix: Int16List.fromList(ix),

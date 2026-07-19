@@ -18,7 +18,9 @@
 /// (scalefactors under a masking threshold) → Huffman coding → CBR frame
 /// assembly. Output is a standard `.mp3` that any decoder (ffmpeg, etc.) plays.
 ///
-/// Current scope: mono, constant-bitrate, long blocks. See the README for the
+/// Scope: mono + stereo + joint (M/S) stereo, CBR + VBR (Xing header), long
+/// blocks plus opt-in short/transient blocks (`shortBlocks: true`), and a full
+/// pure-Dart decoder ([mp3Decode]) for every block type. See the README for the
 /// quality benchmark against the reference C++ encoder.
 library;
 

@@ -16,17 +16,31 @@ import 'mp3_granule.dart';
 import 'mp3_mdct.dart';
 import 'mp3_reservoir.dart';
 import 'mp3_shape.dart';
+import 'mp3_short.dart';
 import 'mp3_subband.dart';
 
 /// Encode mono [pcm] (−1..1) to an MPEG-1 Layer III (mono, CBR) `.mp3`.
 /// [bitrate] kbps must be a valid MPEG-1 rate; [sampleRate] one of 44100/48000/
 /// 32000.
+/// [shortBlocks] (opt-in, mono only, **EXPERIMENTAL**) enables transient/short-
+/// block switching to cut pre-echo on percussive content. Default off keeps the
+/// standard long-block path (byte-identical to a plain encode). The forward
+/// short MDCT + reorder are verified against glint (4.9e-16), but the
+/// long↔short window-switching TRANSITION path still reconstructs poorly
+/// (~0.8 dB) — do not enable in production yet.
 Uint8List mp3EncodeMono(
   Float64List pcm, {
   int sampleRate = 44100,
   int bitrate = 128,
+  bool shortBlocks = false,
 }) =>
-    _mp3Encode([pcm], sampleRate, bitrate, Mp3ChannelMode.mono);
+    _mp3Encode(
+      [pcm],
+      sampleRate,
+      bitrate,
+      Mp3ChannelMode.mono,
+      shortBlocks: shortBlocks,
+    );
 
 /// Encode stereo [left]/[right] (−1..1) to an MPEG-1 Layer III (stereo, CBR)
 /// `.mp3`. Channels may differ in length (the shorter is zero-padded).
@@ -51,6 +65,13 @@ Uint8List mp3EncodeJointStereo(
 
 /// 1/√2, the mid/side scale factor (glint `kInvSqrt2`).
 const double _kInvSqrt2 = 0.7071067811865476;
+
+/// Test hook: if non-null, each encoded granule appends
+/// `[blockType, bigValues, globalGain, part23Length, nonzeroIx]`.
+List<List<int>>? mp3EncoderDebugLog;
+
+/// Test hook: full ix per granule.
+List<Int16List>? mp3EncoderIxLog;
 
 /// VBR target global_gain per quality (glint `vbr_target_gain`): 0 = best
 /// (finest), 9 = smallest. Each step is ~1.1 dB of quantization noise.
@@ -109,6 +130,7 @@ Uint8List _mp3Encode(
   int bitrate,
   Mp3ChannelMode mode, {
   int? vbrQuality,
+  bool shortBlocks = false,
 }) {
   final srIndex = mp3SampleRateIndex(sampleRate);
   if (srIndex < 0) {
@@ -148,6 +170,11 @@ Uint8List _mp3Encode(
   final reservoir = Mp3ReservoirStream(511);
   final frameOffsets =
       <int>[]; // VBR: byte offset of each audio frame (for TOC)
+  // Opt-in transient/short blocks (mono only): scheduler + per-granule buffers.
+  final useShort = shortBlocks && nch == 1;
+  final scheduler = useShort ? Mp3BlockScheduler() : null;
+  final shortBuf = Float64List(576);
+  final subs = [Float64List(576), Float64List(576)];
 
   final brBps = bitrate * 1000;
   final frameBase = 144 * brBps ~/ sampleRate;
@@ -176,61 +203,130 @@ Uint8List _mp3Encode(
 
     // Quantize 2 granules x nch channels.
     final gr = List.generate(2, (_) => <Mp3GranuleInfo>[]);
-    for (var g = 0; g < 2; g++) {
-      // 1. Raw subband analysis for every channel (no frequency inversion yet).
-      for (var ch = 0; ch < nch; ch++) {
-        final pcm = channels[ch];
+    if (useShort) {
+      // Mono transient path: freq-inverted subband + energy for both granules,
+      // schedule block types, then MDCT+quantize per type (in granule order so
+      // the MDCT overlap chain stays consistent).
+      final energy = [0.0, 0.0];
+      for (var g = 0; g < 2; g++) {
+        var e = 0.0;
         for (var ts = 0; ts < 18; ts++) {
           for (var i = 0; i < 32; i++) {
             final idx = pos + g * 576 + ts * 32 + i;
-            slot[i] = idx < pcm.length ? pcm[idx] : 0.0;
+            slot[i] = idx < channels[0].length ? channels[0][idx] : 0.0;
           }
-          sb[ch].processSlot(slot, so);
+          sb[0].processSlot(slot, so);
           for (var b = 0; b < 32; b++) {
-            rawSub[ch][b * 18 + ts] = so[b];
+            final v = so[b];
+            e += v * v;
+            subs[g][b * 18 + ts] = ((b & 1) != 0 && (ts & 1) != 0) ? -v : v;
           }
         }
+        energy[g] = e;
       }
-      // 2. M/S transform on the subband samples (mid/side). MDCT is linear, so
-      //    this equals the decoder's frequency-line M/S; mode_ext = 2.
-      if (joint) {
-        for (var k = 0; k < 576; k++) {
-          final l = rawSub[0][k];
-          final r = rawSub[1][k];
-          rawSub[0][k] = (l + r) * _kInvSqrt2;
-          rawSub[1][k] = (l - r) * _kInvSqrt2;
+      final types = scheduler!.schedule(energy);
+      for (var g = 0; g < 2; g++) {
+        final bt = types[g];
+        if (bt == 2) {
+          mdct[0].processShort(subs[g], shortBuf);
+          final flat = mp3ReorderShort(shortBuf, srIndex);
+          gr[g].add(mp3QuantizeGranuleWs(flat, availPer, srIndex, 2));
+        } else if (bt == 1 || bt == 3) {
+          mdct[0].process(subs[g], mdctBuf, blockType: bt);
+          mdct[0].aliasReduce(mdctBuf);
+          gr[g].add(mp3QuantizeGranuleWs(mdctBuf, availPer, srIndex, bt));
+        } else {
+          mdct[0].process(subs[g], mdctBuf);
+          mdct[0].aliasReduce(mdctBuf);
+          gr[g].add(
+            mp3QuantizeGranule(
+              mdctBuf,
+              availPer,
+              srIndex,
+              gainFloor: gainFloor,
+              vbrShaping: vbr,
+            ),
+          );
         }
       }
-      // 3. Per channel: frequency inversion → MDCT → quantize. The M/S SIDE
-      //    channel (ch 1) is not psy-shaped (its noise leaks into L/R).
-      for (var ch = 0; ch < nch; ch++) {
-        for (var b = 0; b < 32; b++) {
+      // fall through to frame assembly below
+    } else {
+      for (var g = 0; g < 2; g++) {
+        // 1. Raw subband analysis for every channel (no frequency inversion yet).
+        for (var ch = 0; ch < nch; ch++) {
+          final pcm = channels[ch];
           for (var ts = 0; ts < 18; ts++) {
-            final v = rawSub[ch][b * 18 + ts];
-            subband[b * 18 + ts] = ((b & 1) != 0 && (ts & 1) != 0) ? -v : v;
+            for (var i = 0; i < 32; i++) {
+              final idx = pos + g * 576 + ts * 32 + i;
+              slot[i] = idx < pcm.length ? pcm[idx] : 0.0;
+            }
+            sb[ch].processSlot(slot, so);
+            for (var b = 0; b < 32; b++) {
+              rawSub[ch][b * 18 + ts] = so[b];
+            }
           }
         }
-        mdct[ch].process(subband, mdctBuf);
-        mdct[ch].aliasReduce(mdctBuf);
-        gr[g].add(
-          mp3QuantizeGranule(
-            mdctBuf,
-            availPer,
-            srIndex,
-            gainFloor: gainFloor,
-            vbrShaping: vbr,
-            allowPsy: !(joint && ch == 1),
-          ),
-        );
+        // 2. M/S transform on the subband samples (mid/side). MDCT is linear, so
+        //    this equals the decoder's frequency-line M/S; mode_ext = 2.
+        if (joint) {
+          for (var k = 0; k < 576; k++) {
+            final l = rawSub[0][k];
+            final r = rawSub[1][k];
+            rawSub[0][k] = (l + r) * _kInvSqrt2;
+            rawSub[1][k] = (l - r) * _kInvSqrt2;
+          }
+        }
+        // 3. Per channel: frequency inversion → MDCT → quantize. The M/S SIDE
+        //    channel (ch 1) is not psy-shaped (its noise leaks into L/R).
+        for (var ch = 0; ch < nch; ch++) {
+          for (var b = 0; b < 32; b++) {
+            for (var ts = 0; ts < 18; ts++) {
+              final v = rawSub[ch][b * 18 + ts];
+              subband[b * 18 + ts] = ((b & 1) != 0 && (ts & 1) != 0) ? -v : v;
+            }
+          }
+          mdct[ch].process(subband, mdctBuf);
+          mdct[ch].aliasReduce(mdctBuf);
+          gr[g].add(
+            mp3QuantizeGranule(
+              mdctBuf,
+              availPer,
+              srIndex,
+              gainFloor: gainFloor,
+              vbrShaping: vbr,
+              allowPsy: !(joint && ch == 1),
+            ),
+          );
+        }
       }
     }
 
-    // Main data (byte-aligned): per granule, per channel, scalefactors + Huffman.
+    // Main data (byte-aligned): per granule, per channel — scalefactors +
+    // Huffman (long) or the window-switching Huffman layout (short blocks).
     final md = Mp3BitWriter();
     for (var g = 0; g < 2; g++) {
       for (var ch = 0; ch < nch; ch++) {
-        _writeScalefactors(md, gr[g][ch]);
-        mp3EncodeGranule(md, gr[g][ch].ix, gr[g][ch].regions, srIndex);
+        final gi = gr[g][ch];
+        if (mp3EncoderDebugLog != null) {
+          var nz = 0;
+          for (var i = 0; i < 576; i++) {
+            if (gi.ix[i] != 0) nz++;
+          }
+          mp3EncoderDebugLog!.add([
+            gi.blockType,
+            gi.regions.bigValues,
+            gi.globalGain,
+            gi.part23Length,
+            nz,
+          ]);
+        }
+        mp3EncoderIxLog?.add(Int16List.fromList(gi.ix));
+        if (gi.blockType != 0) {
+          mp3EncodeGranuleWs(md, gi.ix, gi.regions);
+        } else {
+          _writeScalefactors(md, gi);
+          mp3EncodeGranule(md, gi.ix, gi.regions, srIndex);
+        }
       }
     }
     md.byteAlign();
@@ -411,13 +507,29 @@ void _writeGranuleSideInfo(Mp3BitWriter w, Mp3GranuleInfo gi) {
     ..writeBits(gi.part23Length, 12)
     ..writeBits(r.bigValues, 9)
     ..writeBits(gi.globalGain, 8)
-    ..writeBits(gi.scalefacCompress, 4)
-    ..writeBits(0, 1) // window_switching_flag = 0
-    ..writeBits(r.tableSelect[0], 5)
-    ..writeBits(r.tableSelect[1], 5)
-    ..writeBits(r.tableSelect[2], 5)
-    ..writeBits(r.region0Count, 4)
-    ..writeBits(r.region1Count, 3)
+    ..writeBits(gi.scalefacCompress, 4);
+  if (gi.blockType != 0) {
+    // Window-switching layout (block_type 1/2/3): 2 tables + subblock_gain,
+    // implied region boundaries (decoder hardwires region0 = line 36).
+    w
+      ..writeBits(1, 1) // window_switching_flag
+      ..writeBits(gi.blockType, 2)
+      ..writeBits(0, 1) // mixed_block_flag
+      ..writeBits(r.tableSelect[0], 5)
+      ..writeBits(r.tableSelect[1], 5)
+      ..writeBits(gi.subblockGain[0], 3)
+      ..writeBits(gi.subblockGain[1], 3)
+      ..writeBits(gi.subblockGain[2], 3);
+  } else {
+    w
+      ..writeBits(0, 1) // window_switching_flag = 0
+      ..writeBits(r.tableSelect[0], 5)
+      ..writeBits(r.tableSelect[1], 5)
+      ..writeBits(r.tableSelect[2], 5)
+      ..writeBits(r.region0Count, 4)
+      ..writeBits(r.region1Count, 3);
+  }
+  w
     ..writeBits(gi.preflag, 1)
     ..writeBits(gi.scalefacScale, 1)
     ..writeBits(r.count1Table, 1);

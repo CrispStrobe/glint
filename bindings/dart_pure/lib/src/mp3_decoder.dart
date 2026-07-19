@@ -1,8 +1,9 @@
 // lib/core/audio/mp3/mp3_decoder.dart
 //
 // Pure-Dart MP3 (MPEG-1 Layer III) DECODER — the inverse of mp3_encoder.dart,
-// ported from glint's mp3_decoder.cpp. Scope matches our encoder: MPEG-1, long
-// blocks, mono / stereo / joint(M/S). Pipeline per granule: parse side info →
+// ported from glint's mp3_decoder.cpp. Full MPEG-1 Layer III: long, short,
+// mixed and start/stop blocks; mono / stereo / joint(M/S). Pipeline per granule:
+// parse side info →
 // reservoir reassembly (main_data_begin) → scalefactors → Huffman → requantize
 // → M/S → antialias → IMDCT (36-pt) + window + overlap + frequency inversion →
 // synthesis polyphase filterbank → PCM. Pure Dart => native + web.
@@ -14,8 +15,7 @@ import 'mp3_frame.dart';
 import 'mp3_granule.dart' show kMp3SfbLong;
 import 'mp3_huffman.dart';
 import 'mp3_huffman_tables.dart';
-import 'mp3_quantize.dart'
-    show kMp3Preemphasis;
+import 'mp3_quantize.dart' show kMp3Preemphasis;
 import 'mp3_window.dart';
 
 /// Decoded PCM audio from an MP3: mono/interleaved [samples] in −1..1.
@@ -30,6 +30,13 @@ class Mp3Pcm {
 
 /// Decode a full MPEG-1 Layer III [mp3] stream (mono/stereo/joint, long blocks).
 Mp3Pcm mp3Decode(Uint8List mp3) => _Mp3Decoder().decode(mp3);
+
+/// Test hook: if non-null, each decoded granule appends
+/// `[blockType, bigValues, globalGain, part23Length, nonzeroIx]`.
+List<List<int>>? mp3DecoderDebugLog;
+
+/// Test hook: full ix per granule.
+List<Int16List>? mp3DecoderIxLog;
 
 const List<int> _kSlen1 = [0, 0, 0, 0, 3, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4];
 const List<int> _kSlen2 = [0, 1, 2, 3, 0, 1, 2, 3, 1, 2, 3, 1, 2, 3, 2, 3];
@@ -47,9 +54,8 @@ const List<double> _kCi = [
 ];
 
 class _BitReader {
-  _BitReader(this.b) : limit = -1;
+  _BitReader(this.b);
   final Uint8List b;
-  final int limit; // byte length available (-1 = all)
   int pos = 0; // bit cursor
 
   int get(int n) {
@@ -86,6 +92,7 @@ class _Mp3Decoder {
   late List<Int16List> _ix; // [ch][576] quantized lines
   late List<Float64List> _xr; // [ch][576] dequantized
   late List<List<int>> _scalefacL; // [ch][23]
+  late List<List<List<int>>> _scalefacS; // [ch][13][3] short-block sfs
 
   void _initChannels(int nch) {
     _overlap = [for (var c = 0; c < nch; c++) Float64List(576)];
@@ -94,6 +101,10 @@ class _Mp3Decoder {
     _ix = [for (var c = 0; c < nch; c++) Int16List(576)];
     _xr = [for (var c = 0; c < nch; c++) Float64List(576)];
     _scalefacL = [for (var c = 0; c < nch; c++) List<int>.filled(23, 0)];
+    _scalefacS = [
+      for (var c = 0; c < nch; c++)
+        [for (var b = 0; b < 13; b++) List<int>.filled(3, 0)],
+    ];
   }
 
   Mp3Pcm decode(Uint8List mp3) {
@@ -212,16 +223,26 @@ class _Mp3Decoder {
         final part2Start = br.pos;
         _readScalefactors(br, g, ch, gr, scfsi[ch]);
         _readHuffman(br, g, ch, sfb, part2Start);
+        mp3DecoderIxLog?.add(Int16List.fromList(_ix[ch]));
+        if (mp3DecoderDebugLog != null) {
+          var nz = 0;
+          for (var i = 0; i < 576; i++) {
+            if (_ix[ch][i] != 0) nz++;
+          }
+          mp3DecoderDebugLog!.add(
+            [g.blockType, g.bigValues, g.globalGain, g.part23Length, nz],
+          );
+        }
       }
       for (var ch = 0; ch < nch; ch++) {
-        _requantize(gi[gr][ch], ch, sfb);
+        _requantize(gi[gr][ch], ch, sfb, srIdx);
       }
       if (nch == 2 && mode == 1 && (modeExt & 2) != 0) {
         _msStereo(); // joint M/S → L/R
       }
       for (var ch = 0; ch < nch; ch++) {
-        _antialias(ch);
-        _imdctGranule(ch);
+        _antialias(gi[gr][ch], ch);
+        _imdctGranule(gi[gr][ch], ch);
         _synthGranule(ch, gr, pcm, nch);
       }
     }
@@ -234,20 +255,15 @@ class _Mp3Decoder {
     g.bigValues = si.get(9);
     g.globalGain = si.get(8);
     g.scalefacCompress = si.get(4);
-    final windowSwitching = si.get1();
-    if (windowSwitching == 1) {
-      // Short/window-switching blocks are outside our long-only scope; read the
-      // fields to stay aligned, but decode as a (silent) long block.
-      si.get(2); // block_type
-      si.get1(); // mixed
-      si.get(5);
-      si.get(5);
-      for (var w = 0; w < 3; w++) {
-        si.get(3);
-      }
-      g.tableSelect = [0, 0, 0];
-      g.region0Count = 7;
-      g.region1Count = 13;
+    g.windowSwitching = si.get1();
+    if (g.windowSwitching == 1) {
+      g.blockType = si.get(2);
+      g.mixedBlock = si.get1();
+      g.tableSelect = [si.get(5), si.get(5), 0];
+      g.subblockGain = [si.get(3), si.get(3), si.get(3)];
+      // Implied region boundaries (ISO): region0 ends at line 36.
+      g.region0Count = 36; // interpreted as a LINE index in the huffman reader
+      g.region1Count = 576;
     } else {
       g.tableSelect = [si.get(5), si.get(5), si.get(5)];
       g.region0Count = si.get(4);
@@ -269,6 +285,32 @@ class _Mp3Decoder {
     final s1 = _kSlen1[g.scalefacCompress];
     final s2 = _kSlen2[g.scalefacCompress];
     final sf = _scalefacL[ch];
+    final sfs = _scalefacS[ch];
+    if (g.windowSwitching == 1 && g.blockType == 2) {
+      if (g.mixedBlock == 1) {
+        for (var b = 0; b < 8; b++) {
+          sf[b] = s1 > 0 ? br.get(s1) : 0;
+        }
+        for (var b = 3; b < 6; b++) {
+          for (var w = 0; w < 3; w++) {
+            sfs[b][w] = s1 > 0 ? br.get(s1) : 0;
+          }
+        }
+      } else {
+        for (var b = 0; b < 6; b++) {
+          for (var w = 0; w < 3; w++) {
+            sfs[b][w] = s1 > 0 ? br.get(s1) : 0;
+          }
+        }
+      }
+      for (var b = 6; b < 12; b++) {
+        for (var w = 0; w < 3; w++) {
+          sfs[b][w] = s2 > 0 ? br.get(s2) : 0;
+        }
+      }
+      sfs[12][0] = sfs[12][1] = sfs[12][2] = 0;
+      return;
+    }
     for (var grp = 0; grp < 4; grp++) {
       final slen = grp < 2 ? s1 : s2;
       if (gr == 1 && scfsi[grp] == 1) continue; // reuse granule 0's
@@ -292,11 +334,17 @@ class _Mp3Decoder {
       ix[i] = 0;
     }
     final part23End = part2Start + g.part23Length;
-    var r0 = g.region0Count + 1;
-    var r1 = r0 + g.region1Count + 1;
-    if (r0 > 22) r0 = 22;
-    if (r1 > 22) r1 = 22;
-    final regEnd = [sfb[r0], sfb[r1], 576];
+    final List<int> regEnd;
+    if (g.windowSwitching == 1) {
+      // Window-switching: region boundaries are implied LINE indices.
+      regEnd = [g.region0Count, g.region1Count, 576];
+    } else {
+      var r0 = g.region0Count + 1;
+      var r1 = r0 + g.region1Count + 1;
+      if (r0 > 22) r0 = 22;
+      if (r1 > 22) r1 = 22;
+      regEnd = [sfb[r0], sfb[r1], 576];
+    }
     final nlines = g.bigValues * 2;
     var i = 0;
     for (var r = 0; r < 3 && i < nlines; r++) {
@@ -370,12 +418,18 @@ class _Mp3Decoder {
     return -1;
   }
 
-  void _requantize(_Gran g, int ch, List<int> sfb) {
+  void _requantize(_Gran g, int ch, List<int> sfb, int srIdx) {
     final ix = _ix[ch];
     final xr = _xr[ch];
-    final sf = _scalefacL[ch];
     final global = math.pow(2.0, 0.25 * (g.globalGain - 210)).toDouble();
     final sfMult = g.scalefacScale == 1 ? 1.0 : 0.5;
+
+    if (g.windowSwitching == 1 && g.blockType == 2) {
+      _requantizeShort(g, ch, srIdx, global, sfMult);
+      return;
+    }
+    // Long block.
+    final sf = _scalefacL[ch];
     var band = 0;
     for (var i = 0; i < 576; i++) {
       while (band < 21 && i >= sfb[band + 1]) {
@@ -390,6 +444,77 @@ class _Mp3Decoder {
     }
   }
 
+  /// Short (or mixed) block requantize + reorder from the coded
+  /// `[sfb][window][line]` order to the `[line-triplet]` order the IMDCT wants.
+  void _requantizeShort(
+    _Gran g,
+    int ch,
+    int srIdx,
+    double global,
+    double sfMult,
+  ) {
+    final ix = _ix[ch];
+    final xr = _xr[ch];
+    final sfl = _scalefacL[ch];
+    final sfs = _scalefacS[ch];
+    final sfbL = kMp3SfbLong[srIdx];
+    final sfbS = _kSfbShort[srIdx];
+
+    var i = 0;
+    // Mixed block: first 36 lines are long bands (0..7).
+    if (g.mixedBlock == 1) {
+      var band = 0;
+      while (i < 36 && band < 21) {
+        final end = sfbL[band + 1];
+        final pre = g.preflag == 1 ? kMp3Preemphasis[band] : 0;
+        final m =
+            global * math.pow(2.0, -sfMult * (sfl[band] + pre)).toDouble();
+        for (; i < end && i < 36; i++) {
+          final a = ix[i];
+          final v = math.pow(a.abs(), 4.0 / 3.0).toDouble();
+          xr[i] = (a < 0 ? -v : v) * m;
+        }
+        band++;
+      }
+    }
+    // Short region.
+    var band = g.mixedBlock == 1 ? 3 : 0;
+    i = g.mixedBlock == 1 ? 36 : 0;
+    for (; band < 13 && i < 576; band++) {
+      final width = sfbS[band + 1] - sfbS[band];
+      for (var w = 0; w < 3; w++) {
+        final m = global *
+            math
+                .pow(2.0, -2.0 * g.subblockGain[w] - sfMult * sfs[band][w])
+                .toDouble();
+        for (var k = 0; k < width && i < 576; k++, i++) {
+          final a = ix[i];
+          final v = math.pow(a.abs(), 4.0 / 3.0).toDouble();
+          xr[i] = (a < 0 ? -v : v) * m;
+        }
+      }
+    }
+    for (; i < 576; i++) {
+      xr[i] = 0.0;
+    }
+    // Reorder [sfb][window][line] → [b0 + 3k + w].
+    final tmp = Float64List.fromList(xr);
+    band = g.mixedBlock == 1 ? 3 : 0;
+    var src = g.mixedBlock == 1 ? 36 : 0;
+    for (; band < 13; band++) {
+      final b0 = sfbS[band] * 3;
+      final width = sfbS[band + 1] - sfbS[band];
+      if (b0 >= 576) break;
+      for (var w = 0; w < 3; w++) {
+        for (var k = 0; k < width; k++, src++) {
+          if (b0 + 3 * k + w < 576 && src < 576) {
+            xr[b0 + 3 * k + w] = tmp[src];
+          }
+        }
+      }
+    }
+  }
+
   void _msStereo() {
     final l = _xr[0];
     final r = _xr[1];
@@ -401,9 +526,14 @@ class _Mp3Decoder {
     }
   }
 
-  void _antialias(int ch) {
+  void _antialias(_Gran g, int ch) {
+    // Short blocks skip antialias (mixed blocks alias only their 2 long sbs).
+    var sblimit = 32;
+    if (g.windowSwitching == 1 && g.blockType == 2) {
+      sblimit = g.mixedBlock == 1 ? 2 : 0;
+    }
     final xr = _xr[ch];
-    for (var sb = 1; sb < 32; sb++) {
+    for (var sb = 1; sb < sblimit; sb++) {
       for (var i = 0; i < 8; i++) {
         final cs = 1.0 / math.sqrt(1.0 + _kCi[i] * _kCi[i]);
         final ca = _kCi[i] * cs;
@@ -415,19 +545,43 @@ class _Mp3Decoder {
     }
   }
 
-  void _imdctGranule(int ch) {
+  void _imdctGranule(_Gran g, int ch) {
     final xr = _xr[ch];
     final overlap = _overlap[ch];
     final xIn = Float64List(18);
     final out = Float64List(36);
+    final xs = Float64List(6);
+    final os = Float64List(12);
     for (var sb = 0; sb < 32; sb++) {
-      for (var k = 0; k < 18; k++) {
-        xIn[k] = xr[sb * 18 + k];
+      // Effective block type for this subband (mixed: sbs 0..1 stay long).
+      var bt = g.windowSwitching == 1 ? g.blockType : 0;
+      if (bt == 2 && g.mixedBlock == 1 && sb < 2) bt = 0;
+
+      if (bt == 2) {
+        // Three short IMDCTs, windowed and overlapped at +6 steps.
+        for (var k = 0; k < 36; k++) {
+          out[k] = 0.0;
+        }
+        for (var w = 0; w < 3; w++) {
+          for (var k = 0; k < 6; k++) {
+            xs[k] = xr[sb * 18 + 3 * k + w];
+          }
+          _imdct12(xs, os);
+          for (var k = 0; k < 12; k++) {
+            out[6 + 6 * w + k] += os[k] * _winShort(k);
+          }
+        }
+      } else {
+        for (var k = 0; k < 18; k++) {
+          xIn[k] = xr[sb * 18 + k];
+        }
+        _imdct36(xIn, out);
+        for (var k = 0; k < 36; k++) {
+          out[k] *=
+              bt == 1 ? _winStart(k) : (bt == 3 ? _winStop(k) : _winLong(k));
+        }
       }
-      _imdct36(xIn, out);
-      for (var k = 0; k < 36; k++) {
-        out[k] *= _winLong(k);
-      }
+
       for (var k = 0; k < 18; k++) {
         final v = out[k] + overlap[sb * 18 + k];
         overlap[sb * 18 + k] = out[18 + k];
@@ -468,6 +622,22 @@ class _Mp3Decoder {
 }
 
 double _winLong(int i) => math.sin(math.pi / 36.0 * (i + 0.5));
+double _winShort(int i) => math.sin(math.pi / 12.0 * (i + 0.5));
+
+/// Synthesis window for a start(1) / stop(3) transition block, index 0..35.
+double _winStart(int i) {
+  if (i < 18) return _winLong(i);
+  if (i < 24) return 1.0;
+  if (i < 30) return _winShort(i - 18);
+  return 0.0;
+}
+
+double _winStop(int i) {
+  if (i < 6) return 0.0;
+  if (i < 12) return _winShort(i - 6);
+  if (i < 18) return 1.0;
+  return _winLong(i);
+}
 
 /// 36-point IMDCT: `x[i] = Σ_k X[k]·cos(π/72·(2i+1+18)(2k+1))`.
 void _imdct36(Float64List x, Float64List out) {
@@ -480,6 +650,24 @@ void _imdct36(Float64List x, Float64List out) {
   }
 }
 
+/// 12-point IMDCT for one short window: `x[i]=Σ_k X[k]·cos(π/24·(2i+7)(2k+1))`.
+void _imdct12(Float64List x, Float64List out) {
+  for (var i = 0; i < 12; i++) {
+    var s = 0.0;
+    for (var k = 0; k < 6; k++) {
+      s += x[k] * math.cos(math.pi / 24.0 * (2 * i + 1 + 6) * (2 * k + 1));
+    }
+    out[i] = s;
+  }
+}
+
+/// MPEG-1 short-block sfb boundaries (per window, 0..192), by sr index.
+const List<List<int>> _kSfbShort = [
+  [0, 4, 8, 12, 16, 22, 30, 40, 52, 66, 84, 106, 136, 192], // 44100
+  [0, 4, 8, 12, 16, 22, 28, 38, 50, 64, 80, 100, 126, 192], // 48000
+  [0, 4, 8, 12, 16, 22, 30, 42, 58, 78, 104, 138, 180, 192], // 32000
+];
+
 class _Gran {
   int part23Length = 0;
   int bigValues = 0;
@@ -491,4 +679,8 @@ class _Gran {
   int preflag = 0;
   int scalefacScale = 0;
   int count1Table = 0;
+  int windowSwitching = 0;
+  int blockType = 0; // 0 long, 1 start, 2 short, 3 stop
+  int mixedBlock = 0;
+  List<int> subblockGain = const [0, 0, 0];
 }

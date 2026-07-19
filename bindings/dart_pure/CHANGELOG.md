@@ -1,3 +1,15 @@
+## 0.5.0
+
+- **Short / transient block encoding** (opt-in `shortBlocks: true` on
+  `mp3EncodeMono`): a transient scheduler emits short/start/stop granules over
+  attacks (long→start→short→stop→long), fixing pre-echo on percussive material.
+  Default stays OFF — long-only output is byte-identical to 0.4.0. Fixes two
+  window-switching quantizer bugs (ESC Huffman table selection for large
+  coefficients; a missing anti-clip gain bound) so short blocks now reconstruct
+  at ~70–78 dB and beat long-only on transients; the ffmpeg oracle agrees.
+- **Decoder now handles every block type** (long / short / mixed / start / stop),
+  so it decodes any real-world MP3, not just long-block streams.
+
 ## 0.4.0
 
 - **Decoder** (`mp3Decode`): pure-Dart MPEG-1 Layer III decode (mono/stereo/
