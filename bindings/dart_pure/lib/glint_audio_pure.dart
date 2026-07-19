@@ -23,7 +23,12 @@
 library;
 
 export 'src/mp3_encoder.dart'
-    show mp3EncodeMono, mp3EncodeStereo, mp3EncodeMonoVbr, mp3EncodeStereoVbr;
+    show
+        mp3EncodeMono,
+        mp3EncodeStereo,
+        mp3EncodeJointStereo,
+        mp3EncodeMonoVbr,
+        mp3EncodeStereoVbr;
 export 'src/mp3_frame.dart'
     show
         kMp3Bitrates,
@@ -31,4 +36,5 @@ export 'src/mp3_frame.dart'
         kMp3SamplesPerFrame,
         Mp3ChannelMode,
         mp3FrameSize;
+export 'src/mp3_decoder.dart' show mp3Decode, Mp3Pcm;
 export 'src/wav_io.dart' show WavData, readWavPcm16, wavToMonoFloat;

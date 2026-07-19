@@ -38,6 +38,20 @@ Uint8List mp3EncodeStereo(
 }) =>
     _mp3Encode([left, right], sampleRate, bitrate, Mp3ChannelMode.stereo);
 
+/// Encode **joint (mid/side) stereo** — usually smaller/cleaner than plain
+/// stereo for correlated material, since the side channel of centred content
+/// needs far fewer bits. Decoders reconstruct L/R transparently.
+Uint8List mp3EncodeJointStereo(
+  Float64List left,
+  Float64List right, {
+  int sampleRate = 44100,
+  int bitrate = 128,
+}) =>
+    _mp3Encode([left, right], sampleRate, bitrate, Mp3ChannelMode.jointStereo);
+
+/// 1/√2, the mid/side scale factor (glint `kInvSqrt2`).
+const double _kInvSqrt2 = 0.7071067811865476;
+
 /// VBR target global_gain per quality (glint `vbr_target_gain`): 0 = best
 /// (finest), 9 = smallest. Each step is ~1.1 dB of quantization noise.
 const List<int> _kVbrTargetGain = [
@@ -106,6 +120,9 @@ Uint8List _mp3Encode(
   final nch = channels.length;
   // MPEG-1 side info: 17 bytes mono, 32 bytes stereo.
   final sideInfoBytes = nch == 1 ? 17 : 32;
+  // Joint (M/S) stereo: transform L/R subbands to mid/side; mode_ext = 2.
+  final joint = mode == Mp3ChannelMode.jointStereo && nch == 2;
+  final modeExt = joint ? 2 : 0;
   final vbr = vbrQuality != null;
   final gainFloor = vbr ? _kVbrTargetGain[vbrQuality.clamp(0, 9)] : 0;
   // VBR quantizes against the largest possible frame; the gain floor sets the
@@ -118,6 +135,9 @@ Uint8List _mp3Encode(
 
   final sb = [for (var c = 0; c < nch; c++) Mp3SubbandAnalysis()];
   final mdct = [for (var c = 0; c < nch; c++) Mp3Mdct()];
+  // Raw (pre-frequency-inversion) subband per channel, held so M/S can combine
+  // both channels of a granule before the MDCT.
+  final rawSub = [for (var c = 0; c < nch; c++) Float64List(576)];
   final subband = Float64List(576);
   final mdctBuf = Float64List(576);
   final slot = Float64List(32);
@@ -157,6 +177,7 @@ Uint8List _mp3Encode(
     // Quantize 2 granules x nch channels.
     final gr = List.generate(2, (_) => <Mp3GranuleInfo>[]);
     for (var g = 0; g < 2; g++) {
+      // 1. Raw subband analysis for every channel (no frequency inversion yet).
       for (var ch = 0; ch < nch; ch++) {
         final pcm = channels[ch];
         for (var ts = 0; ts < 18; ts++) {
@@ -166,10 +187,26 @@ Uint8List _mp3Encode(
           }
           sb[ch].processSlot(slot, so);
           for (var b = 0; b < 32; b++) {
-            // MPEG frequency inversion: negate odd subbands at odd time slots
-            // (see the localization note in git history — without it the
-            // decoder reconstructs odd subbands spectrally flipped).
-            final v = so[b];
+            rawSub[ch][b * 18 + ts] = so[b];
+          }
+        }
+      }
+      // 2. M/S transform on the subband samples (mid/side). MDCT is linear, so
+      //    this equals the decoder's frequency-line M/S; mode_ext = 2.
+      if (joint) {
+        for (var k = 0; k < 576; k++) {
+          final l = rawSub[0][k];
+          final r = rawSub[1][k];
+          rawSub[0][k] = (l + r) * _kInvSqrt2;
+          rawSub[1][k] = (l - r) * _kInvSqrt2;
+        }
+      }
+      // 3. Per channel: frequency inversion → MDCT → quantize. The M/S SIDE
+      //    channel (ch 1) is not psy-shaped (its noise leaks into L/R).
+      for (var ch = 0; ch < nch; ch++) {
+        for (var b = 0; b < 32; b++) {
+          for (var ts = 0; ts < 18; ts++) {
+            final v = rawSub[ch][b * 18 + ts];
             subband[b * 18 + ts] = ((b & 1) != 0 && (ts & 1) != 0) ? -v : v;
           }
         }
@@ -182,6 +219,7 @@ Uint8List _mp3Encode(
             srIndex,
             gainFloor: gainFloor,
             vbrShaping: vbr,
+            allowPsy: !(joint && ch == 1),
           ),
         );
       }
@@ -210,7 +248,7 @@ Uint8List _mp3Encode(
 
     // Header + side info carrying main_data_begin.
     final si = Mp3BitWriter();
-    _writeHeader(si, frameBitrate, sampleRate, pad, mode);
+    _writeHeader(si, frameBitrate, sampleRate, pad, mode, modeExt: modeExt);
     si.writeBits(mdb, 9); // main_data_begin (0 for VBR)
     si.writeBits(0, nch == 1 ? 5 : 3); // private bits
     si.writeBits(0, nch * 4); // scfsi (no scalefactor sharing)
@@ -346,8 +384,9 @@ void _writeHeader(
   int bitrate,
   int sampleRate,
   bool pad,
-  Mp3ChannelMode mode,
-) {
+  Mp3ChannelMode mode, {
+  int modeExt = 0,
+}) {
   w
     ..writeBits(0x7FF, 11)
     ..writeBits(0x3, 2) // MPEG-1
@@ -358,7 +397,7 @@ void _writeHeader(
     ..writeBits(pad ? 1 : 0, 1)
     ..writeBits(0, 1) // private
     ..writeBits(mode.index, 2)
-    ..writeBits(0, 2) // mode extension
+    ..writeBits(modeExt, 2) // mode extension (M/S = 2 for joint stereo)
     ..writeBits(0, 1) // copyright
     ..writeBits(1, 1) // original
     ..writeBits(0, 2); // emphasis

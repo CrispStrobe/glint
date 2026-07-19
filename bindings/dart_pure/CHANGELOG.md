@@ -1,3 +1,10 @@
+## 0.4.0
+
+- **Decoder** (`mp3Decode`): pure-Dart MPEG-1 Layer III decode (mono/stereo/
+  joint), so the codec now round-trips without any external tool. Matches
+  ffmpeg's output bit-for-bit in quality.
+- **Joint (M/S) stereo** encoding (`mp3EncodeJointStereo`).
+
 ## 0.3.0
 
 - VBR streams now carry a Xing header (frame count + byte count + seek TOC),

@@ -85,9 +85,13 @@ Mp3GranuleInfo mp3QuantizeGranule(
   bool tonalMasks = false,
   int gainFloor = 0,
   bool vbrShaping = false,
+  bool allowPsy = true,
 }) {
   final sfb = kMp3SfbLong[srIndex < 3 ? srIndex : 0];
-  if (quality <= 0) {
+  // allowPsy=false (the M/S side channel) skips noise shaping entirely: side
+  // noise leaks into the decoded L/R where the side signal doesn't mask it, so
+  // shaping against the side's own masks destroys joint-mode quality.
+  if (quality <= 0 || !allowPsy) {
     return _quantizeBase(mdct, availableBits, srIndex, sfb, gainFloor);
   }
 

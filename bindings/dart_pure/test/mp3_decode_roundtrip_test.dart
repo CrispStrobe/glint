@@ -156,4 +156,45 @@ void main() {
     },
     skip: ffmpeg ? false : 'ffmpeg not on PATH',
   );
+
+  test(
+    'ffmpeg decodes joint (M/S) stereo back to L/R',
+    () {
+      const n = sr * 2;
+      final left = Float64List(n);
+      final right = Float64List(n);
+      for (var i = 0; i < n; i++) {
+        final t = i / sr;
+        final base = 0.5 * math.sin(2 * math.pi * 440 * t);
+        left[i] = base; // L: pure 440
+        right[i] =
+            base * 0.9 + 0.1 * math.sin(2 * math.pi * 660 * t); // R: +660
+      }
+      final mp3 = mp3EncodeJointStereo(left, right, bitrate: 192);
+      final dir = Directory.systemTemp.createTempSync('mp3ms');
+      try {
+        File('${dir.path}/j.mp3').writeAsBytesSync(mp3);
+        final r = Process.runSync('ffmpeg', [
+          '-v', 'error', '-i', '${dir.path}/j.mp3', //
+          '-f', 's16le', '-ac', '2', '-ar', '$sr', '${dir.path}/j.pcm',
+        ]);
+        expect(r.exitCode, 0, reason: 'ffmpeg: ${r.stderr}');
+        final raw = File('${dir.path}/j.pcm').readAsBytesSync();
+        final bd = ByteData.sublistView(raw);
+        final frames = raw.length ~/ 4;
+        final decL = Float64List(frames);
+        final decR = Float64List(frames);
+        for (var i = 0; i < frames; i++) {
+          decL[i] = bd.getInt16((i * 2) * 2, Endian.little) / 32768.0;
+          decR[i] = bd.getInt16((i * 2 + 1) * 2, Endian.little) / 32768.0;
+        }
+        // M/S must reconstruct each channel (aligned for the codec delay).
+        expect(_snr(left, decL), greaterThan(20), reason: 'L reconstructs');
+        expect(_snr(right, decR), greaterThan(20), reason: 'R reconstructs');
+      } finally {
+        dir.deleteSync(recursive: true);
+      }
+    },
+    skip: ffmpeg ? false : 'ffmpeg not on PATH',
+  );
 }

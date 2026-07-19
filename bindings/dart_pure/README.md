@@ -44,13 +44,14 @@ The full MPEG-1 Layer III encode pipeline:
 
 ## Scope & quality
 
-- **Now:** mono, constant bitrate, long blocks.
+- **Now:** encode mono / stereo / joint(M/S), CBR + VBR (Xing header); DECODE
+  (mono/stereo/joint) — the codec round-trips in pure Dart. Long blocks.
 - Benchmarked against glint's own `measure_audio.py` on a speech signal at
   128 kbps mono: **SNR 35.2 dB** (glint 32.1 dB), band 0–1 kHz **40.6 dB**
   (glint 36.3). Raw SNR exceeds the reference; perceptual noise-to-mask (NMR)
   is a touch behind (a Huffman region-optimizer refinement — the next quality
   step). A 200→3000 Hz sweep decodes at 78 dB.
-- **Not yet:** stereo, VBR, short/transient blocks, decode, AAC/Opus. Follow the
+- **Not yet:** short/transient blocks, AAC/Opus. Follow the
   repo for progress.
 
 ## API
@@ -58,6 +59,9 @@ The full MPEG-1 Layer III encode pipeline:
 - `Uint8List mp3EncodeMono(Float64List pcm, {int sampleRate = 44100, int bitrate = 128})`
   — encode mono PCM in [-1, 1] to a CBR `.mp3`. `sampleRate` ∈ {44100, 48000,
   32000}; `bitrate` is any MPEG-1 rate (32…320 kbps).
+- `mp3EncodeStereo` / `mp3EncodeJointStereo(left, right, ...)` — stereo & mid/side.
+- `mp3EncodeMonoVbr` / `mp3EncodeStereoVbr(..., quality: 0..9)` — variable bitrate.
+- `Mp3Pcm mp3Decode(Uint8List mp3)` — decode back to interleaved float PCM.
 - WAV helpers: `readWavPcm16(bytes) → WavData`, `wavToMonoFloat(WavData) → Float64List`.
 - Frame constants: `kMp3Bitrates`, `kMp3SampleRates`, `mp3FrameSize(...)`.
 

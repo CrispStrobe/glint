@@ -121,6 +121,29 @@ void main() {
     expect(off, best.length, reason: 'VBR frames tile exactly');
   });
 
+  test('joint stereo: channel mode = joint (01), mode extension = M/S (10)',
+      () {
+    const sr = 44100;
+    final left = _sine(sr, 440, sr);
+    final right = _sine(sr, 441, sr);
+    final mp3 = mp3EncodeJointStereo(left, right);
+    expect(mp3.length, greaterThan(0));
+    var off = 0, frames = 0;
+    while (off + 4 <= mp3.length) {
+      expect(mp3[off], 0xFF, reason: 'frame $frames sync');
+      expect((mp3[off + 3] >> 6) & 0x3, 1, reason: 'joint channel mode');
+      expect((mp3[off + 3] >> 4) & 0x3, 2, reason: 'M/S mode extension');
+      final br = (mp3[off + 2] >> 4) & 0xF;
+      off += mp3FrameSize(
+        kMp3Bitrates[br - 1],
+        sr,
+        padding: (mp3[off + 2] >> 1) & 0x1 == 1,
+      );
+      frames++;
+    }
+    expect(off, mp3.length, reason: 'frames tile exactly');
+  });
+
   test('VBR: leading Xing header frame (for exact duration + seeking)', () {
     final mp3 = mp3EncodeMonoVbr(_sine(44100, 440, 44100));
     // First frame is a 64 kbps silent frame: FF Fx, bitrate index 5 (64 k).
