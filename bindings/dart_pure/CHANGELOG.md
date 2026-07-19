@@ -1,3 +1,11 @@
+## 0.6.1
+
+- **Robust decode of malformed input.** `mp3Decode` no longer throws a
+  `RangeError` (or hangs) on corrupt/truncated streams or non-MP3 files whose
+  bytes happen to look like a frame sync: it resyncs past a bad frame and
+  returns the cleanly-decodable prefix (possibly empty), never throwing on
+  malformed content. Valid streams are unaffected. Fuzz-tested.
+
 ## 0.6.0
 
 - **Short/transient blocks now work in stereo and joint (M/S) too** — the

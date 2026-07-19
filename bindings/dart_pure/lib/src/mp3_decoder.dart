@@ -156,8 +156,21 @@ class _Mp3Decoder {
         channels = nch;
         inited = true;
       }
-      final pcm =
-          _decodeFrame(mp3, off, frameBytes, nch, srIdx, mode, modeExt, crc);
+      // A frame can pass the header check but carry a garbage body (truncated
+      // or corrupt stream, or a non-MP3 file whose bytes happened to look like a
+      // sync). Decoding it can index out of bounds deep in scalefactor/Huffman
+      // parsing; treat that exactly like a bad header — resync one byte on and
+      // keep going — so mp3Decode never throws on malformed content and returns
+      // the cleanly-decodable prefix. `off` only ever increases, so this always
+      // terminates.
+      List<double>? pcm;
+      try {
+        pcm =
+            _decodeFrame(mp3, off, frameBytes, nch, srIdx, mode, modeExt, crc);
+      } catch (_) {
+        off++;
+        continue;
+      }
       if (pcm != null) out.addAll(pcm);
       off += frameBytes;
     }
