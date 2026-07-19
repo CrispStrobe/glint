@@ -76,11 +76,16 @@ the masking threshold), so a lower SNR there is partly by design; NMR
 (noise-to-mask) is the metric where the reference still edges ahead, and closing
 it is the next quality step.
 
-> Short/transient blocks are correct — they fire and help on isolated attacks
-> (the bell switches to short blocks) — but the current 6×-frame-energy trigger
-> rarely fires inside a dense mix, so on the *band* clip short and long score
-> alike. A more sensitive transient detector (spectral flux / per-subband onset)
-> is the follow-up that would let short blocks help real music.
+> Short/transient blocks help where pre-echo is actually audible — an isolated
+> attack after quiet (the bell gains up to +0.9 dB in the worst 20 ms window).
+> The conservative trigger deliberately leaves dense mixes on long blocks, and
+> that's correct: measured across bitrates, forcing short blocks onto the *band*
+> clip *costs* ~0.5 dB (the window-switching quantizer is not psy-shaped yet, so
+> the extra short-block bits don't pay off), and inside a busy mix the ongoing
+> signal forward-masks pre-echo anyway. So the real quality lever is
+> **psychoacoustic shaping of the short-block quantizer** (short scalefactors),
+> not a more eager detector — making the short blocks that already fire more
+> bit-efficient, and closing the NMR gap generally.
 
 ## API
 
