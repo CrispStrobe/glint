@@ -1,3 +1,8 @@
+## 0.3.0
+
+- VBR streams now carry a Xing header (frame count + byte count + seek TOC),
+  so players report exact duration and can seek.
+
 ## 0.2.0
 
 - Stereo encoding (`mp3EncodeStereo`).

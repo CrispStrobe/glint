@@ -126,6 +126,8 @@ Uint8List _mp3Encode(
   // Bit reservoir: main data spills across frame slots so a hard granule can
   // spend more than one slot (finer shaping) while easy granules bank the rest.
   final reservoir = Mp3ReservoirStream(511);
+  final frameOffsets =
+      <int>[]; // VBR: byte offset of each audio frame (for TOC)
 
   final brBps = bitrate * 1000;
   final frameBase = 144 * brBps ~/ sampleRate;
@@ -222,6 +224,7 @@ Uint8List _mp3Encode(
 
     if (vbr) {
       // Self-contained frame: header + side info + main data, zero-padded.
+      frameOffsets.add(out.length);
       out
         ..add(headerSi)
         ..add(mdBytes);
@@ -232,8 +235,75 @@ Uint8List _mp3Encode(
     }
     pos += 1152;
   }
-  if (!vbr) reservoir.flush(out);
-  return out.toBytes();
+  if (!vbr) {
+    reservoir.flush(out);
+    return out.toBytes();
+  }
+  // VBR: prepend a Xing header frame so players report exact duration + can seek.
+  final audio = out.toBytes();
+  final xingSize = mp3FrameSize(64, sampleRate);
+  final total = xingSize + audio.length;
+  final xing = _buildXingFrame(
+    nch,
+    sampleRate,
+    mode,
+    frameOffsets.length,
+    total,
+    frameOffsets,
+    xingSize,
+  );
+  return (BytesBuilder(copy: false)
+        ..add(xing)
+        ..add(audio))
+      .toBytes();
+}
+
+/// Build the leading Xing/VBR-info frame: a silent 64 kbps frame whose main
+/// data carries the "Xing" tag (frame count + byte count + 100-entry seek TOC),
+/// so decoders can report exact duration and seek into a VBR stream.
+Uint8List _buildXingFrame(
+  int nch,
+  int sampleRate,
+  Mp3ChannelMode mode,
+  int frameCount,
+  int totalBytes,
+  List<int> frameOffsets,
+  int xingSize,
+) {
+  final frame = Uint8List(xingSize); // all-zero → decodes as silence
+  final w = Mp3BitWriter();
+  _writeHeader(w, 64, sampleRate, false, mode);
+  final hdr = w.takeBytes();
+  frame.setRange(0, 4, hdr); // header; side info stays zero (silent frame)
+
+  final sideInfoBytes = nch == 1 ? 17 : 32;
+  var off = 4 + sideInfoBytes; // Xing tag sits right after the side info
+  frame.setRange(off, off + 4, 'Xing'.codeUnits);
+  off += 4;
+  frame[off + 3] = 0x07; // flags: frames | bytes | TOC (big-endian 0x00000007)
+  off += 4;
+  void be32(int v) {
+    frame[off++] = (v >> 24) & 0xFF;
+    frame[off++] = (v >> 16) & 0xFF;
+    frame[off++] = (v >> 8) & 0xFF;
+    frame[off++] = v & 0xFF;
+  }
+
+  be32(frameCount);
+  be32(totalBytes);
+  // 100-entry TOC: byte position at each 1/100 of the stream, as 0..255.
+  for (var i = 0; i < 100; i++) {
+    var v = 0;
+    if (frameCount > 0 && totalBytes > 0) {
+      var f = i * frameCount ~/ 100;
+      if (f >= frameCount) f = frameCount - 1;
+      final absOffset = xingSize + frameOffsets[f];
+      v = absOffset * 256 ~/ totalBytes;
+      if (v > 255) v = 255;
+    }
+    frame[off++] = v;
+  }
+  return frame;
 }
 
 /// Smallest MPEG-1 (bitrate, frameSize) whose frame holds [neededBytes] of

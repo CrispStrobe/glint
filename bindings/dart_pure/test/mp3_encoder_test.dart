@@ -120,4 +120,19 @@ void main() {
     }
     expect(off, best.length, reason: 'VBR frames tile exactly');
   });
+
+  test('VBR: leading Xing header frame (for exact duration + seeking)', () {
+    final mp3 = mp3EncodeMonoVbr(_sine(44100, 440, 44100));
+    // First frame is a 64 kbps silent frame: FF Fx, bitrate index 5 (64 k).
+    expect(mp3[0], 0xFF);
+    expect((mp3[2] >> 4) & 0xF, mp3BitrateIndex(64));
+    // "Xing" tag right after header(4) + mono side info(17) = offset 21.
+    expect(String.fromCharCodes(mp3.sublist(21, 25)), 'Xing');
+    // Flags 0x00000007 (frames | bytes | TOC).
+    expect(mp3[28], 0x07);
+    // Frame count field (bytes 29..32) is non-zero.
+    final frameCount =
+        (mp3[29] << 24) | (mp3[30] << 16) | (mp3[31] << 8) | mp3[32];
+    expect(frameCount, greaterThan(0));
+  });
 }
