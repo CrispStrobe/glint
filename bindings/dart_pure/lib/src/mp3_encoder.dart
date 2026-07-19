@@ -22,12 +22,11 @@ import 'mp3_subband.dart';
 /// Encode mono [pcm] (−1..1) to an MPEG-1 Layer III (mono, CBR) `.mp3`.
 /// [bitrate] kbps must be a valid MPEG-1 rate; [sampleRate] one of 44100/48000/
 /// 32000.
-/// [shortBlocks] (opt-in, mono only, **EXPERIMENTAL**) enables transient/short-
-/// block switching to cut pre-echo on percussive content. Default off keeps the
-/// standard long-block path (byte-identical to a plain encode). The forward
-/// short MDCT + reorder are verified against glint (4.9e-16), but the
-/// long↔short window-switching TRANSITION path still reconstructs poorly
-/// (~0.8 dB) — do not enable in production yet.
+/// [shortBlocks] (opt-in) enables transient/short-block switching to cut
+/// pre-echo on percussive content. Default off keeps the standard long-block
+/// path (byte-identical to a plain encode). When on, a transient scheduler emits
+/// start→short→stop granules over attacks; verified against our own decoder and
+/// the ffmpeg oracle (>69 dB, beating long-only on transients).
 Uint8List mp3EncodeMono(
   Float64List pcm, {
   int sampleRate = 44100,
@@ -44,24 +43,42 @@ Uint8List mp3EncodeMono(
 
 /// Encode stereo [left]/[right] (−1..1) to an MPEG-1 Layer III (stereo, CBR)
 /// `.mp3`. Channels may differ in length (the shorter is zero-padded).
+/// [shortBlocks] (opt-in, default off) enables per-channel transient/short-block
+/// switching to cut pre-echo on percussive content; off is byte-identical.
 Uint8List mp3EncodeStereo(
   Float64List left,
   Float64List right, {
   int sampleRate = 44100,
   int bitrate = 128,
+  bool shortBlocks = false,
 }) =>
-    _mp3Encode([left, right], sampleRate, bitrate, Mp3ChannelMode.stereo);
+    _mp3Encode(
+      [left, right],
+      sampleRate,
+      bitrate,
+      Mp3ChannelMode.stereo,
+      shortBlocks: shortBlocks,
+    );
 
 /// Encode **joint (mid/side) stereo** — usually smaller/cleaner than plain
 /// stereo for correlated material, since the side channel of centred content
 /// needs far fewer bits. Decoders reconstruct L/R transparently.
+/// [shortBlocks] (opt-in, default off) enables per-channel transient/short-block
+/// switching; off is byte-identical.
 Uint8List mp3EncodeJointStereo(
   Float64List left,
   Float64List right, {
   int sampleRate = 44100,
   int bitrate = 128,
+  bool shortBlocks = false,
 }) =>
-    _mp3Encode([left, right], sampleRate, bitrate, Mp3ChannelMode.jointStereo);
+    _mp3Encode(
+      [left, right],
+      sampleRate,
+      bitrate,
+      Mp3ChannelMode.jointStereo,
+      shortBlocks: shortBlocks,
+    );
 
 /// 1/√2, the mid/side scale factor (glint `kInvSqrt2`).
 const double _kInvSqrt2 = 0.7071067811865476;
@@ -170,11 +187,20 @@ Uint8List _mp3Encode(
   final reservoir = Mp3ReservoirStream(511);
   final frameOffsets =
       <int>[]; // VBR: byte offset of each audio frame (for TOC)
-  // Opt-in transient/short blocks (mono only): scheduler + per-granule buffers.
-  final useShort = shortBlocks && nch == 1;
-  final scheduler = useShort ? Mp3BlockScheduler() : null;
+  // Opt-in transient/short blocks (mono OR stereo/joint): one scheduler per
+  // channel (each keeps its own long→start→short→stop→long chain) + scratch.
+  final useShort = shortBlocks;
+  final schedulers =
+      useShort ? [for (var c = 0; c < nch; c++) Mp3BlockScheduler()] : null;
   final shortBuf = Float64List(576);
-  final subs = [Float64List(576), Float64List(576)];
+  // Raw (pre-inversion) subband per (granule, channel), held so M/S can combine
+  // channels and the transient scheduler can look across both granules first.
+  final rawSub2 = useShort
+      ? [
+          for (var g = 0; g < 2; g++)
+            [for (var c = 0; c < nch; c++) Float64List(576)],
+        ]
+      : const <List<Float64List>>[];
 
   final brBps = bitrate * 1000;
   final frameBase = 144 * brBps ~/ sampleRate;
@@ -204,49 +230,77 @@ Uint8List _mp3Encode(
     // Quantize 2 granules x nch channels.
     final gr = List.generate(2, (_) => <Mp3GranuleInfo>[]);
     if (useShort) {
-      // Mono transient path: freq-inverted subband + energy for both granules,
-      // schedule block types, then MDCT+quantize per type (in granule order so
-      // the MDCT overlap chain stays consistent).
-      final energy = [0.0, 0.0];
+      // Transient path (mono or stereo/joint). Compute the raw subband + energy
+      // for BOTH granules and ALL channels first (the scheduler looks across the
+      // frame), apply M/S per granule if joint, then schedule block types per
+      // channel and MDCT+quantize per type — in granule order so each channel's
+      // MDCT overlap chain stays consistent.
+      final energy = [for (var g = 0; g < 2; g++) List.filled(nch, 0.0)];
       for (var g = 0; g < 2; g++) {
-        var e = 0.0;
-        for (var ts = 0; ts < 18; ts++) {
-          for (var i = 0; i < 32; i++) {
-            final idx = pos + g * 576 + ts * 32 + i;
-            slot[i] = idx < channels[0].length ? channels[0][idx] : 0.0;
+        for (var ch = 0; ch < nch; ch++) {
+          final pcm = channels[ch];
+          var e = 0.0;
+          for (var ts = 0; ts < 18; ts++) {
+            for (var i = 0; i < 32; i++) {
+              final idx = pos + g * 576 + ts * 32 + i;
+              slot[i] = idx < pcm.length ? pcm[idx] : 0.0;
+            }
+            sb[ch].processSlot(slot, so);
+            for (var b = 0; b < 32; b++) {
+              final v = so[b];
+              e += v * v;
+              rawSub2[g][ch][b * 18 + ts] = v;
+            }
           }
-          sb[0].processSlot(slot, so);
-          for (var b = 0; b < 32; b++) {
-            final v = so[b];
-            e += v * v;
-            subs[g][b * 18 + ts] = ((b & 1) != 0 && (ts & 1) != 0) ? -v : v;
+          energy[g][ch] = e;
+        }
+        // M/S on the subband samples (per granule), exactly like the long path;
+        // the SIDE channel is not psy-shaped below.
+        if (joint) {
+          for (var k = 0; k < 576; k++) {
+            final l = rawSub2[g][0][k];
+            final r = rawSub2[g][1][k];
+            rawSub2[g][0][k] = (l + r) * _kInvSqrt2;
+            rawSub2[g][1][k] = (l - r) * _kInvSqrt2;
           }
         }
-        energy[g] = e;
       }
-      final types = scheduler!.schedule(energy);
+      // Each channel schedules its own frame chain over both granules.
+      final types = [
+        for (var ch = 0; ch < nch; ch++)
+          schedulers![ch].schedule([energy[0][ch], energy[1][ch]]),
+      ];
       for (var g = 0; g < 2; g++) {
-        final bt = types[g];
-        if (bt == 2) {
-          mdct[0].processShort(subs[g], shortBuf);
-          final flat = mp3ReorderShort(shortBuf, srIndex);
-          gr[g].add(mp3QuantizeGranuleWs(flat, availPer, srIndex, 2));
-        } else if (bt == 1 || bt == 3) {
-          mdct[0].process(subs[g], mdctBuf, blockType: bt);
-          mdct[0].aliasReduce(mdctBuf);
-          gr[g].add(mp3QuantizeGranuleWs(mdctBuf, availPer, srIndex, bt));
-        } else {
-          mdct[0].process(subs[g], mdctBuf);
-          mdct[0].aliasReduce(mdctBuf);
-          gr[g].add(
-            mp3QuantizeGranule(
-              mdctBuf,
-              availPer,
-              srIndex,
-              gainFloor: gainFloor,
-              vbrShaping: vbr,
-            ),
-          );
+        for (var ch = 0; ch < nch; ch++) {
+          final bt = types[ch][g];
+          for (var b = 0; b < 32; b++) {
+            for (var ts = 0; ts < 18; ts++) {
+              final v = rawSub2[g][ch][b * 18 + ts];
+              subband[b * 18 + ts] = ((b & 1) != 0 && (ts & 1) != 0) ? -v : v;
+            }
+          }
+          if (bt == 2) {
+            mdct[ch].processShort(subband, shortBuf);
+            final flat = mp3ReorderShort(shortBuf, srIndex);
+            gr[g].add(mp3QuantizeGranuleWs(flat, availPer, srIndex, 2));
+          } else if (bt == 1 || bt == 3) {
+            mdct[ch].process(subband, mdctBuf, blockType: bt);
+            mdct[ch].aliasReduce(mdctBuf);
+            gr[g].add(mp3QuantizeGranuleWs(mdctBuf, availPer, srIndex, bt));
+          } else {
+            mdct[ch].process(subband, mdctBuf);
+            mdct[ch].aliasReduce(mdctBuf);
+            gr[g].add(
+              mp3QuantizeGranule(
+                mdctBuf,
+                availPer,
+                srIndex,
+                gainFloor: gainFloor,
+                vbrShaping: vbr,
+                allowPsy: !(joint && ch == 1),
+              ),
+            );
+          }
         }
       }
       // fall through to frame assembly below

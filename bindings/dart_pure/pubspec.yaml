@@ -3,7 +3,7 @@ description: >-
   Pure-Dart MPEG-1 Layer III (MP3) encoder — no native code, no FFI, runs
   identically on every platform including the web. A pure-Dart sibling of the
   FFI-backed glint_audio, ported from the glint codec suite.
-version: 0.5.0
+version: 0.6.0
 repository: https://github.com/CrispStrobe/glint/tree/main/bindings/dart_pure
 homepage: https://github.com/CrispStrobe/glint
 issue_tracker: https://github.com/CrispStrobe/glint/issues

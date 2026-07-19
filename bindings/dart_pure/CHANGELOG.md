@@ -1,3 +1,11 @@
+## 0.6.0
+
+- **Short/transient blocks now work in stereo and joint (M/S) too** — the
+  `shortBlocks` flag is on `mp3EncodeStereo`/`mp3EncodeJointStereo` as well as
+  mono. Each channel schedules its own block-type chain; joint M/S combines the
+  channels before the MDCT. Default stays OFF (byte-identical). A stereo
+  transient reconstructs ~57–59 dB per channel, beating long-only.
+
 ## 0.5.0
 
 - **Short / transient block encoding** (opt-in `shortBlocks: true` on

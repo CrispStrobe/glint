@@ -46,9 +46,9 @@ The full MPEG-1 Layer III encode pipeline:
 ## Scope & quality
 
 - **Now:** encode mono / stereo / joint(M/S), CBR + VBR (Xing header), long
-  blocks plus opt-in short/transient blocks (`shortBlocks: true`); DECODE every
-  block type (long/short/mixed/start/stop) — the codec round-trips in pure Dart
-  and decodes any real-world MP3.
+  blocks plus opt-in short/transient blocks (`shortBlocks: true`, mono AND
+  stereo/joint); DECODE every block type (long/short/mixed/start/stop) — the
+  codec round-trips in pure Dart and decodes any real-world MP3.
 - Benchmarked against glint's own `measure_audio.py` on a speech signal at
   128 kbps mono: **SNR 35.2 dB** (glint 32.1 dB), band 0–1 kHz **40.6 dB**
   (glint 36.3). Raw SNR exceeds the reference; perceptual noise-to-mask (NMR)
