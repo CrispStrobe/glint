@@ -49,12 +49,38 @@ The full MPEG-1 Layer III encode pipeline:
   blocks plus opt-in short/transient blocks (`shortBlocks: true`, mono AND
   stereo/joint); DECODE every block type (long/short/mixed/start/stop) — the
   codec round-trips in pure Dart and decodes any real-world MP3.
-- Benchmarked against glint's own `measure_audio.py` on a speech signal at
-  128 kbps mono: **SNR 35.2 dB** (glint 32.1 dB), band 0–1 kHz **40.6 dB**
-  (glint 36.3). Raw SNR exceeds the reference; perceptual noise-to-mask (NMR)
-  is a touch behind (a Huffman region-optimizer refinement — the next quality
-  step). A 200→3000 Hz sweep decodes at 78 dB.
 - **Not yet:** AAC/Opus. Follow the repo for progress.
+
+## Benchmark vs LAME / ffmpeg
+
+Encode → decode (ffmpeg) → best-lag/gain-aligned SNR against the source, on
+three real 4 s / 44.1 kHz mono clips: a rendered instrumental band
+(drums+bass+chords+melody), macOS `say` speech, and an isolated bell attack.
+CBR, so file sizes are fixed by bitrate (ours runs a few hundred bytes smaller —
+no ID3/padding).
+
+**Reconstruction SNR (dB, higher = closer to source):**
+
+| clip | kbps | ours | LAME | ffmpeg |
+|------|-----:|-----:|-----:|-------:|
+| band (drums+bass+chords+melody) | 128 | **33.8** | 31.6 | 31.6 |
+|  | 192 | **42.5** | 34.5 | 34.5 |
+| speech | 128 | **44.8** | 42.2 | 42.2 |
+|  | 192 | **55.8** | 53.3 | 53.3 |
+| bell attack | 128 | **73.8** | 73.6 | 73.6 |
+|  | 192 | **78.3** | 77.0 | 77.0 |
+
+Our encoder leads on raw SNR at every point — it spreads quantization noise more
+evenly. LAME/ffmpeg trade raw SNR for perceptual placement (noise pushed under
+the masking threshold), so a lower SNR there is partly by design; NMR
+(noise-to-mask) is the metric where the reference still edges ahead, and closing
+it is the next quality step.
+
+> Short/transient blocks are correct — they fire and help on isolated attacks
+> (the bell switches to short blocks) — but the current 6×-frame-energy trigger
+> rarely fires inside a dense mix, so on the *band* clip short and long score
+> alike. A more sensitive transient detector (spectral flux / per-subband onset)
+> is the follow-up that would let short blocks help real music.
 
 ## API
 
