@@ -37,6 +37,7 @@ fn main() {
             "../../../src/opus_c_api.cpp",
             "../../../src/mp3_decoder.cpp",
             "../../../src/aac_decoder.cpp",
+            "../../../src/flac_decoder.cpp",
             "../../../src/decoder_c_api.cpp",
             "../../../src/decode_audio_c_api.cpp",
             "../../../src/resample.cpp",

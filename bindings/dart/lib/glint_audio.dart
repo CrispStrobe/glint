@@ -826,8 +826,8 @@ Float32List glintResample(Float32List pcm, int channels, int srIn, int srOut) {
   }
 }
 
-/// Decode a whole encoded stream (MP3 / AAC-LC / Ogg-Opus, format auto-
-/// detected from the header) to interleaved float PCM. Throws
+/// Decode a whole encoded stream (MP3 / AAC-LC / Ogg-Opus / Ogg-Vorbis /
+/// FLAC, format auto-detected from the header) to interleaved float PCM. Throws
 /// [StateError] on unrecognized or corrupt input.
 /// Decoded int16 audio.
 class GlintDecodedAudioI16 {
@@ -837,8 +837,8 @@ class GlintDecodedAudioI16 {
   GlintDecodedAudioI16(this.pcm, this.sampleRate, this.channels);
 }
 
-/// Decode a whole encoded stream (MP3 / AAC-LC / Ogg-Opus, format auto-
-/// detected, Opus surround included) to interleaved float PCM. [rate]
+/// Decode a whole encoded stream (MP3 / AAC-LC / Ogg-Opus / Ogg-Vorbis /
+/// FLAC, format auto-detected, Opus surround included) to interleaved float PCM. [rate]
 /// resamples the output (0 = keep native). Throws on unrecognized input.
 GlintDecodedAudio glintDecodeAudio(Uint8List data, {int rate = 0}) {
   if (data.isEmpty) throw StateError('empty input');
@@ -930,6 +930,48 @@ class GlintVorbisDecoder {
       final ptr = _decode(inPtr, ogg.length, sr, ch, fr);
       if (ptr == nullptr || ch.value <= 0) {
         throw StateError('vorbis decode failed (not Vorbis or corrupt)');
+      }
+      final total = fr.value * ch.value;
+      final pcm = Float32List.fromList(ptr.asTypedList(total));
+      _free(ptr.cast<Void>());
+      return (sampleRate: sr.value, channels: ch.value, pcm: pcm);
+    } finally {
+      calloc.free(inPtr);
+      calloc.free(sr);
+      calloc.free(ch);
+      calloc.free(fr);
+    }
+  }
+}
+
+/// Native FLAC decoder (whole-buffer). The whole-file [glintDecodeAudio] also
+/// decodes FLAC transparently; this dedicated wrapper calls
+/// `glint_flac_decode` directly.
+class GlintFlacDecoder {
+  final DynamicLibrary _lib;
+  late final _VorbisDecode _decode;
+  late final _Free _free;
+
+  GlintFlacDecoder() : _lib = _loadLibrary() {
+    _decode = _lib.lookupFunction<_VorbisDecodeNative, _VorbisDecode>(
+        'glint_flac_decode');
+    _free = _lib.lookupFunction<_FreeNative, _Free>('glint_free');
+  }
+
+  /// Decode a complete native FLAC stream. Returns interleaved float PCM with
+  /// its sample rate and channel count. Throws [StateError] on a non-FLAC or
+  /// corrupt buffer.
+  ({int sampleRate, int channels, Float32List pcm}) decode(Uint8List flac) {
+    if (flac.isEmpty) throw StateError('empty input');
+    final inPtr = calloc<Uint8>(flac.length);
+    inPtr.asTypedList(flac.length).setAll(0, flac);
+    final sr = calloc<Int32>();
+    final ch = calloc<Int32>();
+    final fr = calloc<Int32>();
+    try {
+      final ptr = _decode(inPtr, flac.length, sr, ch, fr);
+      if (ptr == nullptr || ch.value <= 0) {
+        throw StateError('flac decode failed (not FLAC or corrupt)');
       }
       final total = fr.value * ch.value;
       final pcm = Float32List.fromList(ptr.asTypedList(total));

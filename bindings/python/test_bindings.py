@@ -501,6 +501,31 @@ class TestBucketsAB(unittest.TestCase):
             frames = pcm.shape[0] if hasattr(pcm, "shape") else len(pcm) // ch
             self.assertGreater(frames, 40000)
 
+    def test_decode_flac_autodetect_and_dedicated(self):
+        import shutil
+        if not shutil.which("ffmpeg"):
+            self.skipTest("ffmpeg not available")
+        if not hasattr(self.lib, "glint_flac_decode"):
+            self.skipTest("libglint has no glint_flac_decode symbol")
+        with tempfile.TemporaryDirectory() as d:
+            wav = os.path.join(d, "s.wav")
+            flac_path = os.path.join(d, "s.flac")
+            self._sine_wav(wav, sr=32000, ch=1)
+            r = subprocess.run(
+                ["ffmpeg", "-y", "-v", "error", "-i", wav, flac_path],
+                capture_output=True)
+            if r.returncode != 0:
+                self.skipTest("ffmpeg FLAC encode failed")
+            data = open(flac_path, "rb").read()
+            auto, sr, ch = glint.decode_bytes(data)
+            dedicated, sr2, ch2 = glint.decode_flac(data)
+            self.assertEqual((sr, ch), (32000, 1))
+            self.assertEqual((sr2, ch2), (32000, 1))
+            af = auto.shape[0] if hasattr(auto, "shape") else len(auto) // ch
+            df = dedicated.shape[0] if hasattr(dedicated, "shape") else len(dedicated) // ch2
+            self.assertEqual(af, df)
+            self.assertGreater(af, 30000)
+
     def test_transcode_to_opus(self):
         if not hasattr(self.lib, "glint_opus_encode_file"):
             self.skipTest("libglint has no Opus file encoder")

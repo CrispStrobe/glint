@@ -1,5 +1,5 @@
 // glint - command-line codec Swiss-army-knife.
-// Encode, decode and transcode MP3 / AAC-LC / Opus, plus WAV/raw I/O,
+// Encode, decode and transcode MP3 / AAC-LC / Opus, plus FLAC decode and WAV/raw I/O,
 // resampling, gain and normalize, over a universal float PCM pipeline.
 // MIT License - Clean-room implementation.
 
@@ -16,11 +16,11 @@ using namespace glint_cli;
 
 static void usage(const char* prog) {
     std::fprintf(stderr,
-        "glint - MP3/AAC/Opus encode, decode, transcode\n"
+        "glint - MP3/AAC/Opus encode, decode, transcode (+ FLAC decode)\n"
         "Usage: %s [options] <input> <output>\n"
         "       %s --info <input>\n"
         "  <input>/<output>: file path, or '-' for stdin/stdout.\n"
-        "  Format is chosen by extension (.wav .mp3 .aac .opus .raw) or -F.\n\n"
+        "  Format is chosen by extension (.wav .mp3 .aac .opus .flac .raw) or -F.\n\n"
         "Options:\n"
         "  -F FMT       output format: wav|mp3|aac|opus|raw (override extension)\n"
         "  -b KBPS      bitrate in kbps (default 128)\n"
@@ -46,6 +46,7 @@ static const char* fmt_str(Fmt f) {
     case Fmt::Mp3: return "MP3";
     case Fmt::Aac: return "AAC-LC";
     case Fmt::Opus: return "Opus";
+    case Fmt::Flac: return "FLAC";
     default: return "unknown";
     }
 }
@@ -135,6 +136,7 @@ int main(int argc, char** argv) {
     case Fmt::Mp3: ok = decode_mp3(raw.data(), raw.size(), audio); break;
     case Fmt::Aac: ok = decode_aac(raw.data(), raw.size(), audio); break;
     case Fmt::Opus: ok = decode_opus(raw.data(), raw.size(), audio); break;
+    case Fmt::Flac: ok = decode_flac(raw.data(), raw.size(), audio); break;
     default: std::fprintf(stderr, "Error: unknown input format\n"); return 1;
     }
     if (!ok || audio.ch == 0) {
@@ -213,6 +215,8 @@ int main(int argc, char** argv) {
         break;
     case Fmt::Opus:
         outbytes = encode_opus(audio, bitrate * 1000, vbr_q >= 0);
+        break;
+    case Fmt::Flac:
         break;
     default: break;
     }

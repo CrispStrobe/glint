@@ -1,4 +1,4 @@
-// glint CLI audio pipeline: WAV/raw + MP3/AAC/Opus decode & encode,
+// glint CLI audio pipeline: WAV/raw + MP3/AAC/Opus encode, FLAC decode,
 // resample and gain, over a universal interleaved-float representation.
 // MIT License - Clean-room implementation.
 #ifndef GLINT_CLI_AUDIO_IO_HPP
@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "glint/glint.h"
+#include "flac_decoder.hpp"
 #include "opus_decoder.hpp"
 #include "opus_ms_decoder.hpp"
 #include "opus_celt_encoder.hpp"
@@ -31,7 +32,7 @@ struct Audio {
     long frames() const { return ch ? (long)(pcm.size() / ch) : 0; }
 };
 
-enum class Fmt { Unknown, Wav, Raw, Mp3, Aac, Opus };
+enum class Fmt { Unknown, Wav, Raw, Mp3, Aac, Opus, Flac };
 
 inline bool ends_with(const std::string& s, const char* suf) {
     size_t n = std::strlen(suf);
@@ -50,6 +51,7 @@ inline Fmt fmt_from_ext(const std::string& path) {
     if (ends_with(path, ".wav")) return Fmt::Wav;
     if (ends_with(path, ".mp3")) return Fmt::Mp3;
     if (ends_with(path, ".aac")) return Fmt::Aac;
+    if (ends_with(path, ".flac")) return Fmt::Flac;
     if (ends_with(path, ".opus") || ends_with(path, ".ogg"))
         return Fmt::Opus;
     if (ends_with(path, ".raw") || ends_with(path, ".pcm"))
@@ -61,6 +63,7 @@ inline Fmt fmt_from_ext(const std::string& path) {
 inline Fmt fmt_from_magic(const uint8_t* d, size_t n) {
     if (n >= 4 && !std::memcmp(d, "RIFF", 4)) return Fmt::Wav;
     if (n >= 4 && !std::memcmp(d, "OggS", 4)) return Fmt::Opus;
+    if (n >= 4 && !std::memcmp(d, "fLaC", 4)) return Fmt::Flac;
     if (n >= 3 && !std::memcmp(d, "ID3", 3)) return Fmt::Mp3;
     if (n >= 2 && d[0] == 0xFF && (d[1] & 0xF6) == 0xF0) return Fmt::Aac;
     if (n >= 2 && d[0] == 0xFF && (d[1] & 0xE0) == 0xE0) return Fmt::Mp3;
@@ -211,6 +214,12 @@ inline bool decode_opus(const uint8_t* d, size_t n, Audio& a) {
     if (total >= 0 && (long)a.pcm.size() > total * ch)
         a.pcm.resize((size_t)total * ch);
     return true;
+}
+
+inline bool decode_flac(const uint8_t* d, size_t n, Audio& a) {
+    a.pcm.clear();
+    a.sr = a.ch = 0;
+    return glint::flac::decode(d, n, a.pcm, a.sr, a.ch) == 0 && a.ch > 0;
 }
 
 // ---- process: gain, normalize, resample ----

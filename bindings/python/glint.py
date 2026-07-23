@@ -278,6 +278,12 @@ def _setup_signatures(lib):
         lib.glint_decode_audio_ex.argtypes = [
             u8p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ip, ip, ip]
         lib.glint_decode_audio_ex.restype = ctypes.c_void_p
+        lib.glint_flac_decode.argtypes = [
+            u8p, ctypes.c_int, ip, ip, ip]
+        lib.glint_flac_decode.restype = f32p
+        lib.glint_flac_decode_ex.argtypes = [
+            u8p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ip, ip, ip]
+        lib.glint_flac_decode_ex.restype = ctypes.c_void_p
         lib.glint_opus_encode_file.argtypes = [
             f32p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ip]
         lib.glint_opus_encode_file.restype = ctypes.POINTER(ctypes.c_uint8)
@@ -1143,8 +1149,9 @@ def resample(pcm, sr_in: int, sr_out: int, channels: int = 1, *, lib=None):
 
 def decode_bytes(data: bytes, *, rate: int = 0, dtype: str = "float",
                  lib=None):
-    """Decode an in-memory MP3 / AAC-LC / Ogg-Opus stream (format auto-
-    detected, Opus surround included) to interleaved PCM. Returns (pcm,
+    """Decode an in-memory MP3 / AAC-LC / Ogg-Opus / Ogg-Vorbis / FLAC
+    stream (format auto-detected, Opus surround included) to interleaved PCM.
+    Returns (pcm,
     sample_rate, channels). *rate* resamples the output (0 = native);
     *dtype* is 'float' (±1.0) or 'int16'. pcm is a numpy array (frames,
     channels) of the matching dtype when numpy is present, else a flat
@@ -1162,6 +1169,40 @@ def decode_bytes(data: bytes, *, rate: int = 0, dtype: str = "float",
                                       ctypes.byref(fr))
     if not vptr:
         raise GlintError("decode failed (unrecognized or corrupt input)")
+    total = fr.value * ch.value
+    ctype = ctypes.c_int16 if want_i16 else ctypes.c_float
+    ptr = ctypes.cast(vptr, ctypes.POINTER(ctype))
+    try:
+        if _HAS_NUMPY:
+            npdt = np.int16 if want_i16 else np.float32
+            flat = np.ctypeslib.as_array(ptr, shape=(total,)).copy()
+            pcm = flat.astype(npdt).reshape(fr.value, ch.value)
+        else:
+            pcm = [ptr[i] for i in range(total)]
+    finally:
+        _lib.glint_free(ctypes.c_void_p(vptr))
+    return pcm, sr.value, ch.value
+
+
+def decode_flac(data: bytes, *, rate: int = 0, dtype: str = "float",
+                lib=None):
+    """Decode an in-memory native FLAC stream through the dedicated FLAC ABI.
+    Returns (pcm, sample_rate, channels)."""
+    if dtype not in ("float", "int16"):
+        raise GlintError("dtype must be 'float' or 'int16'")
+    _lib = lib or load_library()
+    if not hasattr(_lib, "glint_flac_decode_ex"):
+        raise GlintError("libglint has no glint_flac_decode_ex symbol")
+    want_i16 = 1 if dtype == "int16" else 0
+    buf = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
+    sr = ctypes.c_int(0)
+    ch = ctypes.c_int(0)
+    fr = ctypes.c_int(0)
+    vptr = _lib.glint_flac_decode_ex(buf, len(data), rate, want_i16,
+                                     ctypes.byref(sr), ctypes.byref(ch),
+                                     ctypes.byref(fr))
+    if not vptr:
+        raise GlintError("FLAC decode failed (not FLAC or corrupt input)")
     total = fr.value * ch.value
     ctype = ctypes.c_int16 if want_i16 else ctypes.c_float
     ptr = ctypes.cast(vptr, ctypes.POINTER(ctype))
@@ -1205,8 +1246,8 @@ def read_wav_bytes(data: bytes, *, lib=None):
 
 
 def decode_file(path: str, *, rate: int = 0, dtype: str = "float", lib=None):
-    """Decode an MP3 / AAC / Opus / WAV file to interleaved PCM. Returns
-    (pcm, sample_rate, channels). WAV inputs of any bit depth are
+    """Decode an MP3 / AAC / Opus / Ogg-Vorbis / FLAC / WAV file to
+    interleaved PCM. Returns (pcm, sample_rate, channels). WAV inputs are
     supported; *rate* resamples the output, *dtype* is 'float'|'int16'."""
     with open(path, "rb") as f:
         data = f.read()
@@ -1363,8 +1404,8 @@ def encode_opus_file(pcm, channels: int, *, bitrate: int = 96000,
 def transcode_file(in_path: str, out_path: str, *, bitrate: int = 128,
                    rate: Optional[int] = None, gain_db: float = 0.0,
                    lib_path: Optional[str] = None):
-    """Decode *in_path* (MP3/AAC/Opus/WAV), optionally resample (*rate*)
-    and apply *gain_db*, then encode to *out_path*. The output codec is
+    """Decode *in_path* (MP3/AAC/Opus/Ogg-Vorbis/FLAC/WAV), optionally
+    resample (*rate*) and apply *gain_db*, then encode to *out_path*. The output codec is
     chosen from the extension (.mp3 / .aac / .opus / .wav). Opus output is
     always at 48 kHz (auto-resampled)."""
     pcm, sr, ch = decode_file(in_path)

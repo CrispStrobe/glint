@@ -654,9 +654,9 @@ pub struct DecodedAudio {
     pub channels: u32,
 }
 
-/// Decode a whole encoded stream (MP3 / AAC-LC / Ogg-Opus, format auto-
-/// detected from the header) to interleaved f32 PCM. Returns `None` on
-/// unrecognized or corrupt input.
+/// Decode a whole encoded stream (MP3 / AAC-LC / Ogg-Opus / Ogg-Vorbis /
+/// FLAC, format auto-detected from the header) to interleaved f32 PCM.
+/// Returns `None` on unrecognized or corrupt input.
 pub fn decode_audio(data: &[u8]) -> Option<DecodedAudio> {
     if data.is_empty() {
         return None;
@@ -702,6 +702,28 @@ pub fn decode_vorbis(ogg: &[u8]) -> Option<DecodedAudio> {
     Some(DecodedAudio { pcm, sample_rate: sr as u32, channels: ch as u32 })
 }
 
+/// Decode a complete in-memory native FLAC stream to interleaved f32 PCM at
+/// its native rate. [`decode_audio`] also decodes FLAC transparently.
+pub fn decode_flac(flac: &[u8]) -> Option<DecodedAudio> {
+    if flac.is_empty() {
+        return None;
+    }
+    let mut sr: core::ffi::c_int = 0;
+    let mut ch: core::ffi::c_int = 0;
+    let mut frames: core::ffi::c_int = 0;
+    let ptr = unsafe {
+        glint_sys::glint_flac_decode(flac.as_ptr(), flac.len() as i32,
+            &mut sr, &mut ch, &mut frames)
+    };
+    if ptr.is_null() || ch <= 0 {
+        return None;
+    }
+    let total = frames as usize * ch as usize;
+    let pcm = unsafe { std::slice::from_raw_parts(ptr, total) }.to_vec();
+    unsafe { glint_sys::glint_free(ptr as *mut core::ffi::c_void) };
+    Some(DecodedAudio { pcm, sample_rate: sr as u32, channels: ch as u32 })
+}
+
 /// Encode interleaved 48 kHz f32 PCM (±1.0, `frames` per channel, 1-2
 /// channels) to a complete Ogg-Opus file (CELT-only, 20 ms frames). `vbr`
 /// selects unconstrained VBR. Input MUST be 48 kHz — resample first with
@@ -727,7 +749,8 @@ pub fn encode_opus_file(pcm: &[f32], channels: u32, bitrate_bps: u32,
 }
 
 /// Decode a whole stream to interleaved f32 PCM, resampled to `out_rate`
-/// (0 = keep native). Auto-detects MP3/AAC/Opus (incl. Opus surround).
+/// (0 = keep native). Auto-detects MP3/AAC/Opus/Vorbis/FLAC
+/// (incl. Opus surround).
 pub fn decode_audio_rate(data: &[u8], out_rate: u32) -> Option<DecodedAudio> {
     if data.is_empty() {
         return None;

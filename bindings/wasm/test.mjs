@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { encodeAudio, decodeAudio, decodeVorbis, FORMAT } from './glint_codec.mjs';
+import { encodeAudio, decodeAudio, decodeVorbis, decodeFlac, FORMAT } from './glint_codec.mjs';
 const SR = 44100, CH = 2, secs = 1;
 const frames = SR * secs;
 const pcm = new Float32Array(frames * CH);
@@ -21,7 +21,7 @@ for (const [name, fmt] of [['MP3',FORMAT.MP3],['AAC',FORMAT.AAC],['Opus',FORMAT.
 // pass a .ogg via argv (e.g. sox in.wav -C 6 out.ogg) to exercise both the
 // auto-detect decodeAudio and the dedicated decodeVorbis.
 const oggPath = process.argv[2];
-if (oggPath) {
+if (oggPath && oggPath !== '-') {
   const ogg = new Uint8Array(readFileSync(oggPath));
   const a = await decodeAudio(ogg);       // auto-detect (OggS + \x01vorbis)
   const d = await decodeVorbis(ogg);       // dedicated glint_vorbis_decode
@@ -33,5 +33,19 @@ if (oggPath) {
   if (!ok) process.exit(1);
 } else {
   console.log('Vorbis: (skipped — pass a .ogg path to test decode)');
+}
+const flacPath = process.argv[3];
+if (flacPath) {
+  const flac = new Uint8Array(readFileSync(flacPath));
+  const a = await decodeAudio(flac);       // auto-detect (fLaC)
+  const d = await decodeFlac(flac);        // dedicated glint_flac_decode
+  const ok = a.sampleRate === d.sampleRate && a.channels === d.channels &&
+             a.frames === d.frames && d.frames > 0 && rms(d.pcm) > 0.01;
+  console.log(`FLAC: ${flac.length}B -> sr=${d.sampleRate} ch=${d.channels} ` +
+              `frames=${d.frames} decRMS=${rms(d.pcm).toFixed(3)} ` +
+              `${ok ? 'OK' : 'FAIL'}`);
+  if (!ok) process.exit(1);
+} else {
+  console.log('FLAC: (skipped — pass an ignored .ogg arg plus a .flac path to test decode)');
 }
 console.log('done');

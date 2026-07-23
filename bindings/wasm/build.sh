@@ -15,7 +15,7 @@ emcc \
   -sINITIAL_MEMORY=33554432 \
   -sSTACK_SIZE=2097152 \
   -sENVIRONMENT='web,worker,node' \
-  -sEXPORTED_FUNCTIONS='["_glint_encode_audio","_glint_decode_audio","_glint_vorbis_decode","_glint_wav_read","_glint_wav_write","_glint_free","_malloc","_free"]' \
+  -sEXPORTED_FUNCTIONS='["_glint_encode_audio","_glint_decode_audio","_glint_vorbis_decode","_glint_flac_decode","_glint_wav_read","_glint_wav_write","_glint_free","_malloc","_free"]' \
   -sEXPORTED_RUNTIME_METHODS='["cwrap","getValue","setValue","HEAPU8","HEAPF32","HEAP32"]' \
   -sEXPORT_NAME=createGlint
 echo "built bindings/wasm/glint.mjs + glint.wasm"; ls -la bindings/wasm/glint.wasm

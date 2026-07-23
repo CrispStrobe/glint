@@ -199,7 +199,8 @@ uint8_t* glint_wav_write(const float* pcm, int frames, int channels,
                          int sample_rate, int bits, int is_float,
                          int* out_size);
 
-// Decode a whole encoded stream (MP3 / AAC-LC / Ogg-Opus, auto-detected
+// Decode a whole encoded stream (MP3 / AAC-LC / Ogg-Opus / Ogg-Vorbis / FLAC,
+// auto-detected
 // from the header) to interleaved float PCM (±1.0). Returns a malloc'd
 // buffer of *out_frames*out_ch floats — free with glint_free — and writes
 // the sample rate, channel count and per-channel frame count. NULL on
@@ -237,6 +238,20 @@ float* glint_vorbis_decode(const uint8_t* ogg, int len, int* out_sr,
 void* glint_vorbis_decode_ex(const uint8_t* ogg, int len, int out_rate,
                              int want_int16, int* out_sr, int* out_ch,
                              int* out_frames);
+
+// ---------------------------------------------------------------------------
+// FLAC decoder. Decodes a COMPLETE in-memory native FLAC stream ("fLaC"
+// marker, metadata blocks, frames) to interleaved PCM. Supports the standard
+// lossless subframe types: constant, verbatim, fixed prediction and LPC, with
+// Rice residuals and stereo decorrelation. glint_decode_audio / _ex also
+// auto-detect FLAC by its stream marker.
+// ---------------------------------------------------------------------------
+
+float* glint_flac_decode(const uint8_t* flac, int len, int* out_sr,
+                         int* out_ch, int* out_frames);
+void* glint_flac_decode_ex(const uint8_t* flac, int len, int out_rate,
+                           int want_int16, int* out_sr, int* out_ch,
+                           int* out_frames);
 
 glint_mp3_dec_t glint_mp3_dec_create(void);
 // Decode ONE frame at data[0]. pcm must hold samples*channels floats

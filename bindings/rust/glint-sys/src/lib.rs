@@ -145,6 +145,15 @@ extern "C" {
         out_ch: *mut c_int,
         out_frames: *mut c_int,
     ) -> *mut f32;
+    // Native FLAC decoder (whole-buffer). glint_decode_audio also decodes
+    // FLAC transparently via the C auto-detect.
+    pub fn glint_flac_decode(
+        flac: *const u8,
+        len: c_int,
+        out_sr: *mut c_int,
+        out_ch: *mut c_int,
+        out_frames: *mut c_int,
+    ) -> *mut f32;
     pub fn glint_decode_audio(
         data: *const u8,
         len: c_int,
@@ -188,6 +197,15 @@ extern "C" {
         out_size: *mut c_int,
     ) -> *mut u8;
     pub fn glint_decode_audio_ex(
+        data: *const u8,
+        len: c_int,
+        out_rate: c_int,
+        want_int16: c_int,
+        out_sr: *mut c_int,
+        out_ch: *mut c_int,
+        out_frames: *mut c_int,
+    ) -> *mut core::ffi::c_void;
+    pub fn glint_flac_decode_ex(
         data: *const u8,
         len: c_int,
         out_rate: c_int,

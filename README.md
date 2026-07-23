@@ -1,8 +1,8 @@
 # glint
 
-A clean-room **MP3, AAC-LC, Opus and Ogg-Vorbis codec suite** in C++17,
-MIT licensed: encoders and decoders for MP3/AAC/Opus, plus a decoder for
-Ogg-Vorbis I. The name nods to integers (*g-lint*) and the
+A clean-room **MP3, AAC-LC, Opus, Ogg-Vorbis and FLAC codec suite** in C++17,
+MIT licensed: encoders and decoders for MP3/AAC/Opus, plus decoders for
+Ogg-Vorbis I and native FLAC. The name nods to integers (*g-lint*) and the
 [Shine](https://github.com/toots/shine) encoder lineage.
 
 Both codecs are implemented from the ISO specs (11172-3 / 13818-3 for
@@ -81,6 +81,13 @@ vo-aacenc (Apache-2.0) is unmaintained and last on quality.
   first packet's codec id) and the wasm/web path; fuzz-hardened under
   ASan+UBSan (random / truncated / bit-flipped + malformed setup headers).
   See PLAN.md Vorbis track.
+- **FLAC decoder (clean-room from the format description).** Native `fLaC`
+  streams decode through the same whole-file API and CLI path as the lossy
+  codecs: metadata scanning, frame headers, constant/verbatim/fixed/LPC
+  subframes, Rice residuals, wasted bits, CRC checks and stereo
+  decorrelation. The regression gate generates real FLAC streams with ffmpeg
+  and checks exact PCM recovery for 16-bit plus float-path precision for
+  24-bit.
 
 ## Quick start
 
@@ -150,16 +157,16 @@ identical). Transient stack use: ~30 KB — size RTOS stacks accordingly.
 ### CLI
 
 A codec Swiss-army-knife over a universal float-PCM pipeline: encode,
-decode and transcode MP3 / AAC-LC / Opus, plus WAV/raw I/O, resampling,
-gain and peak-normalize. Input/output format is chosen by extension
-(`.wav .mp3 .aac .opus .raw`) or `-F`; use `-` for stdin/stdout.
+decode and transcode MP3 / AAC-LC / Opus, plus FLAC decode, WAV/raw I/O,
+resampling, gain and peak-normalize. Input/output format is chosen by extension
+(`.wav .mp3 .aac .opus .flac .raw`) or `-F`; use `-` for stdin/stdout.
 
 ```
 glint_cli [options] <input> <output>
 glint_cli --info <input>
 
   encode     in.wav  out.mp3 | out.aac | out.opus
-  decode     in.mp3  out.wav              (any codec -> WAV/raw)
+  decode     in.flac out.wav              (any codec -> WAV/raw)
   transcode  in.mp3  out.aac              (decode + re-encode)
 
   -F FORMAT         wav|mp3|aac|opus|raw output (override extension)
@@ -212,8 +219,10 @@ frames). `glint_version()` reports the library version. AAC VBR: set
 Decode + DSP + WAV: `glint_mp3_dec_* / glint_aac_dec_*` (frame decoders);
 `glint_vorbis_decode(ogg, len, &sr, &ch, &frames)` (whole-buffer
 Ogg-Vorbis I -> float PCM, `_ex` sibling adds resample + int16);
+`glint_flac_decode(flac, len, &sr, &ch, &frames)` (whole-buffer native
+FLAC -> float PCM, `_ex` sibling adds resample + int16);
 `glint_decode_audio(...)` (whole stream, auto-detects
-MP3/AAC/Ogg-Opus/Ogg-Vorbis) and `glint_decode_audio_ex(..., out_rate,
+MP3/AAC/Ogg-Opus/Ogg-Vorbis/FLAC) and `glint_decode_audio_ex(..., out_rate,
 want_int16, ...)` (adds output resample, int16 output, and Opus surround
 up to 8 ch); `glint_encode_audio(
 pcm, frames, ch, sr, format, bitrate, vbr_q, quality, &n)` (one-call
@@ -229,7 +238,7 @@ glint.encode_pcm(...)                        # MP3 encode
 enc = glint.AacEncoder(44100, 2, 128)        # AAC (vbr_quality= for VBR)
 pcm, sr, ch = glint.decode_file("in.aac")            # any codec/bit depth -> float
 pcm, sr, ch = glint.decode_file("s.opus", dtype="int16", rate=24000)  # + 5.1
-pcm, sr, ch = glint.decode_bytes(open("s.ogg","rb").read())  # Ogg-Vorbis too
+pcm, sr, ch = glint.decode_bytes(open("s.flac","rb").read())  # FLAC too
 glint.transcode_file("in.mp3", "out.opus", bitrate=96)   # incl. Opus out
 data = glint.encode_audio(pcm, ch, sr, "aac", bitrate=128)  # one-call, any rate
 glint.write_wav("o.wav", pcm, sr, ch, bits=24)       # 8/16/24/32-int or float

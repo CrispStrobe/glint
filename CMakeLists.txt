@@ -58,6 +58,7 @@ set(GLINT_SOURCES
     src/opus_c_api.cpp
     src/mp3_decoder.cpp
     src/aac_decoder.cpp
+    src/flac_decoder.cpp
     src/decoder_c_api.cpp
     src/decode_audio_c_api.cpp
     src/wav_io.cpp
@@ -190,6 +191,10 @@ if(Python3_FOUND)
                  COMMAND ${Python3_EXECUTABLE}
                          ${CMAKE_CURRENT_SOURCE_DIR}/tools/test_vorbis_decoder.py
                          $<TARGET_FILE:vorbis_dec_cli>)
+        add_test(NAME flac_decoder_vs_ffmpeg
+                 COMMAND ${Python3_EXECUTABLE}
+                         ${CMAKE_CURRENT_SOURCE_DIR}/tools/test_flac_decoder.py
+                         $<TARGET_FILE:glint_cli>)
     else()
         message(STATUS "m2_decode_quality test skipped (needs python3+numpy and ffmpeg)")
     endif()
