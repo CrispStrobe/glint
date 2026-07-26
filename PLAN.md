@@ -790,6 +790,18 @@ Staging (spec §4–§9, §12), each slice green before the next:
   residue 0/1/2 + inverse coupling → iMDCT + overlap-add → dB gate vs
   ffmpeg+sox (≥120 dB) → floor 0 (LSP) → bindings → fuzz → `.sf3` E2E.
 
+**Downstream note (2026-07-26):** CometBeat now vendors and ships the encode
+ABI on ALL SIX targets — the five native platforms via its `native/glint` FFI
+plugin (`sync_glint.sh` copies the closure verbatim) and the web target via
+`bindings/wasm`. So `glint_encode_audio` / `glint_decode_audio` have a real
+consumer on every platform, and a breaking ABI change there is now a downstream
+break, not a private refactor. Two things that surfaced from that integration
+and are worth knowing here: MSVC needs `_USE_MATH_DEFINES` for the five sources
+that use `M_PI` (fixed in the consumer's CMake, since the vendored copies must
+stay verbatim — glint may want it in its own build files too), and
+`decode_audio_c_api.cpp` defines `glint_flac_decode`, which collides with any
+downstream that wrote its own thin FLAC wrapper.
+
 **Vorbis ENCODER — scoped, UNCLAIMED, and deliberately not started.**
 Handover: `docs/VORBIS_ENCODER_HANDOVER.md`. Short version: for audio EXPORT it
 is redundant (Opus beats Vorbis at every bitrate), so the only real trigger is

@@ -255,8 +255,11 @@ let up = glint::resample(&audio.pcm, audio.channels, audio.sample_rate, 48000);
 Dart/Flutter (FFI): `GlintEncoder` / `GlintAacEncoder` encode,
 `GlintMp3Decoder` / `GlintAacDecoder` / `GlintVorbisDecoder` and
 `glintDecodeAudio` decode, `glintResample` resample. Web (wasm,
-`bindings/wasm/glint_codec.mjs`): `decodeAudio(bytes)` (auto-detect, incl.
-Vorbis) + `decodeVorbis(bytes)`.
+`bindings/wasm/glint_codec.mjs`): `encodeAudio(pcm, ch, rate, format)` →
+MP3/AAC/Opus, plus `decodeAudio(bytes)` (auto-detect: MP3/AAC/Opus/Vorbis/FLAC),
+`decodeVorbis(bytes)` and `decodeFlac(bytes)`. The wasm exports the SAME encode
++ whole-file decode ABI as the native build — the web target is not a
+decode-only subset.
 
 ## Embedded and no-FPU
 
