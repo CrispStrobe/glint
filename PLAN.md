@@ -790,6 +790,19 @@ Staging (spec §4–§9, §12), each slice green before the next:
   residue 0/1/2 + inverse coupling → iMDCT + overlap-add → dB gate vs
   ffmpeg+sox (≥120 dB) → floor 0 (LSP) → bindings → fuzz → `.sf3` E2E.
 
+**Vorbis ENCODER — scoped, UNCLAIMED, and deliberately not started.**
+Handover: `docs/VORBIS_ENCODER_HANDOVER.md`. Short version: for audio EXPORT it
+is redundant (Opus beats Vorbis at every bitrate), so the only real trigger is
+**writing `.sf3` SoundFonts** — that format is Vorbis or nothing, and CometBeat
+can currently only read it. Clean-room is genuinely viable because **Vorbis
+transmits its codebooks in the setup header**: libvorbis's tuned books are its
+private choice, not part of the format, so an encoder ships its own and never
+needs to see theirs. The decoder above is the oracle (same pattern as
+`test_opus_encoder.py`, where libopus verifies every stream we emit). New work
+is concentrated in ONE place — codebook generation; floor 1, residue and the
+headers are all mirrors of files we already own. Do NOT implement floor 0 (no
+real encoder emits it) and do NOT add Vorbis to the export UI.
+
 # AAC-LC track (started 2026-07-06)
 
 One repo, two codecs: the AAC encoder lives in `src/aac_*.{hpp,cpp}` with
