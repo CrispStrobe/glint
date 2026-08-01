@@ -1,3 +1,11 @@
+## 0.6.2
+
+- Shorten the package description to pub.dev's 180-character limit (it was
+  206, costing 10 pub points under "Provide a valid pubspec.yaml"), and
+  mention the decoder — the package has exposed `mp3Decode` since 0.4.0 but
+  the description still described it as an encoder only.
+- No code changes; the encoder and decoder are byte-identical to 0.6.1.
+
 ## 0.6.1
 
 - **Robust decode of malformed input.** `mp3Decode` no longer throws a
