@@ -62,9 +62,12 @@ jobs:
       - name: Vendor the C++ sources
         run: tools/vendor_rust_sources.sh
 
+      # --allow-dirty because the vendored tree is gitignored yet packaged (the
+      # `include` list overrides .gitignore), which cargo reports as
+      # uncommitted changes.
       - name: Verify the packaged crate builds standalone
         working-directory: bindings/rust/glint-sys
-        run: cargo package
+        run: cargo package --allow-dirty
 
   # Windows is built only in the release workflow, so MSVC-only breakers
   # (M_PI without _USE_MATH_DEFINES, POSIX strcasecmp, ...) used to surface

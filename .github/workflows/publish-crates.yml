@@ -52,9 +52,14 @@ jobs:
       # The wrapper depends on the -sys crate, so -sys goes first. cargo blocks
       # until the new version is visible in the index before returning, so the
       # second publish resolves it.
+      # --allow-dirty: the vendored tree is gitignored but IS packaged (the
+      # `include` list overrides .gitignore), and cargo counts packaged files
+      # that git does not track as uncommitted changes. Everything that is not
+      # generated is committed; vendor/ is reproduced from tracked sources by
+      # the step above.
       - name: Publish glint-audio-sys
         working-directory: bindings/rust/glint-sys
-        run: cargo publish
+        run: cargo publish --allow-dirty
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 

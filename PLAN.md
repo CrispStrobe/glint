@@ -2647,6 +2647,14 @@ verify via the pub.dev API, OIDC + required environment).
     vendored tree is packaged (verified: 50 .cpp in `cargo package
     --list`) even though git ignores it. That is what keeps the repo
     clean instead of committing a 1.3 MB duplicate of src/.
+  - GOTCHA: the flip side of the above — cargo counts packaged-but-
+    untracked files as uncommitted changes, so `cargo package` and
+    `cargo publish` BOTH need `--allow-dirty` even on a spotless tree.
+    Found the hard way: the first real publish aborted with "to proceed
+    despite this and include the uncommitted changes, pass the
+    `--allow-dirty` flag" listing every vendor/ file. Both the CI job and
+    publish-crates.yml pass it. It is safe here precisely because vendor/
+    is reproduced from tracked sources immediately beforehand.
   - build.rs now DISCOVERS the .cpp set with read_dir + sort instead of a
     hand-written 50-entry list, so a new source file cannot be vendored
     but left uncompiled. All 50 src/*.cpp were in the old list, so the
