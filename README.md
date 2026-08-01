@@ -232,6 +232,21 @@ float 32/64, A-law, mu-law). All malloc'd returns free with `glint_free`.
 
 ### Bindings
 
+Published packages — the Rust crate builds the C++ from source (a C++17
+compiler is all it needs); the Dart FFI package expects a `libglint` built
+from this repository at the same version:
+
+```toml
+# Cargo.toml — crate is glint-audio, library is glint (`use glint::...`)
+glint-audio = "0.11"
+```
+```yaml
+# pubspec.yaml
+dependencies:
+  glint_audio: ^0.11.0        # FFI bindings to the native library
+  glint_audio_pure: ^0.6.1    # pure-Dart MP3 encoder, no FFI, runs on the web
+```
+
 ```python
 import glint
 glint.encode_pcm(...)                        # MP3 encode

@@ -1,4 +1,7 @@
-//! Raw FFI bindings for glint MP3 encoder.
+//! Raw FFI bindings to the glint audio codec suite: MP3, AAC-LC, Opus,
+//! Ogg-Vorbis, FLAC, WAV and resampling. Mirrors `include/glint/glint.h`.
+//!
+//! This is the unsafe layer; see the `glint-audio` crate for the safe wrapper.
 #![allow(non_camel_case_types)]
 
 use std::os::raw::c_int;

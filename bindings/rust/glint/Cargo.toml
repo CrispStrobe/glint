@@ -1,15 +1,20 @@
 [package]
-name = "glint-mp3"
-version = "0.3.0"
+name = "glint-audio"
+version = "0.11.0"
 edition = "2021"
-description = "Fast, lightweight MP3 encoder — safe Rust wrapper"
+rust-version = "1.70"
+description = "Audio codec suite — encodes MP3, AAC-LC and Opus, decodes those plus Ogg-Vorbis, FLAC and WAV. Safe Rust wrapper, no system codec libraries."
 license = "MIT"
 repository = "https://github.com/CrispStrobe/glint"
-keywords = ["mp3", "audio", "encoder", "codec"]
-categories = ["multimedia::audio", "multimedia::encoding"]
+homepage = "https://github.com/CrispStrobe/glint"
+documentation = "https://docs.rs/glint-audio"
+readme = "README.md"
+keywords = ["audio", "codec", "mp3", "aac", "opus"]
+categories = ["multimedia::audio", "multimedia::encoding", "encoding"]
 
 [lib]
 name = "glint"
 
 [dependencies]
-glint-sys = { path = "../glint-sys" }
+# Renamed so the crate keeps referring to `glint_sys::` internally.
+glint_sys = { package = "glint-audio-sys", version = "0.11.0", path = "../glint-sys" }

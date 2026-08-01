@@ -2606,3 +2606,81 @@ fuzzes wav_read + OggOpusReader::parse with random + bit-flipped /
 truncated / extended seeds. Verified it CATCHES the EXTENSIBLE bug when
 reintroduced and passes with the fix. The gate now covers frame decoders
 AND container parsers.
+
+# Package publishing — pub.dev + crates.io (2026-08-01)
+
+Handover context: /Users/christianstrobele/code/pupdev.md carries the
+pub.dev release rules (clean tree, .pubignore, dry-run with 0 warnings,
+verify via the pub.dev API, OIDC + required environment).
+
+## What ships where
+
+| Package | Registry | Version | Auth |
+|---|---|---|---|
+| `glint_audio` | pub.dev | 0.11.0 | OIDC, tag `glint_audio-v*` |
+| `glint_audio_pure` | pub.dev | 0.6.1 | OIDC, tag `glint_audio_pure-v*` |
+| `glint-audio` | crates.io | 0.11.0 | Trusted Publishing, tag `rust-v*` |
+| `glint-audio-sys` | crates.io | 0.11.0 | Trusted Publishing, tag `rust-v*` |
+
+## Rust crates — renamed and made publishable
+
+- `glint-mp3` -> **`glint-audio`**, `glint-sys` -> **`glint-audio-sys`**.
+  The old names predated AAC/Opus/Vorbis/FLAC and undersold the crate;
+  nothing had been published, so the names were still free. The `[lib]`
+  name stays `glint`, so `use glint::...` is unchanged, and the wrapper
+  depends on the -sys crate through a Cargo dependency RENAME
+  (`glint_sys = { package = "glint-audio-sys", ... }`) so the ~25
+  `glint_sys::` call sites did not have to change.
+- **The publish blocker was the source path.** build.rs compiled
+  `../../../src/*.cpp`, outside the crate root — `cargo package` only
+  archives files under the crate root, so publishing as-is would have
+  uploaded a crate that cannot build for anybody. Fix:
+  `tools/vendor_rust_sources.sh` copies src/ + include/ into
+  `bindings/rust/glint-sys/vendor/` (gitignored, generated), and build.rs
+  resolves the repo copy FIRST and the vendored copy only as a fallback,
+  so an in-tree build never compiles a stale snapshot.
+  - GOTCHA: probe a known translation unit (`src/encoder.cpp`), not the
+    directory. This crate has its own Rust `src/`, and cargo's verify step
+    unpacks to `target/package/<pkg>-<ver>/`, from where `../../../src`
+    can resolve back onto it and look like a hit.
+  - GOTCHA: `include = [...]` in Cargo.toml OVERRIDES .gitignore — the
+    vendored tree is packaged (verified: 50 .cpp in `cargo package
+    --list`) even though git ignores it. That is what keeps the repo
+    clean instead of committing a 1.3 MB duplicate of src/.
+  - build.rs now DISCOVERS the .cpp set with read_dir + sort instead of a
+    hand-written 50-entry list, so a new source file cannot be vendored
+    but left uncompiled. All 50 src/*.cpp were in the old list, so the
+    glob is equivalent today.
+- Durable guard: the `rust-bindings` CI job runs `cargo test` in-tree and
+  then `cargo package` (which verify-BUILDS the packaged crate) after
+  vendoring. Without it a new src/*.cpp would pass every existing gate
+  and break only the published crate.
+
+## First crates.io release must be manual
+
+crates.io cannot pre-register a trusted publisher for a crate name that
+does not exist yet (unlike PyPI's pending publishers): the first version
+of each crate has to be published with a token, and only then can Trusted
+Publishing be configured. So `rust-v0.11.0` publishes automatically only
+from the SECOND release on. Both crates need the trusted publisher added
+(repo CrispStrobe/glint, workflow publish-crates.yml, environment
+crates.io) after their first manual publish.
+
+## OIDC environment gating (security)
+
+pupdev.md's 2026-07-18 sweep gated 7 repos' publish workflows on a
+rule-less `pub.dev` GitHub environment; glint was MISSED because at the
+time glint_audio was published manually. It has had OIDC workflows since
+2026-07-18 (glint_audio 0.10.0 published through Actions), ungated —
+meaning any workflow in the repo with `id-token: write`, or a stray tag
+push, could publish. Fixed: `pub.dev` and `crates.io` environments
+created rule-less (no reviewer, no branch policy — tag -> publish stays
+hands-off) and all three publish workflows reference them.
+
+OWNER ACTION, and only AFTER the workflows above are on main: flip
+"Require GitHub Actions environment" on the pub.dev admin page of
+glint_audio AND glint_audio_pure. Doing it first makes pub.dev reject the
+publish, because the OIDC token would not yet carry the environment claim.
+
+`PUBLISH_PAT` is NOT set on this repo, so autotag-glint_audio.yml skips
+by design and release tags are pushed by hand.

@@ -1,10 +1,31 @@
 [package]
-name = "glint-sys"
-version = "0.1.0"
+name = "glint-audio-sys"
+version = "0.11.0"
 edition = "2021"
-description = "Raw FFI bindings for the glint MP3 encoder"
+rust-version = "1.70"
+description = "Raw FFI bindings to the glint audio codec suite (MP3, AAC-LC, Opus, Ogg-Vorbis, FLAC, WAV, resampling)"
 license = "MIT"
+repository = "https://github.com/CrispStrobe/glint"
+homepage = "https://github.com/CrispStrobe/glint"
+documentation = "https://docs.rs/glint-audio-sys"
+readme = "README.md"
+keywords = ["ffi", "audio", "codec", "mp3", "opus"]
+categories = ["external-ffi-bindings", "multimedia::audio"]
 links = "glint"
+
+# The C++ sources are vendored into vendor/ by tools/vendor_rust_sources.sh —
+# cargo only packages files under the crate root, so the in-tree ../../../src
+# paths are unreachable from the published tarball. Listing them explicitly
+# also keeps build artifacts out of the archive.
+include = [
+    "src/**/*.rs",
+    "build.rs",
+    "vendor/src/*.cpp",
+    "vendor/src/*.hpp",
+    "vendor/include/**/*.h",
+    "README.md",
+    "LICENSE",
+]
 
 [build-dependencies]
 cc = "1"
