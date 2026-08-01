@@ -8,4 +8,8 @@ jobs:
       id-token: write  # OIDC auth to pub.dev (no stored secrets)
     uses: dart-lang/setup-dart/.github/workflows/publish.yml@v1
     with:
+      # Scopes the OIDC claim to this environment, so a stray tag push or a
+      # PR workflow with id-token:write cannot publish. Rule-less (no
+      # reviewer, no branch policy) — tag -> publish stays hands-off.
+      environment: pub.dev
       working-directory: bindings/dart_pure

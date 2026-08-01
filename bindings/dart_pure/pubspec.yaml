@@ -20,5 +20,5 @@ environment:
 # No runtime dependencies: dart:core, dart:math and dart:typed_data only.
 
 dev_dependencies:
-  lints: ^4.0.0
+  lints: ^6.0.0
   test: ^1.24.0

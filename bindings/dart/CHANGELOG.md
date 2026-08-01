@@ -1,3 +1,15 @@
+## 0.11.0
+
+- Add `GlintFlacDecoder` — whole-buffer native FLAC decode
+  (`decode(Uint8List flac) -> ({int sampleRate, int channels, Float32List pcm})`)
+  via `glint_flac_decode`, mirroring `GlintVorbisDecoder`.
+- `glintDecodeAudio` now also decodes FLAC transparently, so the whole-file
+  helper covers MP3, AAC, Ogg-Opus, Ogg-Vorbis, FLAC and WAV from the header
+  alone.
+
+Requires a native `glint` library built from this repo at 0.11.0 or later —
+`glint_flac_decode` does not exist in earlier builds.
+
 ## 0.10.0
 
 - Add `GlintVorbisDecoder` — whole-buffer Ogg-Vorbis I decode

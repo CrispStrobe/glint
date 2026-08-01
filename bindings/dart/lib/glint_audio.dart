@@ -775,10 +775,10 @@ typedef _OpusEncFileNative = Pointer<Uint8> Function(
     Pointer<Float>, Int32, Int32, Int32, Int32, Pointer<Int32>);
 typedef _OpusEncFile = Pointer<Uint8> Function(
     Pointer<Float>, int, int, int, int, Pointer<Int32>);
-typedef _VorbisDecodeNative = Pointer<Float> Function(Pointer<Uint8>, Int32,
-    Pointer<Int32>, Pointer<Int32>, Pointer<Int32>);
-typedef _VorbisDecode = Pointer<Float> Function(Pointer<Uint8>, int,
-    Pointer<Int32>, Pointer<Int32>, Pointer<Int32>);
+typedef _VorbisDecodeNative = Pointer<Float> Function(
+    Pointer<Uint8>, Int32, Pointer<Int32>, Pointer<Int32>, Pointer<Int32>);
+typedef _VorbisDecode = Pointer<Float> Function(
+    Pointer<Uint8>, int, Pointer<Int32>, Pointer<Int32>, Pointer<Int32>);
 typedef _WavReadNative = Pointer<Float> Function(
     Pointer<Uint8>, Int32, Pointer<Int32>, Pointer<Int32>, Pointer<Int32>);
 typedef _WavRead = Pointer<Float> Function(

@@ -25,7 +25,8 @@ void main(List<String> args) {
   print('glintDecodeAudio (auto-detect): '
       '${w.pcm.length ~/ w.channels} frames, ${w.sampleRate} Hz, '
       '${w.channels} ch');
-  if (w.sampleRate != v.sampleRate || w.channels != v.channels ||
+  if (w.sampleRate != v.sampleRate ||
+      w.channels != v.channels ||
       w.pcm.length != v.pcm.length) {
     throw StateError('dedicated and auto-detect paths disagree');
   }
