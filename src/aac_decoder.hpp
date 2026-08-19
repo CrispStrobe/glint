@@ -36,6 +36,7 @@ public:
 
     struct Ics {
         int window_sequence;
+        int window_shape;     // 0 = sine, 1 = KBD
         int max_sfb;
         int num_windows;      // 1 (long) or 8 (short)
         int num_window_groups;
@@ -53,6 +54,7 @@ private:
     int decode_ics(int ch, bool common_window);
     void dequant_band(int ch, int bk, int sf, int i0, int i1);
     void inverse_quant(int ch);
+    void deinterleave_short(int ch);
     void apply_tns(int ch, bool inverse);
     void imdct_channel(int ch, float* out);
 
@@ -64,14 +66,15 @@ private:
     int sf_[2][8 * 52];       // scalefactor per (group, sfb)
     double coef_[2][1024];    // spectral coefficients (window-major)
     int max_sfb_[2];
-    TnsFilter tns_[2][8];     // per window (long: [0] only)
-    int tns_n_[2];
+    TnsFilter tns_[2][8][3];  // [ch][window][filter]; long uses window 0
+    int tns_nf_[2][8];        // filters per window
     int ms_mask_present_ = 0;
     int is_cpe_ms_ = 0;
     uint8_t ms_used_[8 * 52];
 
     double overlap_[2][1024]; // IMDCT overlap-add state
     int prev_window_seq_[2];
+    int prev_window_shape_[2]; // left window half uses the PREVIOUS shape
     int first_ = 1;
 };
 

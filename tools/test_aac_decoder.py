@@ -269,6 +269,39 @@ def main():
                   f"{spec_c:.4f} (floor 0.90), energy ratio {ratio:.3f} "
                   f"(0.4-2.5) [{stats}] (PNS: samples decoder-random)")
 
+        # Tier 3: foreign encoder with PNS DISABLED -> time-domain SNR is
+        # meaningful, so gate it hard. This is the direction Tier 1 cannot
+        # see: a decoder that only mirrors OUR encoder's habits (sine-only
+        # windows, no short-window TNS) round-trips at 80+ dB yet decodes
+        # real-world KBD-windowed / TNS-heavy streams at ~17 dB. Caught
+        # live as a CrispASR ASR quality regression (issue #375 there).
+        # The spectrum-correlation floor above passes at 17 dB; this floor
+        # does not (fixed decoder: ~60+ dB on these signals).
+        if ff:
+            for name, wk, kbps in [("ffmpeg-nopns-96", "tonal", "96k"),
+                                   ("ffmpeg-nopns-tr-96", "transient", "96k")]:
+                wav, ch = wavs[wk]
+                aac = os.path.join(tmp, name + ".aac")
+                try:
+                    run([ff, "-y", "-v", "error", "-i", wav, "-c:a", "aac",
+                         "-b:a", kbps, "-aac_pns", "0", "-f", "adts", aac])
+                except subprocess.CalledProcessError as e:
+                    print(f"SKIP {name}: encode failed "
+                          f"({(e.stderr or b'').decode()[:60]})")
+                    continue
+                try:
+                    a, b, stats = decode_both(dec, aac, tmp, ch)
+                except subprocess.CalledProcessError as e:
+                    print(f"FAIL {name}: decode errored "
+                          f"{(e.stdout or b'').decode()[:80]}")
+                    failures += 1
+                    continue
+                snr = best_snr(a, b, ch)
+                ok = snr >= 40.0 and "0 errors" in stats
+                failures += 0 if ok else 1
+                print(f"{'OK' if ok else 'FAIL'} {name}: SNR {snr:.1f} dB "
+                      f"(floor 40.0) [{stats}]")
+
     if failures:
         sys.exit(f"FAIL: {failures} cases")
     print("PASS: glint AAC-LC decoder matches ffmpeg + Apple CoreAudio "

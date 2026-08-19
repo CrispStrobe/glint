@@ -212,6 +212,42 @@ double ss_win(int n) {  // short sine window, n = 0..255
     return std::sin(M_PI / 256.0 * ((n < 128 ? n : 255 - n) + 0.5));
 }
 
+// Synthesis window left halves, [shape][n]: shape 0 = sine, 1 = KBD
+// (Kaiser-Bessel derived, ISO/IEC 14496-3 4.6.11.3.2 — alpha 4 long,
+// alpha 6 short). window_shape selects per frame; real encoders (ffmpeg,
+// Apple, fdk) emit KBD on most frames, and synthesizing those with the
+// sine window breaks MDCT perfect reconstruction (~17 dB SNR floor).
+double g_win_long[2][1024];
+double g_win_short[2][128];
+bool g_win_built = false;
+
+void kbd_init(double* w, double alpha, int half) {
+    // Cumulative Kaiser-Bessel kernel over half+1 points; the I0(pi*alpha)
+    // normalization cancels in the ratio. b is the series form of
+    // I0(2*sqrt(t)) with t = i*(half-i)*(alpha*pi/half)^2.
+    double cum[1024];
+    const double a2 = (alpha * M_PI / half) * (alpha * M_PI / half);
+    double sum = 0.0;
+    for (int i = 0; i < half; i++) {
+        const double t = (double)i * (half - i) * a2;
+        double b = 1.0;
+        for (int j = 50; j > 0; j--) b = b * t / ((double)j * j) + 1.0;
+        sum += b;
+        cum[i] = sum;
+    }
+    sum += 1.0;  // kernel term at i == half: I0(0) = 1
+    for (int i = 0; i < half; i++) w[i] = std::sqrt(cum[i] / sum);
+}
+
+void build_windows() {
+    if (g_win_built) return;
+    for (int n = 0; n < 1024; n++) g_win_long[0][n] = sl_win(n);
+    for (int n = 0; n < 128; n++) g_win_short[0][n] = ss_win(n);
+    kbd_init(g_win_long[1], 4.0, 1024);
+    kbd_init(g_win_short[1], 6.0, 128);
+    g_win_built = true;
+}
+
 }  // namespace
 
 int aac_frame_info(const uint8_t* data, int len, AacFrameInfo* info) {
@@ -235,8 +271,10 @@ int aac_frame_info(const uint8_t* data, int len, AacFrameInfo* info) {
 
 void AacDecoder::init() {
     build_trees();
+    build_windows();
     std::memset(overlap_, 0, sizeof(overlap_));
     prev_window_seq_[0] = prev_window_seq_[1] = 0;
+    prev_window_shape_[0] = prev_window_shape_[1] = 0;
     first_ = 1;
 }
 
@@ -245,7 +283,7 @@ static int parse_ics_info(BitReader& br, AacDecoder::Ics& ics,
                           int sr_index) {
     br.get1();  // ics_reserved_bit
     ics.window_sequence = static_cast<int>(br.get(2));
-    br.get1();  // window_shape (sine only in glint; both decode the same)
+    ics.window_shape = static_cast<int>(br.get1());  // 0 sine, 1 KBD
     if (ics.window_sequence == 2) {  // EIGHT_SHORT
         ics.max_sfb = static_cast<int>(br.get(4));
         int grouping = static_cast<int>(br.get(7));
@@ -358,28 +396,73 @@ void AacDecoder::inverse_quant(int ch) {
 // TNS synthesis: invert the encoder's forward FIR y=x+sum aq[j]x[i-j] by
 // the all-pole recursion x=y-sum aq[j]x[i-j] over the region, in the
 // coded (= natural, long-only) order.
+// Short sequences: rebuild coef_[ch] from the coded (group/sfb-interleaved)
+// order into window-major order (8 x 128), so TNS and the filterbank can
+// address each short window's spectrum contiguously.
+void AacDecoder::deinterleave_short(int ch) {
+    const Ics& ics = ics_[ch];
+    if (ics.window_sequence != 2) return;
+    double nat[1024];
+    std::memset(nat, 0, sizeof(nat));
+    const uint16_t* swb = kSwbOffsetShort[sr_index_];
+    int k = 0, wbase = 0;
+    for (int g = 0; g < ics.num_window_groups; g++) {
+        for (int b = 0; b < ics.max_sfb; b++) {
+            for (int w = 0; w < ics.group_len[g]; w++) {
+                double* dst = nat + 128 * (wbase + w);
+                for (int i = swb[b]; i < swb[b + 1]; i++)
+                    dst[i] = coef_[ch][k++];
+            }
+        }
+        wbase += ics.group_len[g];
+    }
+    std::memcpy(coef_[ch], nat, sizeof(nat));
+}
+
 void AacDecoder::apply_tns(int ch, bool /*inverse*/) {
     const Ics& ics = ics_[ch];
-    if (ics.window_sequence == 2) return;  // long-family only
-    const uint16_t* swb = kSwbOffsetLong[sr_index_];
-    for (int f = 0; f < tns_n_[ch]; f++) {
-        const TnsFilter& t = tns_[ch][f];
-        if (t.order == 0) continue;
-        int top = ics.max_sfb;
-        if (top > kNumSwbLong[sr_index_]) top = kNumSwbLong[sr_index_];
-        int start_band = kNumSwbLong[sr_index_] - t.length;
-        if (start_band < 0) start_band = 0;
-        if (start_band >= top) continue;
-        int start = swb[start_band];
-        int end = swb[top];
-        double hist[13] = { 0 };
-        for (int i = start; i < end; i++) {
-            double y = coef_[ch][i];
-            int hmax = i - start < t.order ? i - start : t.order;
-            for (int j = 1; j <= hmax; j++) y -= t.lpc[j] * hist[j - 1];
-            for (int j = t.order - 1; j > 0; j--) hist[j] = hist[j - 1];
-            hist[0] = y;
-            coef_[ch][i] = y;
+    const bool is_short = ics.window_sequence == 2;
+    // NOTE: for short sequences coef_ must already be window-major
+    // (deinterleave_short runs before this).
+    const uint16_t* swb =
+        is_short ? kSwbOffsetShort[sr_index_] : kSwbOffsetLong[sr_index_];
+    const int num_swb =
+        is_short ? kNumSwbShort[sr_index_] : kNumSwbLong[sr_index_];
+    // The filterable region is capped by tns_max_bands AND max_sfb
+    // (ISO/IEC 14496-3 tns_decode_frame).
+    int mmm = is_short ? kTnsMaxBandsShort[sr_index_]
+                       : kTnsMaxBandsLong[sr_index_];
+    if (mmm > ics.max_sfb) mmm = ics.max_sfb;
+    if (mmm > num_swb) mmm = num_swb;
+    const int n_win = is_short ? 8 : 1;
+    for (int w = 0; w < n_win; w++) {
+        // Successive filters stack downward from the top of the spectrum:
+        // filter f covers [top - length, top) where top is the previous
+        // filter's bottom, starting at num_swb.
+        int bottom = num_swb;
+        double* spec = coef_[ch] + (is_short ? 128 * w : 0);
+        for (int f = 0; f < tns_nf_[ch][w]; f++) {
+            const TnsFilter& t = tns_[ch][w][f];
+            const int top = bottom;
+            bottom = top - t.length;
+            if (bottom < 0) bottom = 0;
+            if (t.order == 0) continue;
+            int start = swb[bottom < mmm ? bottom : mmm];
+            int end = swb[top < mmm ? top : mmm];
+            if (end <= start) continue;
+            // All-pole synthesis x[i] = y[i] - sum lpc[j]*x[i -+ j], run in
+            // the coded direction (0 = upward, 1 = downward).
+            const int inc = t.direction ? -1 : 1;
+            int i = t.direction ? end - 1 : start;
+            double hist[13] = { 0 };
+            for (int k = 0; k < end - start; k++, i += inc) {
+                double y = spec[i];
+                int hmax = k < t.order ? k : t.order;
+                for (int j = 1; j <= hmax; j++) y -= t.lpc[j] * hist[j - 1];
+                for (int j = t.order - 1; j > 0; j--) hist[j] = hist[j - 1];
+                hist[0] = y;
+                spec[i] = y;
+            }
         }
     }
 }
@@ -387,6 +470,12 @@ void AacDecoder::apply_tns(int ch, bool /*inverse*/) {
 void AacDecoder::imdct_channel(int ch, float* out) {
     const Ics& ics = ics_[ch];
     double time[2048];
+
+    // Window shape: the LEFT (rising) half must match the falling edge of
+    // the previous frame's window, so it uses the previous frame's shape;
+    // the right half uses this frame's shape (ISO/IEC 14496-3 4.6.11.3.2).
+    const int cur = ics.window_shape;
+    const int prv = prev_window_shape_[ch];
 
     if (ics.window_sequence != 2) {
         // Long-family: 1024 coefs -> 2048 samples, windowed per sequence.
@@ -396,49 +485,41 @@ void AacDecoder::imdct_channel(int ch, float* out) {
         for (int n = 0; n < 2048; n++) {
             double w;
             if (n < 1024) {
-                // Left half.
+                // Left half (previous frame's shape).
                 if (seq == 3) {  // STOP: short-based left
                     if (n < 448) w = 0.0;
-                    else if (n < 576) w = ss_win(n - 448);
+                    else if (n < 576) w = g_win_short[prv][n - 448];
                     else w = 1.0;
                 } else {
-                    w = sl_win(n);  // long/start left = long
+                    w = g_win_long[prv][n];  // long/start left = long
                 }
             } else {
-                // Right half.
+                // Right half (this frame's shape).
                 if (seq == 1) {  // START: short-based right
                     int m = n - 1024;
                     if (m < 448) w = 1.0;
-                    else if (m < 576) w = ss_win(m - 448 + 128);
+                    else if (m < 576) w = g_win_short[cur][575 - m];
                     else w = 0.0;
                 } else {
-                    w = sl_win(n);  // long/stop right = long
+                    w = g_win_long[cur][2047 - n];  // long/stop right = long
                 }
             }
             time[n] = x[n] * w;
         }
     } else {
-        // Eight short: de-interleave coded -> window-major, IMDCT each,
-        // window, overlap within a 2048 block at 128-sample hops.
-        double nat[1024];
-        const uint16_t* swb = kSwbOffsetShort[sr_index_];
-        int k = 0, wbase = 0;
-        std::memset(nat, 0, sizeof(nat));
-        for (int g = 0; g < ics.num_window_groups; g++) {
-            for (int b = 0; b < ics.max_sfb; b++) {
-                for (int w = 0; w < ics.group_len[g]; w++) {
-                    double* dst = nat + 128 * (wbase + w);
-                    for (int i = swb[b]; i < swb[b + 1]; i++)
-                        dst[i] = coef_[ch][k++];
-                }
-            }
-            wbase += ics.group_len[g];
-        }
+        // Eight short (coef_ already window-major via deinterleave_short):
+        // IMDCT each window, window, overlap within a 2048 block at
+        // 128-sample hops.
         std::memset(time, 0, sizeof(time));
         for (int w = 0; w < 8; w++) {
             double xs[256], ss[256];
-            imdct(nat + 128 * w, xs, 256);
-            for (int n = 0; n < 256; n++) ss[n] = xs[n] * ss_win(n);
+            imdct(coef_[ch] + 128 * w, xs, 256);
+            // Only the very first short window's rising edge overlaps the
+            // previous frame; every other edge is this frame's shape.
+            const int lsh = (w == 0) ? prv : cur;
+            for (int n = 0; n < 256; n++)
+                ss[n] = xs[n] * (n < 128 ? g_win_short[lsh][n]
+                                         : g_win_short[cur][255 - n]);
             int base = 448 + 128 * w;
             for (int n = 0; n < 256; n++) time[base + n] += ss[n];
         }
@@ -450,6 +531,7 @@ void AacDecoder::imdct_channel(int ch, float* out) {
     for (int n = 0; n < 1024; n++)
         out[n] = static_cast<float>((time[n] + overlap_[ch][n]) * kNorm);
     for (int n = 0; n < 1024; n++) overlap_[ch][n] = time[1024 + n];
+    prev_window_shape_[ch] = cur;
 }
 
 int AacDecoder::decode_frame(const uint8_t* data, int len, float* pcm,
@@ -595,7 +677,7 @@ int AacDecoder::decode_frame(const uint8_t* data, int len, float* pcm,
                 int pulse_present = br.get1();
                 if (pulse_present) { if(std::getenv("AACDBG"))std::fprintf(stderr,"[PULSE]"); return -2; }
                 int tns_present = br.get1();
-                tns_n_[ch] = 0;
+                std::memset(tns_nf_[ch], 0, sizeof(tns_nf_[ch]));
                 if (tns_present) {
                     int n_win = ics.window_sequence == 2 ? 8 : 1;
                     for (int w = 0; w < n_win; w++) {
@@ -604,8 +686,6 @@ int AacDecoder::decode_frame(const uint8_t* data, int len, float* pcm,
                         int coef_res = 0;
                         // (per-window: reads only if n_filt>0)
                         if (n_filt) coef_res = br.get1();
-                        TnsFilter& tf = tns_[ch][w];
-                        tf.order = 0;
                         for (int fi = 0; fi < n_filt; fi++) {
                             int length = static_cast<int>(
                                 br.get(ics.window_sequence == 2 ? 4 : 6));
@@ -621,9 +701,14 @@ int AacDecoder::decode_frame(const uint8_t* data, int len, float* pcm,
                             if (order) {
                                 direction = br.get1();
                                 compress = br.get1();
-                                int res = coef_res + 3;  // 4-bit when res=1
+                                int res = coef_res + 3;  // 3- or 4-bit coefs
                                 int nbits = res - compress;
                                 // dequant reflection coefs, refl->LPC.
+                                // iqfac depends on coef_res, NOT on compress
+                                // (compression only drops the top bit).
+                                const double half = 1 << (res - 1);
+                                const double iq_p = (half - 0.5) / (M_PI / 2.0);
+                                const double iq_n = (half + 0.5) / (M_PI / 2.0);
                                 double parc[13];
                                 for (int m = 0; m < order; m++) {
                                     int raw = static_cast<int>(
@@ -631,14 +716,8 @@ int AacDecoder::decode_frame(const uint8_t* data, int len, float* pcm,
                                     // sign-extend nbits
                                     int sign = 1 << (nbits - 1);
                                     if (raw & sign) raw -= (sign << 1);
-                                    // iqfac for 4-bit res: (8-.5)/(pi/2)
-                                    // pos, (8+.5)/(pi/2) neg.
-                                    double iq = raw >= 0
-                                                    ? (8.0 - 0.5) /
-                                                          (M_PI / 2.0)
-                                                    : (8.0 + 0.5) /
-                                                          (M_PI / 2.0);
-                                    parc[m] = std::sin(raw / iq);
+                                    parc[m] = std::sin(raw / (raw >= 0 ? iq_p
+                                                                       : iq_n));
                                 }
                                 for (int m = 1; m <= order; m++) {
                                     double k = parc[m - 1];
@@ -649,18 +728,17 @@ int AacDecoder::decode_frame(const uint8_t* data, int len, float* pcm,
                                     lpc[m] = k;
                                 }
                             }
-                            // Only the first filter per (long) window used.
-                            if (w < 8) {
+                            // Up to 3 stacked filters per window (apply_tns
+                            // walks the regions top-down within a window).
+                            if (fi < 3) {
+                                TnsFilter& tf = tns_[ch][w][fi];
                                 tf.length = length;
                                 tf.order = order;
                                 tf.direction = direction;
                                 std::memcpy(tf.lpc, lpc, sizeof(lpc));
+                                tns_nf_[ch][w] = fi + 1;
                             }
                             (void)compress;
-                        }
-                        if (ics.window_sequence != 2) {
-                            tns_n_[ch] = 1;
-                            break;  // long: single window
                         }
                     }
                 }
@@ -803,7 +881,10 @@ int AacDecoder::decode_frame(const uint8_t* data, int len, float* pcm,
         }
     }
 
-    for (int ch = 0; ch < channels_ && ch < 2; ch++) apply_tns(ch, true);
+    for (int ch = 0; ch < channels_ && ch < 2; ch++) {
+        deinterleave_short(ch);
+        apply_tns(ch, true);
+    }
 
     static thread_local float ch_pcm[2][1024];
     for (int ch = 0; ch < channels_ && ch < 2; ch++)
