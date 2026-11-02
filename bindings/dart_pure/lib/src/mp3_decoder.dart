@@ -146,6 +146,7 @@ class _Mp3Decoder {
       if (tagOff + 4 <= mp3.length) {
         final tag = String.fromCharCodes(mp3, tagOff, tagOff + 4);
         if (tag == 'Xing' || tag == 'Info') {
+          _readGapless(mp3, tagOff, off + frameBytes);
           off += frameBytes;
           continue;
         }
@@ -174,7 +175,67 @@ class _Mp3Decoder {
       if (pcm != null) out.addAll(pcm);
       off += frameBytes;
     }
-    return Mp3Pcm(Float64List.fromList(out), channels, sampleRate);
+    return Mp3Pcm(
+      Float64List.fromList(_applyGapless(out, channels)),
+      channels,
+      sampleRate,
+    );
+  }
+
+  /// Encoder delay / end padding from the LAME (or Lavc/Lavf) extension of a
+  /// Xing/Info tag, in samples per channel. −1 = the tag carried no such data.
+  int _encDelay = -1;
+  int _encPadding = -1;
+
+  /// Every MPEG-1 Layer III decoder introduces a fixed 529-sample latency from
+  /// the synthesis filterbank + IMDCT overlap. LAME records only the *encoder's*
+  /// own delay, so the total to drop at the front is `delay + 529`.
+  static const int _kDecoderDelay = 529;
+
+  /// Parse the LAME tag's gapless fields out of a Xing/Info frame.
+  ///
+  /// Layout after the 4-byte magic: a big-endian flags word, then the optional
+  /// fields it selects (frames / bytes / 100-byte TOC / quality), then the
+  /// 36-byte LAME extension whose first 9 bytes are the encoder string. The
+  /// delays sit 21 bytes into that extension, packed as 12 bits of encoder
+  /// delay followed by 12 bits of end padding.
+  void _readGapless(Uint8List b, int tagOff, int frameEnd) {
+    var p = tagOff + 4;
+    if (p + 4 > frameEnd || p + 4 > b.length) return;
+    final flags = (b[p] << 24) | (b[p + 1] << 16) | (b[p + 2] << 8) | b[p + 3];
+    p += 4;
+    if (flags & 0x1 != 0) p += 4; // frame count
+    if (flags & 0x2 != 0) p += 4; // byte count
+    if (flags & 0x4 != 0) p += 100; // seek TOC
+    if (flags & 0x8 != 0) p += 4; // VBR quality
+    // p now points at the encoder string ("LAME3.100", "Lavf…", "Lavc…").
+    final lame = p + 21;
+    if (lame + 3 > frameEnd || lame + 3 > b.length) return;
+    final delay = (b[lame] << 4) | (b[lame + 1] >> 4);
+    final padding = ((b[lame + 1] & 0x0F) << 8) | b[lame + 2];
+    // A tag with both fields zero says nothing; treat it as absent rather than
+    // as "no delay", so such a file keeps the old untrimmed behaviour.
+    if (delay == 0 && padding == 0) return;
+    _encDelay = delay;
+    _encPadding = padding;
+  }
+
+  /// Drop the encoder delay from the head and the encoder padding from the
+  /// tail, so decoded PCM lines up sample-accurately with what was encoded.
+  ///
+  /// Without this an MP3 plays ~23 ms late relative to the same audio as WAV —
+  /// inaudible on its own but it flams against other voices, and it smears a
+  /// percussive attack. Applied ONLY when a LAME tag actually supplied the
+  /// numbers; a tagless stream is returned untouched.
+  List<double> _applyGapless(List<double> pcm, int nch) {
+    if (_encDelay < 0 || nch <= 0) return pcm;
+    final head = (_encDelay + _kDecoderDelay) * nch;
+    final tail =
+        _encPadding > _kDecoderDelay ? (_encPadding - _kDecoderDelay) * nch : 0;
+    if (head <= 0 && tail <= 0) return pcm;
+    final end = pcm.length - tail;
+    if (head >= end) return const <double>[]; // degenerate/hostile tag
+    return pcm.sublist(head, end);
   }
 
   /// Returns interleaved PCM for the frame's 1152 samples, or null if the frame

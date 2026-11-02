@@ -868,6 +868,21 @@ GlintDecodedAudio glintDecodeAudio(Uint8List data, {int rate = 0}) {
   }
 }
 
+/// The native library's version as `(major << 16) | (minor << 8) | patch`,
+/// e.g. `0x000A00` for 0.10.0; 0 for a library too old to export it.
+///
+/// Gate on it when a fix matters: MP3 whole-file decode ([glintDecodeAudio])
+/// is gapless (Xing/Info frame skipped, LAME delay + padding trimmed —
+/// sample-exact with ffmpeg) from 0.8.1 on; an older library returns every
+/// MP3 ~25 ms late.
+int glintVersion() {
+  final lib = _loadLibrary();
+  if (!lib.providesSymbol('glint_version')) return 0;
+  return lib.lookupFunction<Int32 Function(), int Function()>(
+    'glint_version',
+  )();
+}
+
 /// Like [glintDecodeAudio] but returns interleaved int16 PCM.
 GlintDecodedAudioI16 glintDecodeAudioI16(Uint8List data, {int rate = 0}) {
   if (data.isEmpty) throw StateError('empty input');

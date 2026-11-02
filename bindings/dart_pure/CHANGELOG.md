@@ -1,3 +1,13 @@
+## 0.7.0
+
+- **Gapless decode.** `mp3Decode` reads the encoder delay and end padding from
+  the LAME (or Lavc/Lavf) extension of a Xing/Info tag and trims
+  `delay + 529` samples from the head and `padding − 529` from the tail, so
+  decoded PCM lines up sample-accurately with the source (before: ~23 ms late,
+  one granule long). Applied only when a tag supplies the numbers; a tagless
+  stream is unchanged, an all-zero tag counts as absent, and a hostile tag
+  cannot produce a negative length.
+
 ## 0.6.2
 
 - Shorten the package description to pub.dev's 180-character limit (it was

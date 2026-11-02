@@ -1,3 +1,16 @@
+## 0.12.0
+
+- **Gapless MP3 decode.** `glintDecodeAudio` / `glintDecodeAudioI16` now skip
+  the Xing/Info tag frame and trim the LAME encoder delay (+529 decoder
+  latency) and end padding, so an MP3 decodes to exactly the samples that were
+  encoded — sample-exact with ffmpeg. Before, every MP3 came back ~25 ms late
+  and one granule long.
+- Add `glintVersion()` so callers can require a library with the fix
+  (`glintVersion() >= 0x000801`).
+
+Requires a native `glint` library built from this repo at 0.10.0 or later for
+the gapless decode; `glintVersion()` returns 0 on libraries older than 0.8.
+
 ## 0.11.0
 
 - Add `GlintFlacDecoder` — whole-buffer native FLAC decode

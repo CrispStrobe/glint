@@ -564,7 +564,7 @@ int glint_version(void) {
     // skipped, LAME delay/padding trimmed). Callers that line decoded audio
     // up against anything else should require >= 0.8.1 — an older glint
     // returns every tagged MP3 a frame plus ~1105 samples late.
-    return (0 << 16) | (8 << 8) | 1;  // 0.8.1
+    return (0 << 16) | (10 << 8) | 0;  // 0.10.0
 }
 
 glint_aac_t glint_aac_create(const struct glint_aac_config* cfg) {
