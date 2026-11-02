@@ -165,6 +165,12 @@ if(Python3_FOUND)
                  COMMAND ${Python3_EXECUTABLE}
                          ${CMAKE_CURRENT_SOURCE_DIR}/tools/test_mp3_decoder.py
                          $<TARGET_FILE:glint_cli>)
+        # MP3 GAPLESS gate: the whole-file decode ABI must honour the
+        # Xing/Info LAME tag — sample-exact with ffmpeg, no alignment search.
+        add_test(NAME mp3_gapless_vs_ffmpeg
+                 COMMAND ${Python3_EXECUTABLE}
+                         ${CMAKE_CURRENT_SOURCE_DIR}/tools/test_mp3_gapless.py
+                         $<TARGET_FILE:glint_shared>)
         # AAC-LC DECODER gate: glint roundtrip by SNR + foreign (ffmpeg/
         # fdk/apple) PNS streams by spectral-envelope + energy.
         add_test(NAME aac_decoder_vs_ffmpeg
