@@ -513,7 +513,7 @@ class _Mp3Decoder {
       final pre = (g.preflag == 1 && band < 21) ? kMp3Preemphasis[band] : 0;
       final m = global * math.pow(2.0, -sfMult * (s + pre)).toDouble();
       final a = ix[i];
-      final v = math.pow(a.abs(), 4.0 / 3.0).toDouble();
+      final v = _pow43(a.abs());
       xr[i] = (a < 0 ? -v : v) * m;
     }
   }
@@ -545,7 +545,7 @@ class _Mp3Decoder {
             global * math.pow(2.0, -sfMult * (sfl[band] + pre)).toDouble();
         for (; i < end && i < 36; i++) {
           final a = ix[i];
-          final v = math.pow(a.abs(), 4.0 / 3.0).toDouble();
+          final v = _pow43(a.abs());
           xr[i] = (a < 0 ? -v : v) * m;
         }
         band++;
@@ -563,7 +563,7 @@ class _Mp3Decoder {
                 .toDouble();
         for (var k = 0; k < width && i < 576; k++, i++) {
           final a = ix[i];
-          final v = math.pow(a.abs(), 4.0 / 3.0).toDouble();
+          final v = _pow43(a.abs());
           xr[i] = (a < 0 ? -v : v) * m;
         }
       }
@@ -676,7 +676,7 @@ class _Mp3Decoder {
       for (var i = 0; i < 64; i++) {
         var sum = 0.0;
         for (var k = 0; k < 32; k++) {
-          sum += s[k] * math.cos((16 + i) * (2 * k + 1) * math.pi / 64.0);
+          sum += s[k] * _kSynthCos[i * 32 + k];
         }
         v[(_synthOff[ch] + i) & 1023] = sum;
       }
@@ -695,8 +695,55 @@ class _Mp3Decoder {
   }
 }
 
-double _winLong(int i) => math.sin(math.pi / 36.0 * (i + 0.5));
-double _winShort(int i) => math.sin(math.pi / 12.0 * (i + 0.5));
+// The transforms used to call math.cos/sin/pow inside their inner loops
+// (~230k cos per stereo frame). Every value now comes from a table built once
+// from the very same double expression, and the sums keep their order, so the
+// decoded samples are bit-identical to the direct formulas.
+final Float64List _kSynthCos = () {
+  final t = Float64List(64 * 32);
+  for (var i = 0; i < 64; i++) {
+    for (var k = 0; k < 32; k++) {
+      t[i * 32 + k] = math.cos((16 + i) * (2 * k + 1) * math.pi / 64.0);
+    }
+  }
+  return t;
+}();
+final Float64List _kImdct36 = () {
+  final t = Float64List(36 * 18);
+  for (var i = 0; i < 36; i++) {
+    for (var k = 0; k < 18; k++) {
+      t[i * 18 + k] = math.cos(math.pi / 72.0 * (2 * i + 1 + 18) * (2 * k + 1));
+    }
+  }
+  return t;
+}();
+final Float64List _kImdct12 = () {
+  final t = Float64List(12 * 6);
+  for (var i = 0; i < 12; i++) {
+    for (var k = 0; k < 6; k++) {
+      t[i * 6 + k] = math.cos(math.pi / 24.0 * (2 * i + 1 + 6) * (2 * k + 1));
+    }
+  }
+  return t;
+}();
+final Float64List _kWinLong = Float64List.fromList(
+  [for (var i = 0; i < 36; i++) math.sin(math.pi / 36.0 * (i + 0.5))],
+);
+final Float64List _kWinShort = Float64List.fromList(
+  [for (var i = 0; i < 12; i++) math.sin(math.pi / 12.0 * (i + 0.5))],
+);
+
+/// `|v|^(4/3)` for every value Layer III can code (15 + linbits 13 = 8206);
+/// a larger (malformed) value falls back to math.pow.
+const int _kPow43Size = 8207;
+final Float64List _kPow43 = Float64List.fromList([
+  for (var v = 0; v < _kPow43Size; v++) math.pow(v, 4.0 / 3.0).toDouble(),
+]);
+double _pow43(int a) =>
+    a < _kPow43Size ? _kPow43[a] : math.pow(a, 4.0 / 3.0).toDouble();
+
+double _winLong(int i) => _kWinLong[i];
+double _winShort(int i) => _kWinShort[i];
 
 /// Synthesis window for a start(1) / stop(3) transition block, index 0..35.
 double _winStart(int i) {
@@ -718,7 +765,7 @@ void _imdct36(Float64List x, Float64List out) {
   for (var i = 0; i < 36; i++) {
     var s = 0.0;
     for (var k = 0; k < 18; k++) {
-      s += x[k] * math.cos(math.pi / 72.0 * (2 * i + 1 + 18) * (2 * k + 1));
+      s += x[k] * _kImdct36[i * 18 + k];
     }
     out[i] = s;
   }
@@ -729,7 +776,7 @@ void _imdct12(Float64List x, Float64List out) {
   for (var i = 0; i < 12; i++) {
     var s = 0.0;
     for (var k = 0; k < 6; k++) {
-      s += x[k] * math.cos(math.pi / 24.0 * (2 * i + 1 + 6) * (2 * k + 1));
+      s += x[k] * _kImdct12[i * 6 + k];
     }
     out[i] = s;
   }

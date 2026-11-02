@@ -1,5 +1,8 @@
 ## 0.7.0
 
+- **Faster decode (~1.7x).** The IMDCT, synthesis filterbank and dequantiser
+  no longer call math.cos/sin/pow in their inner loops; the values come from
+  tables built once from the same expressions, so output is bit-identical.
 - **Gapless decode.** `mp3Decode` reads the encoder delay and end padding from
   the LAME (or Lavc/Lavf) extension of a Xing/Info tag and trims
   `delay + 529` samples from the head and `padding − 529` from the tail, so

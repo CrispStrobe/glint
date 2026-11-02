@@ -5,6 +5,9 @@
   latency) and end padding, so an MP3 decodes to exactly the samples that were
   encoded — sample-exact with ffmpeg. Before, every MP3 came back ~25 ms late
   and one granule long.
+- **MP3 decode ~17x faster** in the native library (the IMDCT, synthesis
+  filterbank and dequantiser called cos/sin/pow in their inner loops; now
+  tables) — output bit-identical, 60 s of stereo in ~0.4 s instead of ~7 s.
 - Add `glintVersion()` so callers can require a library with the fix
   (`glintVersion() >= 0x000801`).
 
