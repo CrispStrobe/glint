@@ -80,6 +80,8 @@ public:
 
     // Set write position
     void set_position(int byte_offset, int bit_offset = 0) {
+        // Only whole-byte seeks are used: bit_offset stays in the signature for callers that pass one.
+        (void)bit_offset;
         flush();
         cache_ = 0;
         bits_in_cache_ = 0;

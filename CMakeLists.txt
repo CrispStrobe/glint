@@ -41,6 +41,7 @@ set(GLINT_SOURCES
     src/bitstream.cpp
     src/psycho.cpp
     src/encoder.cpp
+    src/env.cpp
     src/aac_mdct.cpp
     src/aac_coder.cpp
     src/aac_psy.cpp
