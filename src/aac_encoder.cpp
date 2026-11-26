@@ -19,6 +19,7 @@
 #include "aac_mdct.hpp"
 #include "aac_psy.hpp"
 #include "aac_tables.hpp"
+#include "env.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -214,7 +215,7 @@ void decide_ms(glint_aac_context* c, const double* maskL, const double* maskR,
         }
     }
     c->ms_present = (n_ms == 0) ? 0 : (n_ms == L.num_bands) ? 2 : 1;
-    static const bool msdbg = getenv("GLINT_AAC_MS_DEBUG") != nullptr;
+    static const bool msdbg = glint::glint_getenv("GLINT_AAC_MS_DEBUG") != nullptr;
     if (msdbg) {
         static long total = 0, frames = 0;
         total += n_ms;
@@ -395,7 +396,7 @@ int emit_frame(glint_aac_context* c, int next_attack, uint8_t* out) {
     // as a regression on every metric (ODG -0.87 -> -1.09 at 128k).
     for (int chn = 0; chn < ch; chn++) {
         c->plan[chn].tns.active = 0;
-        static const bool no_tns = getenv("GLINT_AAC_NO_TNS") != nullptr;
+        static const bool no_tns = glint::glint_getenv("GLINT_AAC_NO_TNS") != nullptr;
         if (seq != kSeqShort && !no_tns) {
             double e_unf[kMaxSfb];
             for (int b = 0; b < L.num_bands; b++) {
@@ -546,7 +547,7 @@ const uint8_t* encode_common(glint_aac_context* c,
         int p = 0;
         bool a = detect_attack(cur[chn], &c->hp_last[chn], &c->base_e[chn], &p);
         if (a && (!attack_cur || p < pos_cur)) pos_cur = p;
-        attack_cur |= a;
+        attack_cur |= a ? 1 : 0;
     }
     int n = emit_frame(c, attack_cur, c->out);
     push_block(c, cur, attack_cur, pos_cur);
@@ -599,12 +600,12 @@ glint_aac_t glint_aac_create(const struct glint_aac_config* cfg) {
         if (q < 0) q = 0;
         if (q > 9) q = 9;
         c->vbr_gain_floor = kVbrGain[q];
-        if (const char* e = getenv("GLINT_AAC_VBR_GAIN")) {
+        if (const char* e = glint::glint_getenv("GLINT_AAC_VBR_GAIN")) {
             int v = atoi(e);
             if (v > 0 && v < 256) c->vbr_gain_floor = v;
         }
     }
-    c->force_short = getenv("GLINT_AAC_FORCE_SHORT") != nullptr;
+    c->force_short = glint::glint_getenv("GLINT_AAC_FORCE_SHORT") != nullptr;
     c->bits_per_frame = static_cast<double>(c->bitrate_bps) * kAacFrameLen / c->sample_rate;
 
     // max_sfb from the bandwidth cutoff: first band whose start line reaches
@@ -795,7 +796,7 @@ void shape_channel(glint_aac_context* c, int chn, int budget) {
         } else if (++stall >= 5) {
             break;
         }
-        static const bool dbg = getenv("GLINT_AAC_DEBUG") != nullptr;
+        static const bool dbg = glint::glint_getenv("GLINT_AAC_DEBUG") != nullptr;
         if (dbg) {
             fprintf(stderr, "  it%d: j=%.3g best=%.3g total/0=%.2f g=%d bits=%d/%d w=%.2f\n",
                     iter, j, j_best, total / total0, cand.fit_gain,

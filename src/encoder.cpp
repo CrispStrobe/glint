@@ -5,6 +5,7 @@
 #include "fixedpoint.hpp"
 #include "mdct.hpp"
 #include "simd.hpp"
+#include "env.hpp"
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
@@ -81,7 +82,7 @@ static void schedule_block_types(glint_context* enc,
         // electronic move <= 0.11 dB. 4x starts costing speech ODG.
         // GLINT_ATTACK_RATIO overrides for experiments.
         static const double kAttackRatio = [] {
-            const char* e = getenv("GLINT_ATTACK_RATIO");
+            const char* e = glint::glint_getenv("GLINT_ATTACK_RATIO");
             double v = e ? atof(e) : 6.0;
             return v > 1.0 ? v : 6.0;
         }();
@@ -130,7 +131,7 @@ static void schedule_block_types(glint_context* enc,
     enc->next_block_carry = (last == 1) ? 2 : (last == 2) ? 3 : 0;
 
     // TEMP DIAG: force every granule short
-    if (getenv("GLINT_FORCE_SHORT"))
+    if (glint::glint_getenv("GLINT_FORCE_SHORT"))
         for (int g = 0; g < num_gr; g++) types[g] = 2;
 }
 
@@ -217,7 +218,7 @@ static void apply_lowpass_int(int32_t* mdct_flat, const glint_context* enc) {
 // The effective cut snaps to the next sfb boundary at the granule's
 // sample rate. GLINT_LP_HZ overrides for experiments.
 static double lowpass_cutoff_hz(int kbps_per_ch) {
-    if (const char* e = getenv("GLINT_LP_HZ")) {
+    if (const char* e = glint::glint_getenv("GLINT_LP_HZ")) {
         double v = atof(e);
         if (v > 0.0) return v;
     }

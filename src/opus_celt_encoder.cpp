@@ -2,6 +2,7 @@
 // MIT License - Clean-room implementation
 
 #include "opus_celt_encoder.hpp"
+#include "env.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -849,7 +850,7 @@ int CeltEncoder::encode_frame(const float* pcm, int frame_size,
                : 0;
     if (!(lm > 0 && static_cast<int32_t>(enc.tell()) + 3 <= total_bits))
         is_transient = 0;
-    if (std::getenv("GLINT_DBG_TRANSIENT"))
+    if (glint::glint_getenv("GLINT_DBG_TRANSIENT"))
         std::fprintf(stderr, "T%d", is_transient);
     const int short_blocks = is_transient ? m : 0;
 
@@ -1174,8 +1175,6 @@ int CeltEncoder::encode_frame(const float* pcm, int frame_size,
     final_range_ = enc.range();
     enc.done();
     if (enc.error()) return -2;
-    (void)imax;
-    (void)imin;
     return nbytes;
 }
 

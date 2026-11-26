@@ -333,7 +333,7 @@ static int quantize_and_count(const double* mdct_in, int16_t* ix,
         for (int i = 0; i < 576; i++) {
             double qval_d = cache->pow34_sf[i] * base_step + 0.4054;
             int qval = (qval_d >= 8191.0) ? 8191 : static_cast<int>(qval_d);
-            ix[i] = cache->sign[i] * qval;
+            ix[i] = static_cast<int16_t>(cache->sign[i] * qval);   // qval <= 8191, sign +-1: fits int16
         }
         // Scan backward for rzero (avoids branch in hot loop)
         rzero = 576;
@@ -354,7 +354,7 @@ static int quantize_and_count(const double* mdct_in, int16_t* ix,
             double pow34_val = fast_pow34(abs_xr);
             double qval_d = pow34_val * base_step * sf_scale + 0.4054;
             int qval = (qval_d >= 8191.0) ? 8191 : static_cast<int>(qval_d);
-            ix[i] = (mdct_in[i] < 0.0) ? -qval : qval;
+            ix[i] = static_cast<int16_t>((mdct_in[i] < 0.0) ? -qval : qval);  // qval <= 8191: fits int16
         }
         rzero = 576;
         while (rzero > 0 && ix[rzero - 1] == 0) rzero--;
@@ -375,16 +375,6 @@ static int quantize_and_count(const double* mdct_in, int16_t* ix,
     return bit_limit >= 0 ? huffman_count_bits_limited(ix, regions, sr_index,
                                                        bit_limit)
                           : huffman_count_bits(ix, regions, sr_index);
-}
-
-static int encode_scalefac_compress(int slen1, int slen2) {
-    static const int table[16][2] = {
-        {0,0},{0,1},{0,2},{0,3},{3,0},{1,1},{1,2},{1,3},
-        {2,1},{2,2},{2,3},{3,1},{3,2},{3,3},{4,2},{4,3}
-    };
-    for (int i = 0; i < 16; i++)
-        if (table[i][0] == slen1 && table[i][1] == slen2) return i;
-    return 0;
 }
 
 // MPEG-2/2.5 scalefac_compress encoding (9 bits), ISO 13818-3 mapping for
@@ -409,53 +399,6 @@ static int encode_scalefac_compress_m2(int slen0, int slen1, int slen2, int slen
 // loud bands (high SMR) get sf=0 (noise masked by signal), bands near
 // masking threshold get higher SF (need precision), bands below threshold
 // get sf=0 (inaudible, save bits).
-static bool compute_headroom_scalefactors(int scalefac[21],
-                                           const double band_energy[21],
-                                           int /* active_bands */) {
-    // Compute per-band masking threshold via simplified spreading function
-    double band_mask[21];
-    for (int band = 0; band < 21; band++) {
-        band_mask[band] = 0;
-        for (int other = 0; other < 21; other++) {
-            if (other == band) continue;  // exclude self-masking
-            double spread;
-            if (other > band)
-                spread = std::pow(10.0, -0.8 * (other - band));  // 8 dB/band upward
-            else
-                spread = std::pow(10.0, -0.4 * (band - other));  // 4 dB/band downward
-            band_mask[band] += band_energy[other] * spread;
-        }
-        // ATH floor, scaled to MDCT energy domain (MDCT divides by 288)
-        double ath_linear = std::pow(10.0, (tables::ath_cb[std::min(band, 24)] - 96.0) / 10.0);
-        ath_linear /= (288.0 * 288.0);
-        // Use 0.1 (-10 dB) masking offset for inter-band masking
-        band_mask[band] = std::max(band_mask[band] * 0.1, ath_linear);
-    }
-
-    // SMR (signal-to-mask ratio) per band, assign SF
-    // Bands with energy well above their mask have lots of headroom and
-    // can tolerate coarse quantization. Bands near the mask need precision.
-    bool any = false;
-    for (int band = 0; band < 21; band++) {
-        double smr = band_energy[band] / band_mask[band];
-        double headroom_db = 10.0 * std::log10(std::max(smr, 1e-10));
-        // Map headroom to SF with wider range for better differentiation:
-        // headroom <= 0 dB  -> sf = 0 (below mask, inaudible)
-        // headroom  0-30 dB -> sf = 7..0 (linear mapping)
-        // headroom > 30 dB  -> sf = 0 (far above mask, self-masked)
-        int sf;
-        if (headroom_db <= 0.0)
-            sf = 0;
-        else if (headroom_db > 30.0)
-            sf = 0;
-        else
-            sf = static_cast<int>((30.0 - headroom_db) * 7.0 / 30.0);
-        scalefac[band] = sf;
-        if (sf > 0) any = true;
-    }
-    return any;
-}
-
 // Per-band source energy for the granule_mse envelope penalty. Depends only
 // on the unscaled input, so it is identical for every candidate in the scale
 // search — compute it once per granule and share it. Loop order matches the
