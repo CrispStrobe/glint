@@ -159,7 +159,8 @@ def main():
         run([cxx, "-std=c++17", "-O2", "-I", os.path.join(REPO, "src"),
              "-I", os.path.join(REPO, "include"),
              os.path.join(REPO, "tools", "aac_dec_cli.cpp"),
-             os.path.join(REPO, "src", "aac_decoder.cpp"), "-o", dec])
+             os.path.join(REPO, "src", "aac_decoder.cpp"),
+             os.path.join(REPO, "src", "env.cpp"), "-o", dec])
 
         wavs = {}
         for k, ch, kind in [("tonal", 2, "tonal"), ("mono", 1, "tonal"),

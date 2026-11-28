@@ -63,7 +63,8 @@ def main():
                 "-I", os.path.join(REPO, "include"),
                 os.path.join(REPO, "tools", "fuzz_decoders.cpp"),
                 os.path.join(REPO, "src", "mp3_decoder.cpp"),
-                os.path.join(REPO, "src", "aac_decoder.cpp")]
+                os.path.join(REPO, "src", "aac_decoder.cpp"),
+                os.path.join(REPO, "src", "env.cpp")]
         binp = os.path.join(tmp, "fuzz")
         san = ["-fsanitize=address,undefined",
                "-fno-sanitize-recover=all"]

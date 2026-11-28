@@ -26,7 +26,9 @@ const char* glint_getenv(const char* name) {
     if (getenv_s(&len, buf, sizeof(buf), name) != 0) return nullptr;
     return len > 0 ? buf : nullptr;
 #else
-    return name != nullptr ? std::getenv(name) : nullptr;
+    // Same contract as the MSVC branch: an empty value reads as unset.
+    const char* v = name != nullptr ? std::getenv(name) : nullptr;
+    return (v != nullptr && *v != '\0') ? v : nullptr;
 #endif
 }
 
