@@ -10,7 +10,13 @@
 #include <vector>
 
 #include "glint/glint.h"
+#include "encoder.hpp"
 #include "resample.hpp"
+
+// Internal to the encoder: the one-call wrapper below is the only caller.
+// Declared here rather than in glint.h because nothing outside needs them.
+int  glint_cbr_header(glint_t enc, uint8_t* buf, int buf_capacity);
+void glint_set_input_samples(glint_t enc, uint64_t samples);
 
 namespace {
 
@@ -89,9 +95,42 @@ std::vector<uint8_t> encode_mp3_planar(const float* pcm, long frames,
         if (p && n > 0) out.insert(out.end(), p, p + n);
         off += spf;
     }
+    // The encoder carries 1633 samples of delay across whole frames, so a take
+    // shorter than that loses its end unless it is padded out. Feed silence
+    // until the delay plus the input fits inside the frames handed over.
+    {
+        const long long need = (long long)frames + 1633;
+        while ((long long)off < need) {
+            std::vector<std::vector<float>> block(
+                channels, std::vector<float>((size_t)spf, 0.0f));
+            for (int c = 0; c < channels; c++) chp[c] = block[c].data();
+            int n = 0;
+            const uint8_t* p = glint_encode_float(enc, chp.data(), &n);
+            if (p && n > 0) out.insert(out.end(), p, p + n);
+            off += spf;
+        }
+    }
+    glint_set_input_samples(enc, (uint64_t)frames);
     int n = 0;
     const uint8_t* p = glint_flush(enc, &n);
     if (p && n > 0) out.insert(out.end(), p, p + n);
+    if (vbr_q < 0) {
+        // CBR output has no tag frame of its own; put one in front so the
+        // file carries the gapless delay/padding and plays back its own
+        // length. The byte count inside already includes it.
+        std::vector<uint8_t> tag(2048);   // a tag frame at 64 kbps is 417 B
+        int tag_size = glint_cbr_header(enc, tag.data(), (int)tag.size());
+        if (tag_size > 0)
+            out.insert(out.begin(), tag.begin(), tag.begin() + tag_size);
+    } else {
+        // VBR: frame 0 is the silent Xing placeholder the encoder emitted.
+        // Rewrite it in place with the real frame count, byte count and the
+        // same delay/padding the CBR path uses, so it decodes to its own length.
+        std::vector<uint8_t> tag(2048);
+        int tag_size = glint_vbr_header(enc, tag.data(), (int)tag.size());
+        if (tag_size > 0 && (size_t)tag_size <= out.size())
+            std::memcpy(out.data(), tag.data(), (size_t)tag_size);
+    }
     glint_destroy(enc);
     return out;
 }

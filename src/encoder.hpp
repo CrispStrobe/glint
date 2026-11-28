@@ -116,9 +116,16 @@ struct glint_context {
     int toc_count;
     int toc_stride;
 
+    // End-of-audio bookkeeping for the gapless tag. glint_set_input_samples()
+    // records the caller's true length; glint_flush() turns it into the end
+    // padding the tag carries.
+    uint32_t end_pad;           // samples of padding after the last input one
+    uint64_t input_samples;     // caller's true length, for the tag
+
     // Streaming callback (optional)
     glint_write_cb write_cb;
     void* write_cb_data;
 };
 
 #endif // GLINT_ENCODER_HPP
+
