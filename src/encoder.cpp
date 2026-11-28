@@ -515,6 +515,16 @@ static int vbr_pick_frame_size(const glint_context* enc, int total_main_bits,
 // channel 0 — mid, in M/S — may receive). Tuned on the speech reference:
 // wider clamps starve the side channel in loud passages and regress global
 // SNR in joint mode even though mid-band metrics improve.
+// Release builds use -ffast-math, which lets clang and GCC assume no float is
+// NaN or Inf: std::isfinite() folds to true, and so does a bit test on a value
+// that was loaded as a float. Reading the sample's bytes as an integer keeps
+// the check alive in every build: an all-ones exponent is NaN or +-Inf.
+static inline bool finite_sample(const float* p) {
+    uint32_t bits;
+    std::memcpy(&bits, p, sizeof(bits));
+    return (bits & 0x7F800000u) != 0x7F800000u;
+}
+
 static constexpr double kChSplitLo = 0.45;
 static constexpr double kChSplitHi = 0.55;
 
@@ -1457,11 +1467,11 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
         const int count = num_slots * 32;
         bool finite = true;
         for (int i = 0; i < count && finite; i++)
-            if (!std::isfinite(src[i])) finite = false;
+            if (!finite_sample(src + i)) finite = false;
         if (!finite) {
             clean[ch].assign(src, src + count);
             for (int i = 0; i < count; i++)
-                if (!std::isfinite(clean[ch][(size_t)i])) clean[ch][(size_t)i] = 0.0f;
+                if (!finite_sample(&clean[ch][(size_t)i])) clean[ch][(size_t)i] = 0.0f;
             src = clean[ch].data();
         }
         enc->subband[ch].analyze_float(src, sb_new[ch], num_slots);

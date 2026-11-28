@@ -16,6 +16,7 @@
 #include "fixedpoint.hpp"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cmath>
 #include <limits>
 #include <cstring>
@@ -1201,7 +1202,11 @@ static void test_mp3_non_finite_input() {
             double peak = 0;
             for (int i = 0; i < frames * got_ch; i++) {
                 const float v = back[(size_t)i];
-                if (!std::isfinite(v)) nonfinite++;
+                // The build's -ffast-math folds std::isfinite() to true, so test
+                // the stored bytes as an integer (all-ones exponent = NaN/Inf).
+                uint32_t bits;
+                std::memcpy(&bits, back + i, sizeof(bits));
+                if ((bits & 0x7F800000u) == 0x7F800000u) nonfinite++;
                 else if (std::fabs(v) > peak) peak = std::fabs(v);
             }
             if (nonfinite || peak > 2.0) {
