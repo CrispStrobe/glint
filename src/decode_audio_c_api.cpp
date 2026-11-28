@@ -146,6 +146,10 @@ bool decode_mp3(const uint8_t* d, size_t n, std::vector<float>& out,
     if (ch > 0 && gap.delay >= 0) {
         const size_t frames = out.size() / (size_t)ch;
         const size_t head = (size_t)(gap.delay + kMp3DecoderDelay);
+        // The padding field counts from the encoder delay, so the tail to drop
+        // is padding minus the decoder latency. A field smaller than the
+        // latency means the encoder padded by less than a decoder's own delay
+        // — drop nothing rather than inventing samples to remove.
         const size_t tail = gap.padding > kMp3DecoderDelay
                                 ? (size_t)(gap.padding - kMp3DecoderDelay)
                                 : 0;
