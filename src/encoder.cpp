@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cmath>
+#include <vector>
 #include <algorithm>
 
 using namespace glint;
@@ -313,6 +314,8 @@ glint_t glint_create(const glint_config* cfg) {
 
     ctx->num_channels = cfg->num_channels;
     ctx->frame_count = 0;
+    ctx->end_pad = 0;
+    ctx->input_samples = 0;
     ctx->quality_mode = static_cast<int>(cfg->quality);
     ctx->vbr_mode = (cfg->vbr == GLINT_VBR_ON);
     ctx->vbr_quality = cfg->vbr_quality;
@@ -514,6 +517,11 @@ static int vbr_pick_frame_size(const glint_context* enc, int total_main_bits,
 static constexpr double kChSplitLo = 0.45;
 static constexpr double kChSplitHi = 0.55;
 
+// Decoder latency every Layer III decoder adds after the encoder's delay. The
+// tag's end-padding field is stored relative to it, so both ends are written
+// in the same accounting.
+constexpr int kMp3DecoderDelay = 529;
+
 // Xing header frame for VBR: a fixed-size (64 kbps index) frame whose main
 // data carries "Xing" + flags + frame count + byte count + 100-byte TOC.
 // The placeholder (with_data=false) leaves the main data all-zero so it
@@ -534,6 +542,10 @@ static int build_xing_frame(const glint_context* enc, uint8_t* out,
     out[3] = static_cast<uint8_t>((mode_to_mpeg(enc->config.mode) << 6) |
                                   (1 << 2));  // original=1
     if (with_data) {
+        // The frame the decoder recognises is the one at 4 + side_info_bits/8,
+        // so the tag goes there and bytes 36..39 are left zero. A "Xing"/"Info"
+        // at +36 with a 256-bit side info (MPEG-1 stereo) would claim frame 0
+        // as a tag the flags there do not describe.
         int off = 4 + enc->side_info_bits / 8;
         std::memcpy(out + off, "Xing", 4);
         off += 4;
@@ -583,7 +595,8 @@ static int build_xing_frame(const glint_context* enc, uint8_t* out,
         out[off++] = 0;                    // ABR byte
         uint32_t delay = 1104u;  // 528 filterbank chain + 576 lookahead
                                  // (both signal paths since PLAN 10.9)
-        uint32_t pad = 0;
+        uint32_t pad = enc->end_pad;
+        if (pad > 0xFFFu) pad = 0xFFFu;    // 12-bit field
         out[off++] = static_cast<uint8_t>(delay >> 4);
         out[off++] = static_cast<uint8_t>(((delay & 0xF) << 4) | (pad >> 8));
         out[off++] = static_cast<uint8_t>(pad & 0xFF);
@@ -840,6 +853,7 @@ static const uint8_t* finish_frame(glint_t enc, GranuleInfo granule_info[2][2],
     }
 
     enc->frame_count++;
+    if (!enc->vbr_mode) enc->vbr_total_bytes += static_cast<uint32_t>(*out_size);
     if (enc->write_cb && *out_size > 0)
         enc->write_cb(enc->output_buf, *out_size, enc->write_cb_data);
     return enc->output_buf;
@@ -1329,7 +1343,6 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
         if (out_size) *out_size = 0;
         return nullptr;
     }
-
     int nch = enc->num_channels;
     bool use_ms = (enc->config.mode == GLINT_JOINT && nch == 2);
 
@@ -1432,10 +1445,26 @@ const uint8_t* glint_encode_float(glint_t enc, const float** channel_data,
     int total_main_bits = 0;
     int mode_ext = 0;
 
-    // Subband analysis using float input (no int16 truncation)
+    // Subband analysis using float input (no int16 truncation). A NaN or Inf
+    // here would enter the filterbank's overlap state and stay in the stream
+    // for the rest of the file, so the frame is checked once and the bad
+    // samples are replaced with silence before analysis.
     double sb_new[2][32][36];
-    for (int ch = 0; ch < nch; ch++)
-        enc->subband[ch].analyze_float(channel_data[ch], sb_new[ch], num_slots);
+    std::vector<float> clean[2];
+    for (int ch = 0; ch < nch; ch++) {
+        const float* src = channel_data[ch];
+        const int count = num_slots * 32;
+        bool finite = true;
+        for (int i = 0; i < count && finite; i++)
+            if (!std::isfinite(src[i])) finite = false;
+        if (!finite) {
+            clean[ch].assign(src, src + count);
+            for (int i = 0; i < count; i++)
+                if (!std::isfinite(clean[ch][(size_t)i])) clean[ch][(size_t)i] = 0.0f;
+            src = clean[ch].data();
+        }
+        enc->subband[ch].analyze_float(src, sb_new[ch], num_slots);
+    }
 
     // One-granule encoder delay: the emitted frame is the held granule
     // followed by this call's granules except the last, which becomes the
@@ -1670,8 +1699,9 @@ const uint8_t* glint_flush(glint_t enc, int* out_size) {
 
     // Release the reservoir's buffered frames (CBR; VBR frames are emitted
     // immediately and there is nothing to drain).
+    int drained = 0;
     if (!enc->vbr_mode) {
-        int drained = enc->reservoir.flush(
+        drained = enc->reservoir.flush(
             enc->output_buf + total,
             static_cast<int>(sizeof(enc->output_buf)) - total);
         if (enc->write_cb && drained > 0)
@@ -1679,6 +1709,26 @@ const uint8_t* glint_flush(glint_t enc, int* out_size) {
         total += drained;
     }
     *out_size = total;
+
+    // The reservoir drain above bypasses finish_frame(), which is what counts
+    // bytes for the tag, so add it here or the byte count misses every frame
+    // flush() released.
+    if (!enc->vbr_mode) enc->vbr_total_bytes += static_cast<uint32_t>(drained);
+
+    // End padding for the CBR Info tag. The decoder removes 1633 from the head
+    // (encoder delay 1104 plus its own 529) and max(0, pad - 529) from the
+    // tail, so the decoded length is
+    //   L = frame_count*1152 - 1633 - max(0, pad - 529)
+    // and L has to equal the caller's sample count n. Solving for the tail:
+    //   tail = frame_count*1152 - 1633 - n
+    // which is written below as pad = tail + 529.
+    {
+        const long long spf = glint_samples_per_frame(enc);
+        const long long n = (long long)enc->input_samples;
+        long long tail = (long long)enc->frame_count * spf - 1633 - n;
+        if (tail < 0) tail = 0;
+        enc->end_pad = (tail > 0) ? (uint32_t)(tail + kMp3DecoderDelay) : 0u;
+    }
     return enc->output_buf;
 }
 
@@ -1688,6 +1738,34 @@ int glint_vbr_header(glint_t enc, uint8_t* buf, int buf_capacity) {
     return build_xing_frame(enc, buf, true);
 }
 
+// CBR has no placeholder frame in the stream, so the caller writes this tag
+// in FRONT of the output: the returned frame is the whole tag, and every
+// offset inside it starts from byte 0. Internal: the one-call wrapper in
+// encode_audio_c_api.cpp is the only caller, and it has the context type.
+int glint_cbr_header(glint_t enc, uint8_t* buf, int buf_capacity) {
+    if (!enc || !buf || enc->vbr_mode || enc->frame_count == 0) return 0;
+    int size = build_xing_frame(enc, buf, true);
+    if (buf_capacity < size) return 0;
+    // build_xing_frame() ships the frame count from the VBR counters, which a
+    // CBR stream never increments; write the real ones over the top. The byte
+    // count describes the FILE, so it includes this tag frame as well as the
+    // audio that follows it.
+    const int p = 4 + enc->side_info_bits / 8;
+    if (p + 36 > size) return 0;
+    uint32_t frames = static_cast<uint32_t>(enc->frame_count);
+    uint32_t bytes = enc->vbr_total_bytes + static_cast<uint32_t>(size);
+    for (int i = 0; i < 4; i++) {
+        buf[p + 8 + i] = static_cast<uint8_t>(frames >> (24 - 8 * i));
+        buf[p + 12 + i] = static_cast<uint8_t>(bytes >> (24 - 8 * i));
+    }
+    return size;
+}
+
+void glint_set_input_samples(glint_t enc, uint64_t samples) {
+    if (enc) enc->input_samples = samples;
+}
+
 void glint_destroy(glint_t enc) {
     delete enc;
 }
+

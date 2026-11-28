@@ -17,6 +17,7 @@
 
 #include <cstdio>
 #include <cmath>
+#include <limits>
 #include <cstring>
 #include <cassert>
 
@@ -1003,6 +1004,219 @@ static void test_opus_packet_parse() {
 // Decoder C ABI: encode a tone through the public MP3/AAC encoder, decode
 // it back through the public decoder ABI, and check the roundtrip energy
 // and sample count. Validates the frame_info walkers + decode wiring.
+// The one-call encoder must produce a file that decodes to exactly the number
+// of samples it was given. CBR carries the count in an Info/LAME tag; VBR
+// rewrites its Xing placeholder. Before the delay/padding bookkeeping both
+// paths decoded long, by a different amount for every input length.
+// The decoder removes delay + 529 from the head and max(0, pad - 529) from the
+// tail, so for a stream of F frames the decoded length is
+//   F*1152 - (delay + 529) - max(0, pad - 529)
+// The two 529s cancel, which means the length depends only on delay + pad and
+// a whole family of tag pairs gives the same take. This checks that property
+// directly: splice tags carrying different splits of the same sum in front of a
+// real stream and require every one to decode to the same length.
+static void test_mp3_tag_pair_family() {
+    std::printf("[mp3 tag] delay and pad trade against each other...\n");
+    const int sr = 44100, n = 44100, ch = 2;
+    std::vector<float> pcm((size_t)n * ch);
+    for (int i = 0; i < n; i++) {
+        float v = 0.25f * (float)std::sin(2 * M_PI * 440.0 * i / sr);
+        pcm[(size_t)i * 2] = v;
+        pcm[(size_t)i * 2 + 1] = v;
+    }
+    int size = 0;
+    uint8_t* mp3 = glint_encode_audio(pcm.data(), n, ch, sr, GLINT_ENC_MP3,
+                                      192, -1, GLINT_QUALITY_NORMAL, &size);
+    CHECK(mp3 != nullptr, "tag family: encode");
+
+    // The tag frame the encoder wrote: 64 kbps, so 144*64000/sr plus its pad bit.
+    const int tag_pad = (mp3[2] >> 1) & 1;
+    const int tag_bytes = (144 * 64000) / sr + tag_pad;
+    CHECK(tag_bytes > 0 && tag_bytes < size, "tag family: tag frame fits");
+
+    // What the encoder's own tag claims, read the way a player finds it.
+    int sum = 0;
+    {
+        const int q = 173;  // "Xing" at 36, encoder string at 152, +21
+        const int delay = (mp3[q] << 4) | (mp3[q + 1] >> 4);
+        const int pad = ((mp3[q + 1] & 0xF) << 8) | mp3[q + 2];
+        sum = delay + pad;
+    }
+    CHECK(sum > 0, "tag family: delay + pad is written");
+
+    // Same total, three different splits, one of which sits below the 529
+    // clamp on the pad side to prove the clamp is not what decides.
+    const int splits[3][2] = {{1104, sum - 1104},
+                              {sum - 1104, 1104},
+                              {1333, sum - 1333}};
+    int first_len = -1;
+    for (int k = 0; k < 3; k++) {
+        const int delay = splits[k][0], pad = splits[k][1];
+        if (delay < 0 || delay > 0xFFF || pad < 0 || pad > 0xFFF) continue;
+
+        std::vector<uint8_t> file(mp3, mp3 + tag_bytes);
+        file.resize((size_t)tag_bytes, 0);
+        std::memcpy(&file[36], "Xing", 4);
+        file[40] = 0; file[41] = 0; file[42] = 0; file[43] = 0x07;
+        std::memcpy(&file[52], "LAMEglint", 9);
+        file[173] = (uint8_t)(delay >> 4);
+        file[174] = (uint8_t)(((delay & 0xF) << 4) | ((pad >> 8) & 0x0F));
+        file[175] = (uint8_t)(pad & 0xFF);
+        file.insert(file.end(), mp3 + tag_bytes, mp3 + size);
+
+        int got_sr = 0, got_ch = 0, frames = 0;
+        float* back = glint_decode_audio(file.data(), (int)file.size(),
+                                         &got_sr, &got_ch, &frames);
+        CHECK(back != nullptr, "tag family: decode");
+        if (first_len < 0) first_len = frames;
+        if (frames != first_len) {
+            std::printf("  split delay=%d pad=%d decoded %d, expected %d\n",
+                        delay, pad, frames, first_len);
+        }
+        CHECK(frames == first_len, "same delay+pad gives the same take");
+        glint_free(back);
+    }
+    std::free(mp3);
+}
+
+static void test_mp3_take_length() {
+    std::printf("[mp3 take length] decoded length == input length...\n");
+    const int sr = 44100;
+    const int lens[] = {671, 1152, 2205, 4410, 22050, 44100};
+    for (int k = 0; k < 6; k++) {
+        const int n = lens[k];
+        std::vector<float> pcm((size_t)n * 2);
+        for (int i = 0; i < n; i++) {
+            float v = 0.25f * (float)std::sin(2 * M_PI * 440.0 * i / sr);
+            pcm[(size_t)i * 2] = v;
+            pcm[(size_t)i * 2 + 1] = v;
+        }
+        for (int vbr = 0; vbr < 2; vbr++) {
+            int size = 0;
+            uint8_t* mp3 = glint_encode_audio(pcm.data(), n, 2, sr,
+                                              GLINT_ENC_MP3, 192,
+                                              vbr ? 4 : -1,
+                                              GLINT_QUALITY_NORMAL, &size);
+            CHECK(mp3 != nullptr, "mp3 one-call encode");
+            int got_sr = 0, got_ch = 0, frames = 0;
+            float* back = glint_decode_audio(mp3, size, &got_sr, &got_ch,
+                                             &frames);
+            CHECK(back != nullptr, "mp3 one-call decode");
+            if (frames != n) {
+                std::printf("  n=%d %s decoded %d\n", n,
+                            vbr ? "VBR" : "CBR", frames);
+            }
+            CHECK(frames == n, "decoded length equals input length");
+            glint_free(back);
+            std::free(mp3);
+        }
+    }
+}
+
+// Issue #2 item 2: CBR output carried no Info/LAME tag, so a player had
+// nothing to trim with and showed the raw frame time. A CBR file must now
+// start with a tag frame a player recognises, and it must describe the file:
+// the frame count and byte count have to match the bytes actually present.
+static void test_mp3_cbr_tag_present() {
+    std::printf("[mp3 tag] CBR output carries an Info/LAME tag...\n");
+    const int sr = 44100, n = 2205, ch = 2;   /* the issue's 50 ms */
+    std::vector<float> pcm((size_t)n * ch);
+    for (int i = 0; i < n; i++) {
+        float v = 0.3f * (float)std::sin(2 * M_PI * 440.0 * i / sr);
+        pcm[(size_t)i * 2] = v;
+        pcm[(size_t)i * 2 + 1] = v;
+    }
+    int size = 0;
+    uint8_t* mp3 = glint_encode_audio(pcm.data(), n, ch, sr, GLINT_ENC_MP3,
+                                      192, -1, GLINT_QUALITY_NORMAL, &size);
+    CHECK(mp3 != nullptr, "cbr tag: encode");
+    CHECK(size > 200, "cbr tag: stream produced");
+
+    /* A player looks for the tag after the header and the side info: MPEG-1
+       stereo has 32 bytes of side info, so byte 36. */
+    const int tag = 36;
+    const bool named = !std::memcmp(mp3 + tag, "Info", 4) ||
+                       !std::memcmp(mp3 + tag, "Xing", 4);
+    CHECK(named, "cbr tag: Info/Xing frame at byte 36");
+
+    const bool lame = [&] {
+        for (int i = 0; i + 4 < size; i++)
+            if (!std::memcmp(mp3 + i, "LAME", 4)) return true;
+        return false;
+    }();
+    CHECK(lame, "cbr tag: LAME extension present");
+
+    /* The counts must describe the file, or a player will still get it wrong. */
+    const uint32_t frames = ((uint32_t)mp3[tag + 8] << 24) |
+                            ((uint32_t)mp3[tag + 9] << 16) |
+                            ((uint32_t)mp3[tag + 10] << 8) | mp3[tag + 11];
+    const uint32_t bytes = ((uint32_t)mp3[tag + 12] << 24) |
+                           ((uint32_t)mp3[tag + 13] << 16) |
+                           ((uint32_t)mp3[tag + 14] << 8) | mp3[tag + 15];
+    CHECK(frames > 0, "cbr tag: frame count written");
+    CHECK(bytes > 0, "cbr tag: byte count written");
+    if (bytes != (uint32_t)size) {
+        std::printf("  tag says %u bytes, file is %d\n", bytes, size);
+    }
+    CHECK(bytes == (uint32_t)size, "cbr tag: byte count matches the file");
+
+    /* And the tag must actually do its job. */
+    int got_sr = 0, got_ch = 0, got = 0;
+    float* back = glint_decode_audio(mp3, size, &got_sr, &got_ch, &got);
+    CHECK(got == n, "cbr tag: 50 ms decodes as 50 ms");
+    glint_free(back);
+    std::free(mp3);
+}
+
+// Issue #2 item 3: non-finite samples reached the filterbank and damaged the
+// output. Measured on the unpatched library, +Inf or -Inf at the last sample
+// decodes to a peak of 1.3e10 instead of 0.3 - damage that is large but still
+// finite, so an isfinite() check would miss it. The assertion is on the peak.
+static void test_mp3_non_finite_input() {
+    std::printf("[mp3 non-finite] NaN and Inf do not poison the output...\n");
+    const int sr = 44100, n = 22050, ch = 2;
+    const float bad[3] = {std::numeric_limits<float>::quiet_NaN(),
+                          std::numeric_limits<float>::infinity(),
+                          -std::numeric_limits<float>::infinity()};
+    for (int b = 0; b < 3; b++) {
+        for (int where : {0, n / 2, n - 1}) {
+            std::vector<float> pcm((size_t)n * ch);
+            for (int i = 0; i < n; i++) {
+                float v = 0.3f * (float)std::sin(2 * M_PI * 440.0 * i / sr);
+                pcm[(size_t)i * 2] = v;
+                pcm[(size_t)i * 2 + 1] = v;
+            }
+            pcm[(size_t)where * 2] = bad[b];
+            pcm[(size_t)where * 2 + 1] = bad[b];
+            int size = 0;
+            uint8_t* mp3 = glint_encode_audio(pcm.data(), n, ch, sr,
+                                              GLINT_ENC_MP3, 192, -1,
+                                              GLINT_QUALITY_NORMAL, &size);
+            CHECK(mp3 != nullptr, "non-finite: encode");
+            int got_sr = 0, got_ch = 0, frames = 0;
+            float* back = glint_decode_audio(mp3, size, &got_sr, &got_ch,
+                                             &frames);
+            CHECK(back != nullptr, "non-finite: decode");
+            int nonfinite = 0;
+            double peak = 0;
+            for (int i = 0; i < frames * got_ch; i++) {
+                const float v = back[(size_t)i];
+                if (!std::isfinite(v)) nonfinite++;
+                else if (std::fabs(v) > peak) peak = std::fabs(v);
+            }
+            if (nonfinite || peak > 2.0) {
+                std::printf("  b=%d where=%5d: non-finite %d, peak %.3g\n",
+                            b, where, nonfinite, peak);
+            }
+            CHECK(nonfinite == 0, "non-finite: every output sample is finite");
+            // The input is a 0.3-amplitude tone; a correct encode stays near it.
+            CHECK(peak <= 2.0, "non-finite: output peak stays in range");
+            glint_free(back);
+            std::free(mp3);
+        }
+    }
+}
+
 static void test_mp3_decoder_api() {
     std::printf("[mp3 decoder API] encode -> decode roundtrip...\n");
     const int sr = 44100, spf_hint = 1152, nframes = 40, ch = 2;
@@ -1376,6 +1590,10 @@ int main() {
     test_opus_celt_alloc_mdct();
     test_opus_packet_parse();
     test_opus_c_api_roundtrip();
+    test_mp3_tag_pair_family();
+    test_mp3_take_length();
+    test_mp3_cbr_tag_present();
+    test_mp3_non_finite_input();
     test_mp3_decoder_api();
     test_aac_decoder_api();
 
