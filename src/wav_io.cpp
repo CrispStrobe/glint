@@ -148,11 +148,11 @@ float sample_to_float(const uint8_t* d, uint16_t fmt, int bps) {
 }
 
 void put32(std::vector<uint8_t>& v, uint32_t x) {
-    v.push_back(x); v.push_back(x >> 8);
-    v.push_back(x >> 16); v.push_back(x >> 24);
+    v.push_back(static_cast<uint8_t>(x)); v.push_back(static_cast<uint8_t>(x >> 8));
+    v.push_back(static_cast<uint8_t>(x >> 16)); v.push_back(static_cast<uint8_t>(x >> 24));
 }
 void put16(std::vector<uint8_t>& v, uint16_t x) {
-    v.push_back(x); v.push_back(x >> 8);
+    v.push_back(static_cast<uint8_t>(x)); v.push_back(static_cast<uint8_t>(x >> 8));
 }
 
 }  // namespace

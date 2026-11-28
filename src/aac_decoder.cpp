@@ -2,6 +2,7 @@
 // MIT License - Clean-room from ISO/IEC 14496-3 (AAC-LC, ADTS).
 
 #include "aac_decoder.hpp"
+#include "env.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -675,7 +676,7 @@ int AacDecoder::decode_frame(const uint8_t* data, int len, float* pcm,
 
                 // ---- pulse / tns / gain ----
                 int pulse_present = br.get1();
-                if (pulse_present) { if(std::getenv("AACDBG"))std::fprintf(stderr,"[PULSE]"); return -2; }
+                if (pulse_present) { if(glint::glint_getenv("AACDBG"))std::fprintf(stderr,"[PULSE]"); return -2; }
                 int tns_present = br.get1();
                 std::memset(tns_nf_[ch], 0, sizeof(tns_nf_[ch]));
                 if (tns_present) {
@@ -743,7 +744,7 @@ int AacDecoder::decode_frame(const uint8_t* data, int len, float* pcm,
                     }
                 }
                 int gain_present = br.get1();
-                if (gain_present) { if(std::getenv("AACDBG"))std::fprintf(stderr,"[GAIN]"); return -2; }
+                if (gain_present) { if(glint::glint_getenv("AACDBG"))std::fprintf(stderr,"[GAIN]"); return -2; }
 
                 // ---- spectral_data ----
                 std::memset(coef_[ch], 0, sizeof(coef_[ch]));
