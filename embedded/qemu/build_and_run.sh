@@ -28,7 +28,7 @@ $CC  $FLAGS -c startup.c -o /tmp/gq_startup.o
 $CC  $FLAGS -c glue.c -o /tmp/gq_glue.o
 $CC  $FLAGS -c $ROOT/embedded/bench/bench_core.c -o /tmp/gq_bench.o
 OBJS="/tmp/gq_startup.o /tmp/gq_glue.o /tmp/gq_bench.o"
-for f in subband mdct quantize huffman reservoir bitstream psycho encoder \
+for f in subband mdct quantize huffman reservoir bitstream psycho encoder env \
          aac_mdct aac_coder aac_psy aac_tns aac_encoder; do
   $CXX $FLAGS -c $ROOT/src/$f.cpp -o /tmp/gq_$f.o
   OBJS="$OBJS /tmp/gq_$f.o"

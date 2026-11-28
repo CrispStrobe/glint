@@ -671,7 +671,6 @@ int Mp3Decoder::decode_frame(const uint8_t* data, int len, float* pcm,
     BitReader br(body, body_len);
 
     const int* sfb_l = tables::get_sfb_long_by_unified(sr_unified);
-    const int* sfb_s = tables::get_sfb_short_by_unified(sr_unified);
 
     for (int gr = 0; gr < ngr; gr++) {
         for (int ch = 0; ch < nch; ch++) {

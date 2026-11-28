@@ -30,6 +30,7 @@ add_executable(glint_bench
     ${GLINT_ROOT}/src/bitstream.cpp
     ${GLINT_ROOT}/src/psycho.cpp
     ${GLINT_ROOT}/src/encoder.cpp
+    ${GLINT_ROOT}/src/env.cpp
     ${GLINT_ROOT}/src/aac_mdct.cpp
     ${GLINT_ROOT}/src/aac_coder.cpp
     ${GLINT_ROOT}/src/aac_psy.cpp

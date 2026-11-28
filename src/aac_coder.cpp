@@ -5,6 +5,7 @@
 #include "aac_mdct.hpp"
 #include "aac_tables.hpp"
 #include "intmath.hpp"
+#include "env.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -569,7 +570,7 @@ void aac_fit_channel_masked(const SpecT* spec, const AacBandLayout& L,
     // 4.54 -> 4.24 on speech; the cap restores it). The cap is absolute
     // (does not scale with the loudness knob).
     static const double kSnrMinDb =
-        getenv("GLINT_AAC_SNRMIN") ? atof(getenv("GLINT_AAC_SNRMIN")) : 10.0;
+        glint::glint_getenv("GLINT_AAC_SNRMIN") ? atof(glint::glint_getenv("GLINT_AAC_SNRMIN")) : 10.0;
     const double snr_lin = std::pow(10.0, kSnrMinDb / 10.0);
     double sf_base[kMaxSfb];
     double sf_cap[kMaxSfb];
@@ -590,9 +591,9 @@ void aac_fit_channel_masked(const SpecT* spec, const AacBandLayout& L,
             // Short-frame masks are cruder (no tonality, no temporal
             // masking) — trust them less.
             static const double kAlphaL =
-                getenv("GLINT_AAC_ALPHA") ? atof(getenv("GLINT_AAC_ALPHA")) : 0.6;
+                glint::glint_getenv("GLINT_AAC_ALPHA") ? atof(glint::glint_getenv("GLINT_AAC_ALPHA")) : 0.6;
             static const double kAlphaS =
-                getenv("GLINT_AAC_ALPHA_S") ? atof(getenv("GLINT_AAC_ALPHA_S")) : 0.2;
+                glint::glint_getenv("GLINT_AAC_ALPHA_S") ? atof(glint::glint_getenv("GLINT_AAC_ALPHA_S")) : 0.2;
             const double kAlpha =
                 ((L.window_sequence == 2) ? kAlphaS : kAlphaL) * alpha_scale;
             sf_base[b] = 100.0 + 2.0 * kAlpha * std::log2(12.0 * m / w);

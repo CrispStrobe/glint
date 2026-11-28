@@ -798,7 +798,7 @@ public:
                 vecs[j] = spec[chans[j]].data();
             }
             const Residue& r = s_.residues[map.submap_residue[sm]];
-            if (decode_residue(br, r, half, chans.size(), dnd.data(),
+            if (decode_residue(br, r, half, static_cast<int>(chans.size()), dnd.data(),
                                vecs.data()) != 0)
                 return -1;
         }
